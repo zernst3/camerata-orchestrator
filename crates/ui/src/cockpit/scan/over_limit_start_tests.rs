@@ -408,6 +408,7 @@ async fn a_file_over_the_limit_does_not_stop_the_run_from_starting() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "j1"})))
         .mount(&server)
         .await;
+    super::preflight_start_tests::mount_open_plan(&server).await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
     let mut vdom = VirtualDom::new(results_with_a_selected_rule);
@@ -428,6 +429,12 @@ async fn a_file_over_the_limit_does_not_stop_the_run_from_starting() {
         .clickable(crate::cockpit::rules::RUN_INSPECTION_ID)
         .expect("the Start button has a click handler");
     click(&mut vdom, start);
+    pump(&mut vdom, &mut seen, 1_500).await;
+    // Start in the pre-flight panel sends the inspection (#564).
+    let go = seen
+        .clickable(super::PREFLIGHT_START_ID)
+        .expect("the pre-flight's Start has a click handler");
+    click(&mut vdom, go);
     pump(&mut vdom, &mut seen, 1_500).await;
     let starts = server
         .received_requests()

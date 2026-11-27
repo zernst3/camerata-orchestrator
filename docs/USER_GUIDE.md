@@ -1470,8 +1470,8 @@ OpenRouter id cannot slip through when a model list is empty.
 7. Tick **Full scan** on the scan screen. After a scan with a complete AI review, the app keeps a
    baseline, so a later default scan reviews only changed files or skips the AI review as fully
    cached.
-8. Optional: set a **Spend limit (USD)** if you want the Cost panel and the pause. With none, the run
-   goes to completion with no panel.
+8. Set a **Spend limit (USD)**. A client inspection does not start without one (§3c step 4). An
+   internal session may leave it blank; the run then goes to completion with no Cost panel.
 9. Run the scan (§3c).
 
 **The same run for an internal session (the operator's own development).** Project **Settings**:
@@ -1509,12 +1509,36 @@ This is the order of a paid run, with every control the scan screen shows.
 | **What to scan** | Two checkboxes, both on by default: **AI architectural review** and **Deterministic scans (floor + linters)**. Untick AI for a free, token-free pass. At least one must be ticked; unticking both runs both. |
 | **Scan mode** | A select: **Default (batch on the API backend, else parallel)**, **Parallel (real time)**, **Sequential (real time, slower, gentlest)**, **Background job (walk away, default mode)** or **Batch (50% off, async, API key required)**. The app picks for the scan's size and marks it "✓ auto-selected for this scan's size": Background job for more than one repo or more than 150 files, otherwise Default. The agent finder is not batched (each piece is a live conversation). |
 | **Full scan** | Tick **Re-scan every file (ignore the incremental cache)**. Off by default: a re-scan sends only files changed since the last scan and reuses the rest. The first scan is full regardless. Tick it when the finder is Agent. |
-| **Spend limit (USD)** | Optional. Blank is "no limit". See step 4. A value that is not a positive amount is refused with "The spend limit "x" is not a positive dollar amount. Enter a number such as 25, or clear the field for no limit." A leading `$` and thousands commas are accepted. |
+| **Spend limit (USD)** | Required for a client inspection; optional when **Client engagement** is off, where blank is "no limit". See step 4. A value that is not a positive amount is refused with "The spend limit "x" is not a positive dollar amount. Enter a number such as 25, or clear the field for no limit." A leading `$` and thousands commas are accepted. The pre-flight (step 3a) suggests a limit. |
 | **Deep compliance & security (opt-in)** | Adds about three extra whole-repo passes (SOC-2 gap analysis, deep security audit, threat model). The most expensive option; advisory only (§11). |
 
-The scan starts from **Audit code against selected rules** (the button at the rules table; it
-shows "Auditing..." while it runs). With no rule ticked a toast says "Select at least one rule
-(tick its checkbox) to audit against."
+**Inspect code against selected rules** (the button at the rules table) opens the pre-flight (step
+3a); **Start inspection** in the pre-flight sends the inspection, and the button then shows
+"Inspecting..." while it runs. With no rule ticked a toast says "Select at least one rule (tick its
+checkbox) to inspect against."
+
+**3a. The pre-flight before Start.** The panel headed **Pre-flight** shows what
+`camerata inspect --plan-only` prints for the same inspection, worked out by the server with no model
+call and no credential read: the lines and the files admitted, each repo's files left out by reason,
+the projected cost (projected, API prices), the suggested spend limit (the one `camerata count
+--estimate` gives: 1.5 times its full-scan figure), the spend limit the run would go under and every
+warning (a file over the read limit is one). **The plan as the command line prints it** opens the full
+text. **Start inspection** is off while the pre-flight is worked out and when the server says the start
+would be refused, with the reason shown in the panel:
+
+- a client inspection with a blank spend limit: "This client inspection did not start: it needs a
+  spend limit. Enter a spend limit above zero in US dollars (the pre-flight suggests one), then start
+  again. Nothing was read and no model was called."
+- a spend limit under the projection, refused as the command line refuses it: "This inspection did not
+  start. The pre-flight says a real run would refuse to go on: the spend limit is under the
+  projection..." followed by the amount a limit must reach.
+
+Changing a run choice (the checks, the mode, Full inspection, the spend limit or Deep) closes the
+pre-flight, so the inspection sent is always the one the pre-flight was shown for; press Inspect again.
+**Back** closes it without sending anything. The server makes the same two checks when a start reaches
+it (`POST /api/onboard/audit/start`, and the synchronous `POST /api/onboard/audit`), so a start from
+any client is refused the same way. The pre-flight itself is `POST /api/onboard/plan`, with the same
+body as a start.
 
 **3. The pre-flight estimate** (the audit-cost box above the button, before any model call).
 "Estimated cost ~$X, ~N tokens, P pass(es), S rule(s)". With several repos there is a line for each
@@ -1534,11 +1558,13 @@ repo (§3b); the group review and the fix stage come on top. After the run, the 
 no cost the dollar figure shows "n/a" rather than understating; the API backend also shows the prompt
 cache written and read.
 
-**4. The spend limit.** The scan stops between passes once its actual AI spend reaches the limit,
-lists every pass it did not run and marks the result incomplete (§11a). Passes already started
-finish, so a run can end about one pass over. Every model the run uses needs a known price, or the
-run refuses to start and names the model. With **no limit the run goes to completion whatever it
-costs**.
+**4. The spend limit.** A client inspection (the project's **Client engagement** on, or no project)
+does not start without a spend limit above zero; the job fails at once with the reason and nothing is
+read. A limit under the pre-flight's projection is refused the same way. The scan stops between passes
+once its actual AI spend reaches the limit, lists every pass it did not run and marks the result
+incomplete (§11a). Passes already started finish, so a run can end about one pass over. Every model the
+run uses needs a known price, or the run refuses to start and names the model. On an internal session
+with **no limit the run goes to completion whatever it costs**.
 
 **5. The live cost panel.** The **Cost** panel needs a spend limit: with no limit there is no panel. With
 the **agent finder** and a limit, it appears once the first piece finishes and updates after each piece.
@@ -2628,6 +2654,13 @@ over how many model calls, and the basis it is built on (characters of code, num
 models, the mode and backend). It is an estimate, not a quote. On the API backend it also prints the
 exact input size of one scan pass, counted by the API for free. A repeat run on an unchanged tree
 reuses the previous findings and costs less than the estimate.
+
+`camerata inspect --plan-only` prints the same figures without starting: what a real run would admit
+(files and lines, and the files left out by reason), the pieces, the pre-flight, the full-scan
+estimate with its suggested spend limit (the figures `camerata count --estimate` prints), the spend
+limit it would run under and every warning, then exits non-zero when a real run would refuse (a limit
+under the projection). It makes no model call, reads no credential and saves nothing. The app's
+pre-flight (§3c step 3a) is the same computation.
 
 To put a ceiling on a run, add `--max-cost-usd 25`. The run stops BETWEEN passes once its actual
 spend reaches the limit; it never cuts a pass off halfway. The limit is checked before each scan pass,
@@ -3743,6 +3776,8 @@ Each entry is a message or symptom the app can show, with its meaning and the ne
 | "This is a client engagement, so every model must be an Anthropic API model (an id starting with `claude-`)... group review is set to `x`..." | One of the models the run would call is not an Anthropic model. The message names each one. | Pick a Claude model for the stage named (§3b). |
 | "The spend limit cannot be enforced: `x` has no price in the model registry... Nothing was run." | A spend limit is set and a model has no known price. | Choose a priced model or remove the limit. |
 | "The spend limit "x" is not a positive dollar amount. Enter a number such as 25, or clear the field for no limit." | The Spend limit field holds a typo. | Fix or clear it. A typo never means "no limit". |
+| "This client inspection did not start: it needs a spend limit..." | A client inspection was started with a blank or zero spend limit (§3c step 4). | Enter a spend limit; the pre-flight suggests one. |
+| "This inspection did not start. The pre-flight says a real run would refuse to go on: the spend limit is under the projection..." | The spend limit is below what the pre-flight projects (§3c step 3a). | Raise the limit to at least the amount named, then start again. |
 | Refused before the first model call on the CLI backend, naming a version and "update Claude Code, or set `CAMERATA_CLAUDE_PROGRAM`" | The `claude` program is too old for a model the run calls (`claude-fable-5-2` needs 2.1.290 or newer), or its version could not be read. | Update Claude Code, or point `CAMERATA_CLAUDE_PROGRAM` at a newer binary (an absolute path). |
 | "--finder agent cannot be combined with --consensus" | The two options contradict (command line). | Drop `--consensus`. |
 | "--finder agent needs a full inspection ... Pass --full" | An earlier inspection of the same code exists (command line). | Add `--full`. |

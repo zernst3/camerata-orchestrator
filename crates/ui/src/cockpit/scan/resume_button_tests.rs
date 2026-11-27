@@ -215,6 +215,7 @@ fn every_picked_scan_mode_runs_as_a_saved_job_and_background_job_is_the_server_d
 struct Wired {
     listeners: Vec<(String, ElementId)>,
     tours: Vec<(String, ElementId)>,
+    ids: Vec<(String, ElementId)>,
 }
 
 impl Wired {
@@ -228,6 +229,12 @@ impl Wired {
                     id,
                     ..
                 } => self.tours.push((text.clone(), *id)),
+                Mutation::SetAttribute {
+                    name: "id",
+                    value: dioxus::dioxus_core::AttributeValue::Text(text),
+                    id,
+                    ..
+                } => self.ids.push((text.clone(), *id)),
                 _ => {}
             }
         }
@@ -244,6 +251,24 @@ impl Wired {
             self.listeners.iter().any(|(n, i)| n == "click" && *i == id),
             "the {tour} element has no click listener"
         );
+        let data: Box<dyn std::any::Any> = Box::new(dioxus::html::SerializedMouseData::default());
+        let platform: std::rc::Rc<dyn std::any::Any> =
+            std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+        vdom.runtime()
+            .handle_event("click", dioxus::dioxus_core::Event::new(platform, true), id);
+    }
+}
+
+impl Wired {
+    /// Press Start in the pre-flight panel (#564): the click that sends the inspection.
+    fn click_preflight_start(&self, vdom: &VirtualDom) {
+        let id = self
+            .ids
+            .iter()
+            .rev()
+            .find(|(t, _)| t == super::PREFLIGHT_START_ID)
+            .map(|(_, id)| *id)
+            .unwrap_or_else(|| panic!("no pre-flight Start: {:?}", self.ids));
         let data: Box<dyn std::any::Any> = Box::new(dioxus::html::SerializedMouseData::default());
         let platform: std::rc::Rc<dyn std::any::Any> =
             std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
@@ -314,6 +339,7 @@ async fn stub_for_a_scan_run(server: &MockServer) {
         })))
         .mount(server)
         .await;
+    super::preflight_start_tests::mount_open_plan(server).await;
 }
 
 fn job_poll(status: &str, report: serde_json::Value, message: Option<&str>) -> serde_json::Value {
@@ -378,6 +404,8 @@ async fn the_audit_button_in_default_mode_starts_a_saved_job_and_run_what_remain
     );
 
     wired.click_tour(&vdom, "run-inspection");
+    pump_wired(&mut vdom, &mut wired, 1_500).await;
+    wired.click_preflight_start(&vdom);
     pump_wired(&mut vdom, &mut wired, 3_000).await;
 
     assert_eq!(
@@ -424,6 +452,8 @@ async fn a_client_lock_refusal_is_shown_as_the_servers_own_refusal_not_a_backend
     wired.take(&vdom.rebuild_to_vec());
     pump_wired(&mut vdom, &mut wired, 800).await;
     wired.click_tour(&vdom, "run-inspection");
+    pump_wired(&mut vdom, &mut wired, 1_500).await;
+    wired.click_preflight_start(&vdom);
     pump_wired(&mut vdom, &mut wired, 3_000).await;
 
     let html = dioxus_ssr::render(&vdom);
@@ -691,6 +721,8 @@ async fn a_partial_run_refusal_shows_the_servers_text_and_no_backend_setup_hint(
     wired.take(&vdom.rebuild_to_vec());
     pump_wired(&mut vdom, &mut wired, 800).await;
     wired.click_tour(&vdom, "run-inspection");
+    pump_wired(&mut vdom, &mut wired, 1_500).await;
+    wired.click_preflight_start(&vdom);
     pump_wired(&mut vdom, &mut wired, 3_000).await;
 
     let html = dioxus_ssr::render(&vdom);

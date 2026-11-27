@@ -69,6 +69,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // threat model) after the standard audit and attaches the results as `report.deep`.
     // Output is ADVISORY — never a SOC-2 report or a penetration test.
     let mut audit_deep = use_signal(|| false);
+    // The pre-flight of the inspection the operator asked for, and that inspection, held until
+    // Start in the pre-flight panel sends it (#564). A change to the run's choices closes it.
+    let mut preflight = use_signal(|| Option::<PreflightState>::None);
+    let mut pending_start = use_signal(|| Option::<PendingStart>::None);
     // Checks to run: which kinds of check the run makes (see `ChecksToRun`). One select, the same
     // two request flags the two checkboxes it replaced sent.
     let mut checks = use_signal(|| camerata_ui_core::scan::inspection_run::ChecksToRun::All);
@@ -1465,13 +1469,87 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 job_exec_mode(&mode)
                             };
-                            // Clear the PREVIOUS run's findings so a re-audit starts from a
-                            // blank Findings table instead of showing stale results while
-                            // the new audit runs (the server also clears the transcript).
-                            // Also reset per-finding triage state, view filter, and the open
-                            // detail modal — they're specific to the previous run's findings.
-                            // repo_selection / chosen / custom_rules are NOT reset: those are
-                            // the architect's persistent rule choices that survive a re-audit.
+                            // The pre-flight first (#564): the plan of exactly this inspection is
+                            // fetched and shown, and Start in the panel sends it.
+                            let pending = PendingStart {
+                                repos,
+                                rules,
+                                exec_mode,
+                                incremental,
+                                deep,
+                                run_ai_review: ai,
+                                run_deterministic: det,
+                                max_cost_usd: max_cost,
+                            };
+                            job_failed_message.set(None);
+                            pending_start.set(Some(pending.clone()));
+                            preflight.set(Some(PreflightState::Loading));
+                            spawn(async move {
+                                let state = fetch_plan(&pending).await;
+                                // A newer Inspect or a Back while this was in flight wins.
+                                if pending_start.peek().as_ref() == Some(&pending) {
+                                    preflight.set(Some(state));
+                                }
+                            });
+                        },
+                    }
+                }
+            }
+
+            // ── 2. Inspect: the run block, the estimate, the progress and the cost ──────────
+            // The Inspect button is the rules table's (above); it acts on the ticked rules and on
+            // the choices here. The explanations live behind the "?" buttons.
+            div { class: "audit-cta",
+                p { class: "scan-section-h", "2. Inspect" }
+                p { class: "scan-section-sub", "Tick the rules above, then press \u{201c}Inspect code against selected rules\u{201d}." }
+                InspectionRunControls {
+                    finder,
+                    checks: checks(),
+                    on_checks: move |c| {
+                        checks.set(c);
+                        preflight.set(None);
+                        pending_start.set(None);
+                    },
+                    run_mode: audit_mode(),
+                    recommended_mode: recommended_mode.clone(),
+                    on_run_mode: move |m: String| {
+                        audit_mode.set(m);
+                        preflight.set(None);
+                        pending_start.set(None);
+                    },
+                    full_ticked: audit_full_scan(),
+                    on_full: move |v| {
+                        audit_full_scan.set(v);
+                        preflight.set(None);
+                        pending_start.set(None);
+                    },
+                    spend_limit: audit_spend_limit(),
+                    on_spend_limit: move |v: String| {
+                        audit_spend_limit.set(v);
+                        preflight.set(None);
+                        pending_start.set(None);
+                    },
+                    deep_available: feature_flags.soc2 && checks().uses_a_model(),
+                    deep: audit_deep(),
+                    on_deep: move |v| {
+                        audit_deep.set(v);
+                        preflight.set(None);
+                        pending_start.set(None);
+                    },
+                    busy: auditing(),
+                }
+                if let Some(state) = preflight() {
+                    PreflightPanel {
+                        state,
+                        on_back: move |()| {
+                            preflight.set(None);
+                            pending_start.set(None);
+                        },
+                        on_start: move |()| {
+                            let Some(p) = pending_start.take() else {
+                                return;
+                            };
+                            preflight.set(None);
                             audit.set(None);
                             // Decisions are the server's and carry across a re-audit by site key
                             // (an exact match keeps its decision; a moved or new site is
@@ -1504,7 +1582,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &exec_mode, incremental, deep, ai, det, max_cost).await else {
+                                    let Some(jid) = audit_job_start(&p.repos, &p.rules, &p.exec_mode, p.incremental, p.deep, p.run_ai_review, p.run_deterministic, p.max_cost_usd).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -1531,30 +1609,6 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             }
                         },
                     }
-                }
-            }
-
-            // ── 2. Inspect: the run block, the estimate, the progress and the cost ──────────
-            // The Inspect button is the rules table's (above); it acts on the ticked rules and on
-            // the choices here. The explanations live behind the "?" buttons.
-            div { class: "audit-cta",
-                p { class: "scan-section-h", "2. Inspect" }
-                p { class: "scan-section-sub", "Tick the rules above, then press \u{201c}Inspect code against selected rules\u{201d}." }
-                InspectionRunControls {
-                    finder,
-                    checks: checks(),
-                    on_checks: move |c| checks.set(c),
-                    run_mode: audit_mode(),
-                    recommended_mode: recommended_mode.clone(),
-                    on_run_mode: move |m: String| audit_mode.set(m),
-                    full_ticked: audit_full_scan(),
-                    on_full: move |v| audit_full_scan.set(v),
-                    spend_limit: audit_spend_limit(),
-                    on_spend_limit: move |v: String| audit_spend_limit.set(v),
-                    deep_available: feature_flags.soc2 && checks().uses_a_model(),
-                    deep: audit_deep(),
-                    on_deep: move |v| audit_deep.set(v),
-                    busy: auditing(),
                 }
                 // Wiring mechanical rules into CI only needs the SELECTED rules, not an inspection,
                 // and the post-inspection section below (which hosts the CI-wiring story) never

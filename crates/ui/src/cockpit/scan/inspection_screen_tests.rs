@@ -18,7 +18,7 @@ use super::*;
 
 // ── The mounted screen and what it has told us about its elements ─────────────────────────────
 
-struct Screen {
+pub(super) struct Screen {
     vdom: VirtualDom,
     by_html_id: HashMap<String, ElementId>,
     tours: Vec<(String, ElementId)>,
@@ -26,7 +26,7 @@ struct Screen {
 }
 
 impl Screen {
-    fn mount(app: fn() -> Element) -> Self {
+    pub(super) fn mount(app: fn() -> Element) -> Self {
         dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
         let mut vdom = VirtualDom::new(app);
         let mut screen = Self {
@@ -65,7 +65,7 @@ impl Screen {
         }
     }
 
-    async fn pump(&mut self, ms: u64) {
+    pub(super) async fn pump(&mut self, ms: u64) {
         let until = tokio::time::Instant::now() + Duration::from_millis(ms);
         while tokio::time::Instant::now() < until {
             let _ =
@@ -75,7 +75,7 @@ impl Screen {
         }
     }
 
-    fn html(&self) -> String {
+    pub(super) fn html(&self) -> String {
         dioxus_ssr::render(&self.vdom)
     }
 
@@ -103,7 +103,7 @@ impl Screen {
     }
 
     /// The operator types `text` into the text field with html id `html_id`.
-    fn type_into(&self, html_id: &str, text: &str) {
+    pub(super) fn type_into(&self, html_id: &str, text: &str) {
         let id = self.id_of(html_id);
         assert!(
             self.listeners.iter().any(|(n, i)| n == "input" && *i == id),
@@ -126,11 +126,11 @@ impl Screen {
             .handle_event("click", dioxus::dioxus_core::Event::new(data, true), id);
     }
 
-    fn click(&self, html_id: &str) {
+    pub(super) fn click(&self, html_id: &str) {
         self.click_id(self.id_of(html_id));
     }
 
-    fn click_tour(&self, tour: &str) {
+    pub(super) fn click_tour(&self, tour: &str) {
         let id = self
             .tours
             .iter()
@@ -163,7 +163,7 @@ impl Screen {
 // ── The stub server ─────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct SharedProject(Arc<Mutex<Value>>);
+pub(super) struct SharedProject(Arc<Mutex<Value>>);
 
 fn project_json(finder: &str) -> Value {
     json!({
@@ -208,7 +208,7 @@ impl Respond for StepModelsReply {
 
 /// What the preflight route answers for the one repo.
 #[derive(Clone, Copy)]
-enum Sizes {
+pub(super) enum Sizes {
     /// The repo, with the Agent finder's figures.
     Back,
     /// The server fails.
@@ -217,7 +217,7 @@ enum Sizes {
     Slow,
 }
 
-async fn stub_server(finder: &str, sizes: Sizes) -> (MockServer, SharedProject) {
+pub(super) async fn stub_server(finder: &str, sizes: Sizes) -> (MockServer, SharedProject) {
     let server = MockServer::start().await;
     let shared = SharedProject(Arc::new(Mutex::new(project_json(finder))));
     Mock::given(method("GET"))
@@ -269,10 +269,11 @@ async fn stub_server(finder: &str, sizes: Sizes) -> (MockServer, SharedProject) 
         .respond_with(preflight)
         .mount(&server)
         .await;
+    super::preflight_start_tests::mount_open_plan(&server).await;
     (server, shared)
 }
 
-async fn mount_job(server: &MockServer, status: &str) {
+pub(super) async fn mount_job(server: &MockServer, status: &str) {
     Mock::given(method("POST"))
         .and(path("/api/onboard/audit/start"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "job_id": "job-9" })))
@@ -321,7 +322,7 @@ fn providers(scan: Option<ScanReportView>) {
 }
 
 /// The inspection screen once rules are proposed.
-fn rules_proposed() -> Element {
+pub(super) fn rules_proposed() -> Element {
     providers(Some(the_report()));
     rsx! { OnboardView { connection: None } }
 }
@@ -336,7 +337,7 @@ fn start_screen() -> Element {
 
 /// The visible text of some markup: tags removed, entities for the few characters the renderer
 /// escapes put back.
-fn visible_text(html: &str) -> String {
+pub(super) fn visible_text(html: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
     for c in html.chars() {
@@ -377,7 +378,7 @@ fn block(html: &str, id: &str) -> String {
 }
 
 /// The opening tag of the element with html id `id`.
-fn tag_of(html: &str, id: &str) -> String {
+pub(super) fn tag_of(html: &str, id: &str) -> String {
     let at = html
         .find(&format!("id=\"{id}\""))
         .unwrap_or_else(|| panic!("no element {id}: {html}"));
@@ -395,7 +396,7 @@ fn button_of(html: &str, tour: &str) -> String {
     rest[..rest.find("</button>").unwrap()].to_string()
 }
 
-async fn requests_to(server: &MockServer, route: &str) -> Vec<Value> {
+pub(super) async fn requests_to(server: &MockServer, route: &str) -> Vec<Value> {
     server
         .received_requests()
         .await
@@ -592,6 +593,9 @@ async fn the_inspect_button_starts_a_saved_job_with_no_model_and_its_label_chang
 
     screen.click_tour("run-inspection");
     screen.pump(1500).await;
+    // Start in the pre-flight panel sends the inspection (#564).
+    screen.click(super::PREFLIGHT_START_ID);
+    screen.pump(1500).await;
 
     let started = requests_to(&server, "/api/onboard/audit/start").await;
     assert_eq!(started.len(), 1, "one saved job was started");
@@ -635,6 +639,9 @@ async fn an_engine_run_sends_the_pickers_it_still_has_and_never_a_model() {
     screen.pump(200).await;
     screen.click_tour("run-inspection");
     screen.pump(1500).await;
+    // Start in the pre-flight panel sends the inspection (#564).
+    screen.click(super::PREFLIGHT_START_ID);
+    screen.pump(1500).await;
     let started = requests_to(&server, "/api/onboard/audit/start").await;
     assert_eq!(started.len(), 1);
     let body = &started[0];
@@ -665,6 +672,9 @@ async fn full_inspection_and_the_spend_limit_reach_the_request_for_the_engine_fi
     screen.pump(200).await;
     screen.click_tour("run-inspection");
     screen.pump(1500).await;
+    // Start in the pre-flight panel sends the inspection (#564).
+    screen.click(super::PREFLIGHT_START_ID);
+    screen.pump(1500).await;
     let started = requests_to(&server, "/api/onboard/audit/start").await;
     assert_eq!(started.len(), 1);
     assert_eq!(
@@ -692,6 +702,9 @@ async fn an_agent_run_after_an_engine_pick_still_sends_every_file_and_the_defaul
     screen.pick("is-model-finder", "agent");
     screen.pump(900).await;
     screen.click_tour("run-inspection");
+    screen.pump(1500).await;
+    // Start in the pre-flight panel sends the inspection (#564).
+    screen.click(super::PREFLIGHT_START_ID);
     screen.pump(1500).await;
     let started = requests_to(&server, "/api/onboard/audit/start").await;
     assert_eq!(started.len(), 1);

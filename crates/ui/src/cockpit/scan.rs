@@ -106,6 +106,7 @@ mod exports;
 mod findings_table;
 mod inspection_run;
 mod onboard;
+mod preflight_panel;
 mod queue_table;
 mod repo_health;
 mod rescan;
@@ -118,6 +119,7 @@ pub use exports::*;
 pub use findings_table::*;
 pub(crate) use inspection_run::*;
 pub use onboard::*;
+pub(crate) use preflight_panel::*;
 pub use queue_table::*;
 pub use repo_health::*;
 pub use rescan::*;
@@ -219,6 +221,11 @@ mod over_limit_start_tests;
 /// estimate, the Inspect button and the help behind "?".
 #[cfg(test)]
 mod inspection_screen_tests;
+
+/// The pre-flight before Start (#564): Inspect shows the plan, Start in the panel sends it, and
+/// Start stays off when the server says it would refuse.
+#[cfg(test)]
+mod preflight_start_tests;
 
 /// Loading the saved draft never turns an unreadable part into "nothing saved".
 #[cfg(test)]
