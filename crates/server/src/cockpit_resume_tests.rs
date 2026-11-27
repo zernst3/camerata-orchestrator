@@ -1546,31 +1546,43 @@ async fn group_review_outage_ends_in_bounded_time(mode: &str) {
         crate::run_store::read_record(&rig.run_id).unwrap().status,
         crate::run_store::RunStatus::Incomplete
     );
-    // What the policy decided: it waited, no single call spent more than its 60 s budget waiting,
-    // and each wait is one of the schedule's steps (5, 20, 60 clipped to 35 for a 503; 2, 8, 30
-    // for a lost connection).
+    // What the policy decided: it waited, each send spent no more than its 60 s budget on the
+    // transport's quick retries (5, 20, 60 clipped to 35 for a 503; 2, 8, 30 for a lost
+    // connection), and between sends the call waited the long network wait (#582: 1, 2, 4 and 8
+    // minutes), five sends and fifteen minutes of network wait a call.
     let waits = recorder.0.secs();
     assert!(!waits.is_empty(), "the outage was retried: {waits:?}");
-    let allowed: &[u64] = if mode == "transport" {
+    let quick: &[u64] = if mode == "transport" {
         &[2, 8, 30]
     } else {
         &[5, 20, 35]
     };
+    let network: Vec<u64> = crate::network_wait::NETWORK_WAIT_STEPS
+        .iter()
+        .map(std::time::Duration::as_secs)
+        .collect();
+    let allowed: Vec<u64> = quick.iter().copied().chain(network.iter().copied()).collect();
     for w in &waits {
         assert!(
             allowed.contains(w),
             "wait {w} is not a step of {allowed:?}: {waits:?}"
         );
     }
-    let per_call: u64 = if mode == "transport" { 40 } else { 60 };
+    let quick_per_send: u64 = quick.iter().sum();
+    let per_call: u64 = quick_per_send * (network.len() as u64 + 1)
+        + crate::network_wait::NETWORK_WAIT_TOTAL.as_secs();
     assert_eq!(
         waits.iter().sum::<u64>() % per_call,
         0,
         "every call ran its whole schedule and no more: {waits:?}"
     );
     assert!(
-        waits.contains(allowed.last().unwrap()),
+        waits.contains(quick.last().unwrap()),
         "the last step of the schedule was taken (a 503's is clipped to the 35 s left): {waits:?}"
+    );
+    assert!(
+        waits.contains(network.last().unwrap()),
+        "the whole network wait was taken before the call failed: {waits:?}"
     );
     // The failed part is listed, so a resume knows what to run.
     let scan = rig.state.get_last_scan(&rig.project_id).unwrap();
