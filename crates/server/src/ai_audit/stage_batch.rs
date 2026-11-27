@@ -1682,6 +1682,44 @@ fn batch_is_gone(e: &anyhow::Error) -> bool {
     text.contains("HTTP 404") || text.contains("HTTP 410") || text.contains("not_found_error")
 }
 
+/// The rows of a resumed batch that answer no question this run asks (#582): never absorbed, but
+/// paid for. Each is metered at the batch price, so its cost is in the ledger and counts toward
+/// the spend limit, and is marked wasted, since nothing used it. A row that failed unbilled cost
+/// nothing and is skipped.
+fn meter_stale_rows(
+    stage: Stage,
+    ctx: &StageCtx<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    rows: Vec<BatchResultRow>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let n = rows.len();
+    let mut repricer = Repricer::new(ctx.model, ttl);
+    for row in rows {
+        let Some(mut resp) = row.response.or(row.billed) else {
+            continue;
+        };
+        repricer.apply(&mut resp);
+        if let Some(m) = ctx.meter {
+            m.record_stage(stage, &resp);
+            m.record_wasted(stage, &resp);
+        }
+    }
+    repricer.note(ctx.meter);
+    let note = format!(
+        "Batch {batch_id} held {n} item(s) this run no longer asks (their questions changed \
+         since the batch was submitted). Their replies were set aside unused; what they cost is \
+         counted in this ledger and toward the spend limit."
+    );
+    eprintln!("[camerata-server] {note}");
+    if let Some(m) = ctx.meter {
+        m.record_note(note);
+    }
+}
+
 /// Resume, second half: batches an earlier process submitted and did not settle are polled and
 /// fetched by id (never submitted again). Returns the follow-up work their rows produced, to
 /// replace those items' requests in the first round.
@@ -1728,6 +1766,15 @@ where
                 ))
             })
             .collect();
+        // The items of this batch that answer no question this run asks: the question changed
+        // since it was submitted (an item's key names its question), so a reply to it is never
+        // absorbed. It was still paid for, so it is metered when the batch is fetched (#582).
+        let stale: std::collections::HashSet<String> = record
+            .items
+            .iter()
+            .filter(|(_, key)| !by_key.contains_key(key.as_str()))
+            .map(|(cid, _)| cid.clone())
+            .collect();
         let ttl = ttl_from_name(&record.ttl);
         let rctx = round_ctx(stage, ctx, api);
         let progress = PollProgress {
@@ -1754,6 +1801,10 @@ where
         .await
         {
             Ok(rows) => {
+                let (stale_rows, rows): (Vec<BatchResultRow>, Vec<BatchResultRow>) = rows
+                    .into_iter()
+                    .partition(|r| stale.contains(&r.custom_id));
+                meter_stale_rows(stage, ctx, &record.batch_id, ttl, stale_rows);
                 let origin = BatchOrigin {
                     batch_id: &record.batch_id,
                     ttl,

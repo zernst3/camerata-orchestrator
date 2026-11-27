@@ -1129,6 +1129,58 @@ async fn resume_writes_usage_for_absorbed_items_so_the_ledger_is_never_zero() {
     assert_eq!(meter.snapshot().calls, 5, "the usage is still written");
 }
 
+/// #582: a batch an earlier process submitted is fetched on resume, and the items of it this run
+/// no longer asks for (the questions changed, so no chunk key matches) are not absorbed. They were
+/// still paid for: every fetched row counts toward the ledger and the spend limit, matched or not.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_batch_whose_items_no_longer_match_is_metered_in_full_and_absorbs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3", "a4"];
+
+    // Process 1: one batch of four is accepted and its results cannot be fetched.
+    let api = Api::new().failing_fetch();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.failed.len(), 4);
+    let records = cp.batches();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].settled);
+
+    // Process 2, real time: every question changed. An item's key names its question (the group
+    // reviewer's key is the digest of its prompt), so here the stage asks under new keys: the
+    // batch is fetched by id but none of its rows answers a question this run asks.
+    let api = Api::new().knowing(&records[0]);
+    let meter = UsageMeter::default();
+    let now = ["b1", "b2", "b3", "b4"];
+    let mut stage = Scripted::new(&now);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 4 },
+        &c,
+    )
+    .await;
+    assert_eq!(*api.fetched.lock().unwrap(), vec!["msgbatch_0".to_string()]);
+    assert!(out.resumed.is_empty(), "a stale row was absorbed: {:?}", out.resumed);
+    assert_eq!(sorted(out.absorbed), ids(&now), "every item is asked again");
+    assert_eq!(api.realtime.call_count(), 4);
+    let usage = meter.snapshot();
+    // Four real-time replies and the four stale rows, each 100 in and 10 out.
+    assert_eq!(usage.calls, 8, "the stale rows are not in the ledger: {usage:?}");
+    assert_eq!(usage.input_tokens, 800);
+    assert!(
+        usage.cost_usd > 4.0 * 0.02,
+        "the stale rows do not count toward the spend limit: {}",
+        usage.cost_usd
+    );
+}
+
 // ── liveness ────────────────────────────────────────────────────────────────────────────────────
 
 fn idle_ms(store: &JobStore, id: &str) -> u128 {
