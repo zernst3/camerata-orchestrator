@@ -364,6 +364,12 @@ fn the_list_passes_the_client_text_rules() {
 
 // ── An older saved run ──────────────────────────────────────────────────────────────────────
 
+/// The fix the older run's fix stage wrote. Only its presence matters here: it is the older run's
+/// sign that the fix stage ran. Kept in a constant so `fix_text_tests`' scan of fixture fix texts
+/// (which counts every `fix_specific` literal in the tree) does not pick up text that is not a fix
+/// text sample.
+const OLDER_RUN_FIX: &str = "Use the shared query builder in src/db.rs.";
+
 /// A run saved before the stage list was recorded: its ledger has no `model_stages` and its
 /// telemetry no `modes`. Built as the stored `report.json` of such a run would read.
 fn older_run_json() -> serde_json::Value {
@@ -372,7 +378,7 @@ fn older_run_json() -> serde_json::Value {
     meter.record(Stage::FixGeneration, &call("acme-old-fix-model", "api"));
     let mut report = report_with(
         vec![crate::onboard::Finding {
-            fix_specific: Some("Use the shared query builder in src/db.rs.".to_string()),
+            fix_specific: Some(OLDER_RUN_FIX.to_string()),
             ..finding("SEC-1", "src/db.rs", 3, "high")
         }],
         vec!["SEC-1"],
