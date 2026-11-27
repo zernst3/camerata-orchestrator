@@ -227,8 +227,34 @@ pub struct CallFile {
     /// The file paths framed in the prompt, for matching a failed pass to the calls over its files.
     #[serde(default)]
     pub files: Vec<String>,
+    /// The stage that owns the call when it records its own rejected replies at the point of
+    /// rejection ([`reject_reply`]). `None` for every other call and for a file written before
+    /// this existed (those keep the blanket set-aside of [`quarantine_rejected`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<CallOwner>,
     /// By occurrence (0 is the first time the request was asked).
     pub entries: BTreeMap<usize, CallEntry>,
+}
+
+/// A stage that records its own rejected replies, so no other stage's failure may set its calls
+/// aside as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallOwner {
+    /// The clone judge (`onboard::clone_advisory`).
+    CloneJudge,
+}
+
+impl CallOwner {
+    /// The owner of a request, from its system prompt.
+    fn of(req: &LlmRequest) -> Option<Self> {
+        req.system
+            .as_deref()
+            .is_some_and(|s| {
+                s.starts_with(crate::onboard::clone_advisory::prompt::JUDGE_SYSTEM_PREFIX)
+            })
+            .then_some(Self::CloneJudge)
+    }
 }
 
 fn call_path(dir: &Path, key: &str) -> std::path::PathBuf {
@@ -404,15 +430,23 @@ pub(crate) fn entry_replays(entry: &CallEntry, kind: PartKind) -> bool {
     if replays_on_resume(entry.status, kind) {
         return true;
     }
-    // `Other` (the clone judge, the deep lenses) has no parser a resume can run: the request that
-    // would say which shape the reply should have is not stored. An unusable `Other` reply is
-    // always asked again.
-    entry.status == EntryStatus::Unusable
-        && kind != PartKind::Other
-        && entry
-            .response
-            .as_ref()
-            .is_some_and(|stored| reply_is_good(kind, &stored.replayed()))
+    // `Other` (the clone judge, the deep lenses) has no per-request parser a resume can run: the
+    // request that would say which shape the reply should have is not stored. What can be said
+    // is whether the reply holds a verdict object, the clone judge's shape. An unusable `Other`
+    // reply the judge's parser reads is good (so it is not paid for twice when the parser was
+    // fixed since); any other unusable `Other` reply is always asked again.
+    if entry.status != EntryStatus::Unusable {
+        return false;
+    }
+    let Some(stored) = entry.response.as_ref() else {
+        return false;
+    };
+    let reply = stored.replayed();
+    if kind == PartKind::Other {
+        return !reply.truncated
+            && crate::onboard::clone_advisory::prompt::find_verdict_object(&reply.text).is_some();
+    }
+    reply_is_good(kind, &reply)
 }
 
 /// True when a reply is one a resume may return again: finished, with a JSON object that parses.
@@ -424,6 +458,14 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
     let parses = !resp.truncated
         && crate::ai_audit::extract_json_object(&resp.text)
             .is_some_and(|json| serde_json::from_str::<serde_json::Value>(json).is_ok());
+    // A clone judge reply with braces in prose around its verdict object does not parse as one
+    // span but is read by the judge's own parser; the other `Other` calls have no such shape.
+    if kind == PartKind::Other {
+        return !resp.truncated
+            && (parses
+                || crate::onboard::clone_advisory::prompt::find_verdict_object(&resp.text)
+                    .is_some());
+    }
     if !parses {
         return false;
     }
@@ -461,6 +503,7 @@ struct FreshCall {
     kind: PartKind,
     repo: String,
     files: Vec<String>,
+    owner: Option<CallOwner>,
 }
 
 fn load_call_file(dir: &Path, key: &str) -> Option<CallFile> {
@@ -486,6 +529,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 kind,
                 repo: repo.clone(),
                 files: files.clone(),
+                owner: CallOwner::of(req),
                 entries: BTreeMap::new(),
             })
         });
@@ -539,6 +583,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                     kind,
                     repo,
                     files,
+                    owner: CallOwner::of(req),
                 })
             }
         }
@@ -567,6 +612,7 @@ fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
             kind,
             repo: repo.clone(),
             files: files.clone(),
+            owner: CallOwner::of(&req),
             entries: BTreeMap::new(),
         })
     });
@@ -604,6 +650,7 @@ fn record_entry(store: &RunStore, call: &FreshCall, entry: CallEntry) {
             kind: call.kind,
             repo: call.repo.clone(),
             files: call.files.clone(),
+            owner: call.owner,
             entries: BTreeMap::new(),
         });
     file.entries
@@ -1265,9 +1312,9 @@ fn all_call_files(store: &RunStore) -> Vec<CallFile> {
 /// pass that failed for a CONTENT reason (the reply parsed but held nothing usable) is the case:
 /// its replies are marked rejected. A scan pass names the files it did not review, so only the
 /// calls over those files are set aside; every other stage is set aside as a whole for the repo,
-/// with the failed part named as the reason. The fix and detail stages are NOT set aside here:
-/// each of their replies was marked at the point of rejection ([`reject_reply`]), with its
-/// reason, and a reply with an accepted entry in it stays good.
+/// with the failed part named as the reason. The fix and detail stages, and the clone judge, are
+/// NOT set aside here: each of their replies was marked at the point of rejection
+/// ([`reject_reply`]), with its reason, and a reply with an accepted entry in it stays good.
 pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) {
     let rejected: Vec<&FinishFailure> = failures
         .iter()
@@ -1288,7 +1335,12 @@ pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) 
             continue;
         }
         let hit = rejected.iter().find(|f| {
-            PartKind::of_pass_name(&f.pass) == file.kind
+            // A stage that records each rejected reply itself keeps the replies that parsed, and
+            // its calls are never set aside by another stage's failure. (A file written before
+            // owners were recorded has none and keeps the blanket set-aside.)
+            !(file.kind == PartKind::Other
+                && (f.per_reply_rejections || file.owner == Some(CallOwner::CloneJudge)))
+                && PartKind::of_pass_name(&f.pass) == file.kind
                 && (f.repo.is_empty() || file.repo.is_empty() || f.repo == file.repo)
                 && (file.kind != PartKind::Scan
                     || f.files.is_empty()

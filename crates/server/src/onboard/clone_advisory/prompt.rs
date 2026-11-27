@@ -70,6 +70,11 @@ fn word_meanings(rule: CloneRule) -> &'static [&'static str] {
     }
 }
 
+/// How the judge's system prompt begins. The run store recognizes the judge's calls by it (a call
+/// file records its owner), so the prompt and the recognition cannot drift apart.
+pub const JUDGE_SYSTEM_PREFIX: &str =
+    "You review bounded excerpts of a client's source code and answer ONE closed question";
+
 /// The system prompt: the judge's role and the closed output vocabulary.
 pub fn system_prompt(rule: CloneRule) -> String {
     let words = rule.verdict_words();
@@ -80,8 +85,7 @@ pub fn system_prompt(rule: CloneRule) -> String {
         .map(|(word, meaning)| format!("- \"{word}\": {meaning}\n"))
         .collect();
     format!(
-        "You review bounded excerpts of a client's source code and answer ONE closed question \
-         about each candidate. A deterministic search already found each candidate: it lists \
+        "{JUDGE_SYSTEM_PREFIX} about each candidate. A deterministic search already found each candidate: it lists \
          the places (path, line range, enclosing function, at most 30 lines of code) that \
          contain the same code once local names are set aside, plus deterministic facts such as \
          whether the copies agree. You never see whole files, you do not search for more code \
@@ -188,15 +192,88 @@ pub struct ParsedBatch {
     pub parsed: bool,
 }
 
+/// The most `{` positions tried as the start of the verdict object in one reply.
+const MAX_OBJECT_STARTS: usize = 200;
+
+/// The end (inclusive byte index) of the balanced `{...}` that starts at `start`, with strings
+/// and escapes respected; `None` when it never closes.
+fn balanced_end(text: &str, start: usize) -> Option<usize> {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (offset, ch) in text[start..].char_indices() {
+        if in_string {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The verdict object inside a reply: a balanced JSON object that parses and has a `verdicts`
+/// array. Prose with braces before or after it, or a fenced block, does not hide it; an object
+/// that has no `verdicts` array is not a verdict object and is skipped, never loosened into one.
+///
+/// More than one DISTINCT top-level verdict object in a reply is no reading at all (`None`): a
+/// draft, a quoted or an example object, and candidate code is untrusted, so which one is the
+/// answer cannot be told. The same object twice (a bare copy beside a fenced one) is one reading.
+pub fn find_verdict_object(text: &str) -> Option<serde_json::Value> {
+    let mut found: Vec<serde_json::Value> = Vec::new();
+    let mut from = 0usize;
+    let mut tried = 0usize;
+    while let Some(rel) = text[from..].find('{') {
+        let start = from + rel;
+        tried += 1;
+        if tried > MAX_OBJECT_STARTS {
+            break;
+        }
+        let parsed = balanced_end(text, start).and_then(|end| {
+            serde_json::from_str::<serde_json::Value>(&text[start..=end])
+                .ok()
+                .map(|v| (end, v))
+        });
+        match parsed {
+            // A whole object was read: it is skipped past, nested objects are not top level.
+            Some((end, value)) => {
+                if value
+                    .get("verdicts")
+                    .is_some_and(serde_json::Value::is_array)
+                    && !found.contains(&value)
+                {
+                    found.push(value);
+                }
+                from = end + 1;
+            }
+            None => from = start + 1,
+        }
+    }
+    if found.len() == 1 {
+        found.pop()
+    } else {
+        None
+    }
+}
+
 /// Read a judge response against the ids that were asked about. An id that was not asked about
 /// is ignored; a verdict word outside the rule's closed vocabulary is ignored (the candidate is
 /// then unjudged); a response with no verdicts object is `parsed == false`.
 pub fn parse_verdicts(text: &str, rule: CloneRule, asked: &HashSet<&str>) -> ParsedBatch {
     let mut out = ParsedBatch::default();
-    let Some(json) = crate::ai_audit::extract_json_object(text) else {
-        return out;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+    let Some(value) = find_verdict_object(text) else {
         return out;
     };
     let Some(items) = value.get("verdicts").and_then(serde_json::Value::as_array) else {

@@ -1478,6 +1478,10 @@ pub struct FinishFailure {
     pub class: String,
     pub files: Vec<String>,
     pub scope_note: bool,
+    /// The stage records each rejected reply itself, at the point of rejection
+    /// ([`journal::reject_reply`]), so the blanket set-aside of a failed part must not touch its
+    /// other replies: the ones that parsed stay good and replay on a resume.
+    pub per_reply_rejections: bool,
 }
 
 /// One pass that did not run.
@@ -1968,22 +1972,26 @@ pub fn note_report(store: &RunStore, report: &mut crate::onboard::ScanReport) {
     report.message = Some(parts.join(" · "));
 }
 
+/// The store's view of a failed part. A stage whose replies are each recorded as rejected at the
+/// point of rejection (today the clone judge) says so here, so the set-aside of a failed part
+/// leaves its good replies alone.
+pub(crate) fn finish_failure_of(f: &crate::ai_audit::FailedPass) -> FinishFailure {
+    FinishFailure {
+        repo: f.repo.clone(),
+        pass: f.pass.clone(),
+        class: f.class.as_str().to_string(),
+        files: f.files.clone(),
+        scope_note: f.scope_note,
+        per_reply_rejections: f.pass == crate::onboard::clone_advisory::FAILED_PASS_NAME,
+    }
+}
+
 /// The end of an attempt, from the finished report: tells the store which parts failed and
 /// whether the run is complete. Shared by the command line and the cockpit's scan job.
 pub fn finish_run(store: &RunStore, report: &crate::onboard::ScanReport, export_written: bool) {
     let reasons = report.incomplete_reasons();
     store.finish(&FinishOutcome {
-        failures: report
-            .failed_passes
-            .iter()
-            .map(|f| FinishFailure {
-                repo: f.repo.clone(),
-                pass: f.pass.clone(),
-                class: f.class.as_str().to_string(),
-                files: f.files.clone(),
-                scope_note: f.scope_note,
-            })
-            .collect(),
+        failures: report.failed_passes.iter().map(finish_failure_of).collect(),
         not_run: Vec::new(),
         scan_reached_end: true,
         export_written,

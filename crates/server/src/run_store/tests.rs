@@ -347,6 +347,7 @@ async fn a_content_failure_sets_aside_the_replies_of_its_stage_and_nothing_else(
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -391,6 +392,7 @@ async fn a_rejected_reply_of_a_failed_stage_is_asked_again_on_the_resume() {
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -712,6 +714,7 @@ fn finish_marks_failed_parts_failed_and_not_run_parts_pending() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         not_run: vec![FinishNotRun {
             repo: "acme/api".to_string(),
@@ -1670,6 +1673,7 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         incomplete_reasons: vec!["a part failed".to_string()],
         ..FinishOutcome::default()
@@ -1755,6 +1759,7 @@ fn the_listing_tells_live_interrupted_incomplete_and_complete_apart() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         ..FinishOutcome::default()
     });
@@ -2001,6 +2006,7 @@ fn a_group_review_pass_name_maps_to_the_group_review_part() {
             class: "content".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         incomplete_reasons: vec!["x".to_string()],
         ..FinishOutcome::default()
@@ -2076,6 +2082,7 @@ async fn one_failed_rule_group_does_not_set_aside_every_stage2_reply_of_the_repo
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -2275,6 +2282,7 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
         kind,
         repo,
         files,
+        owner: None,
         entries,
     };
     let dir = store.dir().join("calls");
@@ -2523,6 +2531,7 @@ fn a_cut_temporary_file_is_never_read_as_a_record() {
         kind: PartKind::Other,
         repo: String::new(),
         files: Vec::new(),
+        owner: None,
         entries: Default::default(),
     };
     write_atomic(

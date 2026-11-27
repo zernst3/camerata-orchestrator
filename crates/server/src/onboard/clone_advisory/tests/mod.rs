@@ -18,6 +18,7 @@ mod ledger;
 mod not_settled;
 mod other_rules;
 mod redaction;
+mod repair;
 mod repros;
 mod rows;
 mod seam;

@@ -40,7 +40,7 @@ use camerata_checks::clone_rules::{
     judge_input, Candidate, CandidateSet, CloneRule, CLONE_JUDGE_MAX_PER_RULE,
 };
 
-use crate::ai_audit::{scaled_max_tokens, FailedPass, UsageMeter};
+use crate::ai_audit::{scaled_max_tokens, AttemptRecord, FailedPass, UsageMeter};
 use crate::llm::{LlmPort, LlmRequest};
 use crate::scan_ledger::{RuleTier, ScanLedger};
 use crate::stage_telemetry::Stage;
@@ -60,6 +60,43 @@ use prompt::{batch_prompt, candidate_json, parse_verdicts, system_prompt, Verdic
 
 /// Candidates per model call.
 pub const BATCH_SIZE: usize = 16;
+
+/// Asks per batch: the first, and ONE repair follow-up when the reply is not a verdict object.
+pub const JUDGE_ATTEMPTS: usize = 2;
+
+/// The longest sample of a reply an attempt record keeps (operator only, never in an export).
+const REPLY_SAMPLE_CHARS: usize = 160;
+
+/// The note appended to a batch whose first reply was not a verdict object (the wording the
+/// other stages use for their one repair turn).
+const REPAIR_NOTE: &str = "\n\nYour previous reply was refused: it was not one JSON object with \
+     a \"verdicts\" array answering the candidates above. Answer again with the verdict object \
+     only: one JSON object in exactly the form described, with every candidate id, and no other \
+     text.\n";
+
+/// The repair follow-up of `sent`: the same request with the refusal appended after the batch
+/// (the cache prefix before it is unchanged).
+fn repair_request(mut sent: LlmRequest) -> LlmRequest {
+    sent.prompt.push_str(REPAIR_NOTE);
+    sent
+}
+
+/// A redacted, length-capped start of a reply, for the operator's failure record.
+fn reply_sample(text: &str) -> String {
+    let redacted = crate::onboard::redact::redact_visible(text);
+    camerata_llm::failure::scrub_message(&redacted, REPLY_SAMPLE_CHARS)
+}
+
+fn attempt_record(model: &str, kind: &str, message: &str) -> AttemptRecord {
+    let mut record = AttemptRecord::new("", model);
+    record.error_type = Some(kind.to_string());
+    // The same redaction as the reply sample: an error text can echo a connection string or a key.
+    record.message = camerata_llm::failure::scrub_message(
+        &crate::onboard::redact::redact_visible(message),
+        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+    );
+    record
+}
 
 /// Output tokens budgeted per candidate (a verdict object with a short concept).
 const TOKENS_PER_CANDIDATE: u32 = 80;
@@ -361,75 +398,137 @@ async fn judge_rule(
     let text = rule_text(rule, req.corpus);
     let mut first_failure: Option<String> = None;
     let mut stopped_by_limit = false;
-    for batch in pending.chunks(BATCH_SIZE) {
+    let mut attempts: Vec<AttemptRecord> = Vec::new();
+    let n_batches = pending.chunks(BATCH_SIZE).count();
+    'batches: for (batch_idx, batch) in pending.chunks(BATCH_SIZE).enumerate() {
         let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
         let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
         // The judge always names its model (the transport refuses a request that names none).
-        let request = LlmRequest::new(prompt)
+        let first_request = LlmRequest::new(prompt)
             .with_system(system.clone())
             .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
             .with_cache_prefix_len(prefix_len)
             .with_model(req.judge_model.to_string());
-        // Design A7: every model request passes the size check before it is sent. One that does
-        // not fit the model's window is refused here, never cut and never sent; it is disclosed
-        // as the failed part below and its candidates stay undecided (not assessed, not clean).
-        if let Err(too_large) = crate::ai_audit::request_budget::ensure_request_fits(&request) {
-            first_failure.get_or_insert_with(|| too_large.to_string());
-            append(feedback, session, &format!("batch not sent: {too_large}"));
-            continue;
-        }
-        // SPEND LIMIT: every batch is admitted like a scan pass or a calibration batch (the stage
-        // check in the caller only decides whether the judge starts). A batch the limit refuses
-        // is not sent, nor is any later one; its candidates stay undecided (not assessed, not
-        // clean) and the stage is recorded as stopped part way.
-        // A batch the run store already holds a verdict for is answered from the store and
-        // costs nothing, so the limit has nothing to refuse (a resume past its limit replays it).
-        let _permit = match meter {
-            Some(m) if !llm.replays(&request) => match m
-                .admit_for_stage(req.repo, crate::ai_audit::STAGE_CLONE_JUDGE)
-                .await
-            {
-                Ok(permit) => Some(permit),
-                Err(_) => {
-                    stopped_by_limit = true;
-                    first_failure.get_or_insert_with(|| {
-                        format!("{} before this batch was sent", m.stop_cause())
-                    });
-                    append(feedback, session, "batch not sent: the spend limit");
-                    break;
-                }
-            },
-            _ => None,
-        };
-        if let Some(m) = meter {
-            m.note_request(&request);
-        }
-        // Streamed, so a transcript shows real output and the CLI leg keeps its heartbeat.
-        let mut on_delta = |_: &str| {};
-        outcome.model_calls += 1;
-        let response = match llm.complete_streaming(request, &mut on_delta).await {
-            Ok(response) => response,
-            Err(e) => {
-                // A refused call carries what it was billed: the spend limit must see it, as it
-                // does for every other stage (and the outage stop watches every failed call).
-                if let Some(m) = meter {
-                    m.record_failed(Stage::CloneJudge, &e);
-                }
-                first_failure.get_or_insert_with(|| format!("{e:#}"));
-                append(feedback, session, &format!("batch failed: {e:#}"));
-                continue;
-            }
-        };
-        if let Some(m) = meter {
-            m.record_stage(Stage::CloneJudge, &response);
-        }
-        append(feedback, session, &response.text);
         let asked: HashSet<&str> = batch.iter().map(|c| c.id.as_str()).collect();
-        let parsed = parse_verdicts(&response.text, rule, &asked);
-        if !parsed.parsed {
+        let which = format!(
+            "candidate batch {} of {n_batches} ({} candidates, {} to {})",
+            batch_idx + 1,
+            batch.len(),
+            batch.first().map_or("", |c| c.id.as_str()),
+            batch.last().map_or("", |c| c.id.as_str()),
+        );
+        // A reply that is not a verdict object gets ONE repair follow-up in this run, counted
+        // as an attempt, before the batch is given up on.
+        let mut request = first_request;
+        let mut parsed: Option<prompt::ParsedBatch> = None;
+        // A resume of a batch that was repaired: its first ask was turned down and stored failed,
+        // and its repair reply is in the store. Going straight to the repair reply costs nothing;
+        // asking the first request again would bill a reply that is turned down again.
+        let mut first_round = 0;
+        if !llm.replays(&request) && llm.replays(&repair_request(request.clone())) {
+            request = repair_request(request);
+            first_round = 1;
+        }
+        for round in first_round..JUDGE_ATTEMPTS {
+            // Design A7: every model request passes the size check before it is sent. One that
+            // does not fit the model's window is refused here, never cut and never sent; it is
+            // disclosed as the failed part below and its candidates stay undecided (not
+            // assessed, not clean).
+            if let Err(too_large) = crate::ai_audit::request_budget::ensure_request_fits(&request) {
+                first_failure.get_or_insert_with(|| too_large.to_string());
+                append(feedback, session, &format!("batch not sent: {too_large}"));
+                continue 'batches;
+            }
+            // SPEND LIMIT: every request is admitted like a scan pass or a calibration batch
+            // (the stage check in the caller only decides whether the judge starts). One the
+            // limit refuses is not sent, nor is any later one; its candidates stay undecided
+            // (not assessed, not clean) and the stage is recorded as stopped part way. A request
+            // the run store already holds a verdict for is answered from the store and costs
+            // nothing, so the limit has nothing to refuse (a resume past its limit replays it).
+            let _permit = match meter {
+                Some(m) if !llm.replays(&request) => match m
+                    .admit_for_stage(req.repo, crate::ai_audit::STAGE_CLONE_JUDGE)
+                    .await
+                {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        stopped_by_limit = true;
+                        first_failure.get_or_insert_with(|| {
+                            format!("{} before this batch was sent", m.stop_cause())
+                        });
+                        append(feedback, session, "batch not sent: the spend limit");
+                        break 'batches;
+                    }
+                },
+                _ => None,
+            };
+            if let Some(m) = meter {
+                m.note_request(&request);
+            }
+            let request_key = crate::run_store::journal::request_key(&request);
+            let sent = request.clone();
+            // Streamed, so a transcript shows real output and the CLI leg keeps its heartbeat.
+            let mut on_delta = |_: &str| {};
+            outcome.model_calls += 1;
+            let response = match llm.complete_streaming(request, &mut on_delta).await {
+                Ok(response) => response,
+                Err(e) => {
+                    // A refused call carries what it was billed: the spend limit must see it,
+                    // as it does for every other stage (and the outage stop watches every failed
+                    // call).
+                    if let Some(m) = meter {
+                        m.record_failed(Stage::CloneJudge, &e);
+                    }
+                    first_failure.get_or_insert_with(|| format!("{e:#}"));
+                    append(feedback, session, &format!("batch failed: {e:#}"));
+                    attempts.push(attempt_record(
+                        req.judge_model,
+                        "transport",
+                        &format!("{which}, attempt {}: {e:#}", round + 1),
+                    ));
+                    continue 'batches;
+                }
+            };
+            if let Some(m) = meter {
+                m.record_stage(Stage::CloneJudge, &response);
+            }
+            append(feedback, session, &response.text);
+            let read = parse_verdicts(&response.text, rule, &asked);
+            // A reply that names no asked candidate in the closed vocabulary leaves the whole
+            // batch unjudged: it is turned down like one that is not a verdict object, never
+            // stored good.
+            if read.parsed && !read.verdicts.is_empty() {
+                parsed = Some(read);
+                break;
+            }
+            // Stored as failed, not as a success: a resume asks this request again instead of
+            // replaying a reply that was turned down.
+            llm.note_rejected_reply(
+                &request_key,
+                if read.parsed {
+                    "the reply held no verdict for any candidate asked about, in the closed vocabulary"
+                } else {
+                    "the reply held no verdict object (a JSON object with a verdicts array)"
+                },
+                true,
+            );
+            attempts.push(attempt_record(
+                req.judge_model,
+                "content",
+                &format!(
+                    "{which}, attempt {}: not a verdict object; reply began: {}",
+                    round + 1,
+                    reply_sample(&response.text)
+                ),
+            ));
+            request = repair_request(sent);
+        }
+        let Some(parsed) = parsed else {
+            // Both asks were turned down: the batch is the disclosed failed part.
             first_failure
                 .get_or_insert_with(|| "the judge's response was not a verdict object".to_string());
-        }
+            continue;
+        };
         for candidate in batch {
             let Some(verdict) = parsed.verdicts.get(&candidate.id) else {
                 continue; // no verdict: unjudged
@@ -462,7 +561,7 @@ async fn judge_rule(
                 crate::ai_audit::FailureClass::Content
             },
             files: Vec::new(),
-            attempts: Vec::new(),
+            attempts,
             scope_note: false,
         });
     }
