@@ -374,7 +374,15 @@ fn seams<'a>(llm: &'a Scripted, sink: &'a Mutex<Vec<String>>) -> Seams<'a> {
 }
 
 fn store() -> camerata_server::credentials::MemoryCredentialStore {
+    instant_network_waits();
     camerata_server::credentials::MemoryCredentialStore::new()
+}
+
+/// Every wait of the run's long network wait (#582) returns at once in this file: its scripted
+/// outages decide which part does not run, and a real wait would only make the test take minutes.
+fn instant_network_waits() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::mem::forget(camerata_server::network_wait::InstantWaits::install()));
 }
 
 /// The decompressed entries of a zip by name.

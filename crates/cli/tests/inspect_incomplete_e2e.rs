@@ -160,6 +160,9 @@ async fn run(
     stage_fixture(repo.path());
     let out = tempfile::tempdir().unwrap();
     let export = out.path().join("inspect.zip");
+    // Every wait of the run's long network wait (#582) returns at once: the provider here is
+    // unreachable for good, and the run must reach its outage stop without real minutes of waiting.
+    let _waits = camerata_server::network_wait::InstantWaits::install();
     let llm = Scripted {
         mode,
         calls: AtomicUsize::new(0),
