@@ -22,6 +22,7 @@ use crate::api_agent_driver::AnthropicPostError;
 use crate::cost_cap::RunControls;
 use crate::llm::LlmResponse;
 use crate::stage_telemetry::Stage;
+use camerata_llm::failure::FailureClass;
 
 const MODEL: &str = "claude-fable-5-2";
 
@@ -1309,26 +1310,36 @@ async fn a_history_400_is_failed_and_the_same_body_is_not_sent_again() {
 #[tokio::test]
 async fn failures_and_successes_feed_the_run_health_record() {
     let meter = Arc::new(UsageMeter::default());
-    // Four 500s (the schedule's three retries and the first try), then a good run.
-    let wire = ScriptedWire::new(
-        (0..4)
-            .map(|_| http(500, "api_error", "boom", None))
-            .collect(),
-    );
-    let (agent, _) = metered(&wire, &meter);
-    let run = run_ok(&agent, &room(), &limits()).await;
-    assert!(matches!(run.stop, AgentStop::Failed(_)));
-    assert_eq!(
-        meter.health().streak(),
-        1,
-        "one failed call, after its retries"
-    );
-
+    // A failed call counts toward the streak; a reply clears it.
+    meter
+        .health()
+        .note_failure(FailureClass::Transport, "Anthropic API HTTP 500: boom");
+    assert_eq!(meter.health().streak(), 1);
     let wire = ScriptedWire::new(vec![text_reply("done")]);
     let (agent, _) = metered(&wire, &meter);
     let run = run_ok(&agent, &room(), &limits()).await;
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(meter.health().streak(), 0, "a reply clears the streak");
+
+    // Server errors through the first try, the schedule's three retries and the long network
+    // wait's four steps (a 500 is a transport-class failure, #582): the outage stop, at once.
+    let stopped = Arc::new(UsageMeter::default());
+    let wire = ScriptedWire::new(
+        (0..(4 + NETWORK_WAIT_STEPS.len()))
+            .map(|_| http(500, "api_error", "boom", None))
+            .collect(),
+    );
+    let (agent, _) = metered(&wire, &stopped);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)));
+    assert!(
+        stopped.outage_stopped(),
+        "the wait ran out with nothing through"
+    );
+    assert_eq!(
+        stopped.health().trigger().map(|t| t.class),
+        Some(FailureClass::Transport)
+    );
 
     // A rate limit that outlasts the deadline is a pause, not an outage.
     let wire = ScriptedWire::new(
@@ -1364,13 +1375,11 @@ async fn a_failure_after_a_paid_turn_is_an_ok_run_that_keeps_the_usage_never_an_
     );
 
     // The same holds for a follow-up whose own request fails after the first run was paid.
-    let wire = ScriptedWire::new(vec![
-        text_reply("done"),
-        http(500, "api_error", "boom", None),
-        http(500, "api_error", "boom", None),
-        http(500, "api_error", "boom", None),
-        http(500, "api_error", "boom", None),
-    ]);
+    // The first try, three quick retries and the long network wait's steps all fail.
+    let mut script = vec![text_reply("done")];
+    script
+        .extend((0..(4 + NETWORK_WAIT_STEPS.len())).map(|_| http(500, "api_error", "boom", None)));
+    let wire = ScriptedWire::new(script);
     let agent = agent(&wire);
     let first = run_ok(&agent, &room(), &limits()).await;
     let again = agent

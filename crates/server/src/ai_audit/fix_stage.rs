@@ -859,6 +859,11 @@ pub(super) fn fix_rejections(
                     "the last call failed in transport".to_string()
                 }
                 (Some(FixMiss::CapStopped), _) => "the spend limit stopped the call".to_string(),
+                (Some(FixMiss::OutageStopped), _) => {
+                    "the run stopped because the model provider could not be reached, so the call \
+                     was not sent"
+                        .to_string()
+                }
                 (None, Some(e)) => e.to_string(),
                 (None, None) => "no reply came back for it".to_string(),
             };
@@ -1018,6 +1023,8 @@ pub(super) fn settle_fix_wording(
 pub(super) enum FixMiss {
     /// The spend limit refused the batch the finding was in; no call was made.
     CapStopped,
+    /// The run's outage stop (#582) refused the batch the finding was in; no call was made.
+    OutageStopped,
     /// The call was made and failed in transport (timeout, HTTP error, dropped stream).
     TransportFailed,
 }
@@ -1114,7 +1121,10 @@ impl FixLedger {
         for i in pending {
             if self.answered.contains(i) {
                 out.gave_up += 1;
-            } else if self.last_miss.get(i) == Some(&FixMiss::CapStopped) {
+            } else if matches!(
+                self.last_miss.get(i),
+                Some(FixMiss::CapStopped | FixMiss::OutageStopped)
+            ) {
                 out.cap_stopped += 1;
             } else {
                 out.transport_failed += 1;
@@ -1593,7 +1603,12 @@ pub(super) async fn run_fix_specifics_round(
         };
         still_pending.extend(bctx.batch.iter().copied());
         if matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop) {
-            stage.ledger.miss(&bctx.batch, FixMiss::CapStopped);
+            let miss = if f.class == FailureClass::OutageStop {
+                FixMiss::OutageStopped
+            } else {
+                FixMiss::CapStopped
+            };
+            stage.ledger.miss(&bctx.batch, miss);
             continue;
         }
         let attempts: Vec<AttemptRecord> = f
@@ -2057,3 +2072,7 @@ pub async fn generate_fix_specifics_in(
 
     (findings, failed_passes)
 }
+
+#[cfg(test)]
+#[path = "fix_stage_miss_tests.rs"]
+mod miss_tests;

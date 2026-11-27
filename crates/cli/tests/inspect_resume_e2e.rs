@@ -858,10 +858,26 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
         after.entries.iter().all(|e| e.resolved_at.is_some()) && !after.entries.is_empty(),
         "the failures stay as history with the time they were resolved"
     );
+    // The attempt history is kept: each resolved entry holds the very attempts the interrupted
+    // run recorded. (An exhausted network wait now stops the run at its first failed call, #582,
+    // so the end-of-run second try that used to add a second attempt never runs.)
     assert!(
-        after.entries.iter().any(|e| e.attempts.len() >= 2),
+        after.entries.iter().any(|e| !e.attempts.is_empty()),
         "the attempt history is kept"
     );
+    for e in &after.entries {
+        let earlier = before
+            .entries
+            .iter()
+            .find(|b| b.repo == e.repo && b.part == e.part && b.class == e.class)
+            .unwrap_or_else(|| panic!("{e:?} was on record before the resume"));
+        assert_eq!(
+            e.attempts.len(),
+            earlier.attempts.len(),
+            "the attempt history is kept: {e:?}"
+        );
+        assert_eq!(e.first_at, earlier.first_at, "{e:?}");
+    }
     let done = camerata_server::run_store::read_record(&run_id).unwrap();
     assert_eq!(done.status, camerata_server::run_store::RunStatus::Complete);
     assert!(done.attempt >= 2);

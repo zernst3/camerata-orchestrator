@@ -309,7 +309,10 @@ async fn a_batch_accepted_as_the_run_stops_is_cancelled_too() {
     };
     let (id, report) = tokio::join!(submit, stop_meanwhile);
     let id = id.expect("the provider accepted the batch");
-    assert!(report.cancelled.is_empty(), "nothing was live when the stop began");
+    assert!(
+        report.cancelled.is_empty(),
+        "nothing was live when the stop began"
+    );
     assert_eq!(
         *provider.inner.cancels.lock().unwrap(),
         vec![id],

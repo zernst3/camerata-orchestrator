@@ -421,7 +421,10 @@ mod tests {
         let before = h.successes();
         h.note_success(); // another piece's call got through while this one waited
         assert!(!h.note_network_wait_exhausted("connection reset", before));
-        assert!(!h.is_stopped(), "the network is up: this request alone fails");
+        assert!(
+            !h.is_stopped(),
+            "the network is up: this request alone fails"
+        );
         assert!(h.note_network_wait_exhausted("connection reset", h.successes()));
         assert!(h.is_stopped());
         assert_eq!(h.trigger().map(|t| t.class), Some(FailureClass::Transport));
