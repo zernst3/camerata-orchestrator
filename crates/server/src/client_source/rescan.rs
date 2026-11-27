@@ -361,6 +361,8 @@ pub async fn rescan_changes(
                 to_sha: to_sha.clone(),
             }),
             resume_run: None,
+            // The delta rescan carries no spend limit of its own yet (a follow-up of #564).
+            spend_checks: false,
         },
     )
     .await;
