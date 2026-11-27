@@ -164,6 +164,7 @@ async fn run(
                 assert!(text.contains("PRE-FLIGHT ESTIMATE"), "{text}");
                 sink_log.lock().unwrap().push("preflight".to_string());
             },
+            tools: None,
         },
     )
     .await
@@ -321,6 +322,7 @@ async fn a_spend_limit_with_an_unpriced_model_is_refused_before_the_estimate_and
             resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| sink_log.lock().unwrap().push("preflight".to_string()),
+            tools: None,
         },
     )
     .await

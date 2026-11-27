@@ -238,6 +238,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
                 );
                 printed.lock().unwrap().push(text.to_string());
             },
+            tools: None,
         },
     )
     .await;

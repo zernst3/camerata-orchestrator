@@ -1404,6 +1404,7 @@ impl Rig {
             resume: None,
             llm: Some(&self.seam),
             preflight_sink: &|_| {},
+            tools: None,
         }
     }
 

@@ -146,6 +146,7 @@ async fn run(args: InspectArgs) -> Run {
             preflight_sink: &|_| {
                 printed.fetch_add(1, Ordering::SeqCst);
             },
+            tools: None,
         },
     )
     .await
@@ -258,6 +259,7 @@ async fn a_client_run_with_no_spend_limit_is_not_refused_by_any_cost_check() {
             resume: None,
             llm: Some(&llm),
             preflight_sink: &|t| *text.lock().unwrap() = t.to_string(),
+            tools: None,
         },
     )
     .await;

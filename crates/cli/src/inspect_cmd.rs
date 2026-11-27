@@ -981,6 +981,7 @@ async fn run_inspect_pipeline(
             resume: None,
             llm: None,
             preflight_sink: &|text| print!("{text}"),
+            tools: None,
         },
     )
     .await
@@ -995,6 +996,53 @@ pub struct Seams<'a> {
     pub preflight_sink: &'a (dyn Fn(&str) + Sync),
     /// The id of a saved run to resume instead of starting a new one (see [`resume_inspect`]).
     pub resume: Option<String>,
+    /// Where the pinned scan tools live and where a missing one downloads from (#587). `None`
+    /// is the product's: the per-user tooling folder and the official release locations. Tests
+    /// pass a temporary folder and a source that serves fake archives.
+    pub tools: Option<&'a camerata_server::pinned_tools::ToolEnv>,
+}
+
+/// The tool list's heading in the pre-start output and in `--plan-only`.
+pub const TOOLS_HEADING: &str = "== TOOLS ==";
+
+/// Decide this run's tool set from the stacks it detected and the rules it previews, print the
+/// list to `sink`, then provision every missing tool, before the first model call (#587). The
+/// same server functions the app's pre-flight calls
+/// ([`camerata_server::pinned_tools::required_tool_set`], `provision_tool_set`).
+///
+/// A client run is refused when a tool cannot be provisioned on this machine; any run is refused
+/// when provisioning a tool fails. The refusal says nothing was sent to a model, because nothing
+/// was.
+pub async fn provision_run_tools(
+    tools: &camerata_server::pinned_tools::ToolEnv,
+    sources: &[(String, PathBuf)],
+    preview_rules: &[camerata_server::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+    scope: &camerata_server::onboard::scope::ScanScope,
+    client_engagement: bool,
+    sink: &(dyn Fn(&str) + Sync),
+) -> Result<camerata_server::pinned_tools::ToolSetReport, InspectError> {
+    let required = camerata_server::pinned_tools::required_tool_set(
+        sources,
+        preview_rules,
+        corpus,
+        scope,
+        true,
+    );
+    let before = camerata_server::pinned_tools::tool_set_report(tools, &required);
+    sink(&format!("{TOOLS_HEADING}\n{}", before.render()));
+    camerata_server::pinned_tools::provision_tool_set(tools, &required, client_engagement)
+        .await
+        .map_err(|refusal| {
+            let who = if client_engagement {
+                "this client inspection"
+            } else {
+                "this inspection"
+            };
+            InspectError::Failed(format!(
+                "{who} did not start: {refusal}. Nothing was sent to a model."
+            ))
+        })
 }
 
 /// [`run_inspect_pipeline`] with its seams explicit.
@@ -1230,6 +1278,30 @@ pub async fn run_inspect_pipeline_with(
             return Err(InspectError::Failed(why));
         }
     }
+
+    // ── Tools: every scan tool and runtime this run needs, provisioned BEFORE the first model
+    // call (#587). The list is printed first (what is ready, what will be installed, what cannot
+    // be), then each missing one is installed. A tool set that cannot be provisioned refuses the
+    // run here, with nothing spent.
+    let product_tools;
+    let tools: &camerata_server::pinned_tools::ToolEnv = match seams.tools {
+        Some(t) => t,
+        None => {
+            product_tools =
+                camerata_server::pinned_tools::ToolEnv::product().map_err(InspectError::Failed)?;
+            &product_tools
+        }
+    };
+    provision_run_tools(
+        tools,
+        &sources,
+        &preview_rules,
+        corpus.as_ref(),
+        &controls.scope,
+        args.client_engagement,
+        seams.preflight_sink,
+    )
+    .await?;
 
     // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
     // Skipped when no model call will be made (the compliance gate blocked the AI review).
@@ -1524,6 +1596,8 @@ pub async fn run_inspect_pipeline_with(
     camerata_server::record_corpus_load_failures(&mut report, &corpus_load_failures);
 
     // ── Phase 4: the SAME scan-time preview-linter + dep-audit passes `onboard_audit` runs ──
+    // A tool that could not be provisioned mid-run stops the run (#587, the run-integrity rule
+    // of #582): no report is written, and the stop is never a coverage note.
     camerata_server::merge_scan_preview(
         &mut report,
         &sources,
@@ -1532,8 +1606,10 @@ pub async fn run_inspect_pipeline_with(
         None,
         args.client_tooling(),
         &controls.scope,
+        tools,
     )
-    .await;
+    .await
+    .map_err(|stop| InspectError::Failed(format!("{stop}. No report was written.")))?;
     // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
     // `onboard_audit`'s synchronous path in `camerata_server::lib` exactly (see
     // `camerata_server::scan_ledger::record_addition_stage`'s doc comment).
@@ -1548,8 +1624,10 @@ pub async fn run_inspect_pipeline_with(
             spec,
             dir,
             &controls.scope.for_repo(spec),
+            tools,
         )
-        .await;
+        .await
+        .map_err(|stop| InspectError::Failed(format!("{stop}. No report was written.")))?;
         osv_runs.push(camerata_server::vuln_intel::OsvRun::from_note(
             spec,
             dep_note.as_ref(),
@@ -1953,6 +2031,7 @@ pub async fn run_resume(
             resume: None,
             llm: None,
             preflight_sink: &|text| print!("{text}"),
+            tools: None,
         },
     )
     .await

@@ -370,6 +370,7 @@ fn seams<'a>(llm: &'a Scripted, sink: &'a Mutex<Vec<String>>) -> Seams<'a> {
         preflight_sink: Box::leak(Box::new(move |text: &str| {
             sink.lock().unwrap().push(text.to_string());
         })),
+        tools: None,
     }
 }
 
@@ -1211,6 +1212,7 @@ mod batch {
                 preflight_sink: Box::leak(Box::new(|text: &str| {
                     sink.lock().unwrap().push(text.to_string());
                 })),
+                tools: None,
             },
         )
         .await
@@ -1278,6 +1280,7 @@ mod batch {
                 preflight_sink: Box::leak(Box::new(|text: &str| {
                     sink.lock().unwrap().push(text.to_string());
                 })),
+                tools: None,
             },
         )
         .await

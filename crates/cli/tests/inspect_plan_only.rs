@@ -552,6 +552,7 @@ async fn real_run(repo: &Path, cap: Option<f64>) -> (Vec<String>, Vec<PieceSeen>
                 resume: None,
                 llm: Some(&Quiet),
                 preflight_sink: &|t| printed.lock().unwrap().push(t.to_string()),
+                tools: None,
             },
         ),
     ))
