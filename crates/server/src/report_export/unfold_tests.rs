@@ -801,3 +801,83 @@ fn the_source_of_a_carried_rule_id_is_its_tool_or_none() {
         Some("eslint")
     );
 }
+
+/// #586 review: a row the collapse folded into the host under a rule of its own (`flagged_by`)
+/// comes back as an open row of its own when the host is ruled out. A tool row and a source of
+/// the host's own rule stay on the host.
+#[test]
+fn a_row_folded_into_a_ruled_out_host_under_another_rule_comes_back_as_its_own_open_row() {
+    use crate::review_tree::FlaggedBy;
+    let mut r = report_of(&[API]);
+    ran(&mut r, API, RULE_A, 1);
+    ran(&mut r, API, RULE_B, 1);
+    let mut h = host(API);
+    let source = |rule: &str, tool: Option<&str>, path: &str, line: usize| FlaggedBy {
+        rule_id: rule.to_string(),
+        tool: tool.map(str::to_string),
+        site_key: format!("k-{rule}-{line}"),
+        path: path.to_string(),
+        line,
+    };
+    h.flagged_by = vec![
+        source(RULE_B, None, "src/query.ts", 7),
+        source("ACME-TOOL-RULE", Some("acme-linter"), "src/admin.ts", 41),
+        source(RULE_A, None, "src/admin.ts", 42),
+    ];
+    r.findings.push(h);
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    let own = unfolded(&reviewed, RULE_B);
+    assert_eq!(own.len(), 1, "{:?}", reviewed.report().findings);
+    assert_eq!(
+        (own[0].repo.as_str(), own[0].path.as_str(), own[0].line),
+        (API, "src/query.ts", 7)
+    );
+    assert!(own[0].needs_review, "held for a decision");
+    assert!(unfolded(&reviewed, "ACME-TOOL-RULE").is_empty());
+    assert!(unfolded(&reviewed, RULE_A).is_empty());
+    let (_json, findings) = exports(&reviewed);
+    assert!(
+        row_for(&rows_of(&findings), RULE_B).is_some(),
+        "the exports list it"
+    );
+}
+
+/// #586: a folded row brought back from a ruled-out host carries the host's snippet only when it
+/// sits at the host's own path and line. At another place it carries none, so a client never sees
+/// code from one location as the evidence for another, and the evidence check exempts it as a row
+/// with no snippet (it stays held for a decision).
+#[test]
+fn an_unfolded_folded_row_carries_the_hosts_snippet_only_at_the_hosts_own_place() {
+    use crate::review_tree::FlaggedBy;
+    let mut r = report_of(&[API]);
+    ran(&mut r, API, RULE_A, 1);
+    ran(&mut r, API, RULE_B, 1);
+    ran(&mut r, API, RULE_C, 1);
+    let mut h = host(API);
+    let source = |rule: &str, path: &str, line: usize| FlaggedBy {
+        rule_id: rule.to_string(),
+        tool: None,
+        site_key: format!("k-{rule}-{line}"),
+        path: path.to_string(),
+        line,
+    };
+    let host_snippet = h.snippet.clone();
+    h.flagged_by = vec![
+        source(RULE_B, "src/query.ts", 7),
+        source(RULE_C, "src/admin.ts", 40),
+    ];
+    r.findings.push(h);
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    let elsewhere = unfolded(&reviewed, RULE_B);
+    assert_eq!(elsewhere.len(), 1);
+    assert_eq!(elsewhere[0].snippet, "", "another place: no host snippet");
+    assert!(elsewhere[0].needs_review, "still held for a decision");
+    assert_eq!(
+        crate::onboard::evidence_check::exemption(elsewhere[0]),
+        Some(crate::onboard::evidence_check::Exempt::NoSnippet),
+        "the evidence check does not hold it as model text"
+    );
+    let same_place = unfolded(&reviewed, RULE_C);
+    assert_eq!(same_place.len(), 1);
+    assert_eq!(same_place[0].snippet, host_snippet, "the host's own place");
+}

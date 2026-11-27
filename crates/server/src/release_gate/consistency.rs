@@ -2190,6 +2190,65 @@ fn plan_fix_ids(xlsx: &[u8]) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// A row the collapse folded into a row of another rule (`flagged_by`, no external tool) must have
+/// that rule among `fix_merged_rules`, the structured list of the merged rules whose standard text
+/// its fix carries. A merged rule missing from it means the library has no standard remediation
+/// text for it: the export is refused and the rule is named (no open violations).
+pub fn merged_rule_fix_problems(entries: &Entries) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let Some(doc) = entries
+        .get(INSPECTION_JSON)
+        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+    else {
+        return problems;
+    };
+    let rows = doc
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for (i, row) in rows.iter().enumerate() {
+        let own = cell_text(row, "rule_id");
+        let covered: BTreeSet<String> = row
+            .get("fix_merged_rules")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_ascii_uppercase)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        for b in row
+            .get("flagged_by")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let rule = cell_text(b, "rule_id");
+            if rule.is_empty()
+                || rule.eq_ignore_ascii_case(&own)
+                || !cell_text(b, "tool").is_empty()
+                || !named.insert(rule.to_ascii_uppercase())
+            {
+                continue;
+            }
+            if !covered.contains(&rule.to_ascii_uppercase()) {
+                problems.push(problem(
+                    INSPECTION_JSON,
+                    &format!("findings[{i}].fix"),
+                    format!(
+                        "the rule {rule} was merged into this row and the rule library has no \
+                         standard remediation text for it"
+                    ),
+                ));
+            }
+        }
+    }
+    problems
+}
+
 /// Over the rows in memory: the PDF's escalation list has one entry for each place that holds an
 /// escalated row (an escalation slot) and none twice, and the top three are three distinct Fixes
 /// that are Fixes of `json/inspection.json`.

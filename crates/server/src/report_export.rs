@@ -579,6 +579,10 @@ pub(crate) fn waiting_reason(
 
 /// [`waiting_reason`] for one finding: the three gates computed from the finding itself, so the
 /// workbook reads the same reason the PDF's held rows print.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the row, its gates' inputs and the project's chosen options"
+)]
 pub(crate) fn row_waiting_reason(
     finding: &Finding,
     disposition: Disposition,
@@ -586,17 +590,19 @@ pub(crate) fn row_waiting_reason(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
     bucket: &str,
 ) -> Option<&'static str> {
     waiting_reason(
         is_uncited_ai_finding(finding, corpus),
-        is_action_row_missing_a_fix(
+        is_action_row_missing_a_fix_with(
             finding,
             disposition,
             severity,
             corpus,
             test_file_count,
             chosen_option,
+            chosen_options,
         ),
         is_action_row_missing_an_estimate(
             finding,
@@ -919,13 +925,14 @@ pub fn build_report_json_with_counts(
             .get(&f.rule_id.to_ascii_uppercase())
             .map(String::as_str);
         let gate_uncited = is_uncited_ai_finding(f, corpus);
-        let gate_no_fix = is_action_row_missing_a_fix(
+        let gate_no_fix = is_action_row_missing_a_fix_with(
             f,
             *disposition,
             severity,
             corpus,
             report.test_file_count,
             chosen_option_for_rule,
+            &opts.chosen_options,
         );
         // C6-B4: computed independently (same pattern as `gate_no_fix` just above) purely so
         // the headline below can say WHICH held-for-review reason applied — `effective_bucket`
@@ -940,13 +947,14 @@ pub fn build_report_json_with_counts(
             report.test_file_count,
             chosen_option_for_rule,
         );
-        let bucket = effective_bucket(
+        let bucket = effective_bucket_with(
             f,
             *disposition,
             severity,
             corpus,
             report.test_file_count,
             chosen_option_for_rule,
+            &opts.chosen_options,
         );
         // C4-P2: `title_for_finding` (not a bare corpus-or-rule_id join) so an AI-tier finding
         // grounded via the P3 class fallback gets a human-readable title too, instead of a
@@ -1125,26 +1133,28 @@ pub fn build_report_json_with_counts(
                 // consider", never "Open (recommended: Later)". `effective_bucket` is the SAME
                 // call the matrix-building pass above makes for this finding, so the two can
                 // never compute a different answer for the same row.
-                let bucket = effective_bucket(
+                let bucket = effective_bucket_with(
                     f,
                     *disposition,
                     severity,
                     corpus,
                     report.test_file_count,
                     chosen_option_for_rule,
+                    &opts.chosen_options,
                 );
                 // C5-8: a no-fix-held row still appears here — same rule, same group, just this
                 // one site's `bucket` is `"held"` instead of an action tier. Disclose WHY in its
                 // own headline too, not only via `disposition_label`'s generic held-for-review
                 // wording, so a reader scanning this site within its rule's curated group sees
                 // the concrete reason right next to it.
-                let gate_no_fix = is_action_row_missing_a_fix(
+                let gate_no_fix = is_action_row_missing_a_fix_with(
                     f,
                     *disposition,
                     severity,
                     corpus,
                     report.test_file_count,
                     chosen_option_for_rule,
+                    &opts.chosen_options,
                 );
                 // C6-B4: same disclosure pattern as `gate_no_fix` just above — see that gate's
                 // sibling-ordering note in the matrix-bucketing loop for why `gate_no_fix` wins
@@ -1245,8 +1255,13 @@ pub fn build_report_json_with_counts(
                     // `fix_for_this_finding`, so the template's secondary line only ever adds
                     // information, never echoes the primary line back.
                     fix: {
-                        let generic =
-                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
+                        let generic = resolve_fix_for_row_chosen(
+                            &rule_id,
+                            corpus,
+                            f,
+                            chosen_option_for_rule,
+                            &opts.chosen_options,
+                        );
                         if generic == specific_fix {
                             None
                         } else {
@@ -1256,8 +1271,13 @@ pub fn build_report_json_with_counts(
                     // D8: the label beside the fix, from the same two facts the fields above
                     // were built from (the specific fix and the rule's own authored one).
                     fix_type: {
-                        let authored =
-                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
+                        let authored = resolve_fix_for_row_chosen(
+                            &rule_id,
+                            corpus,
+                            f,
+                            chosen_option_for_rule,
+                            &opts.chosen_options,
+                        );
                         fix_type_label(
                             f,
                             specific_fix.is_some(),

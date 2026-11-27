@@ -36,8 +36,8 @@ use serde::Serialize;
 
 use crate::onboard::Finding;
 use crate::report_export::{
-    classify, effective_bucket, finding_key, is_action_row_missing_a_fix, is_ai_tier,
-    is_held_for_review, is_informational, is_uncited_ai_finding, title_for_finding, ReviewedReport,
+    classify, finding_key, is_ai_tier, is_held_for_review, is_informational, is_uncited_ai_finding,
+    title_for_finding, ReviewedReport,
 };
 
 /// The sheet name the client workbook must never carry. Kept so the release gate and the tests
@@ -128,13 +128,14 @@ pub fn build_triage_log(
             .map(String::as_str);
         let disposition = classify(f, wire);
         let severity = crate::severity_bounds::bounded_severity(f, corpus);
-        let bucket = effective_bucket(
+        let bucket = crate::report_export::effective_bucket_with(
             f,
             disposition,
             &severity,
             corpus,
             report.test_file_count,
             chosen,
+            chosen_options,
         );
         let why = |outcome: &str| {
             format!(
@@ -145,7 +146,8 @@ pub fn build_triage_log(
                     &severity,
                     corpus,
                     report.test_file_count,
-                    chosen
+                    chosen,
+                    chosen_options,
                 )
             )
         };
@@ -195,6 +197,7 @@ fn set_aside_reason(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen: Option<&str>,
+    chosen_options: &HashMap<String, String>,
 ) -> &'static str {
     if is_held_for_review(f, disposition) {
         "calibration flagged it as needs review"
@@ -202,8 +205,15 @@ fn set_aside_reason(
         "no grounded citation for it"
     } else if is_informational(f, disposition, severity, corpus, test_file_count) {
         "a convention to consider, not an action item"
-    } else if is_action_row_missing_a_fix(f, disposition, severity, corpus, test_file_count, chosen)
-    {
+    } else if crate::report_export::is_action_row_missing_a_fix_with(
+        f,
+        disposition,
+        severity,
+        corpus,
+        test_file_count,
+        chosen,
+        chosen_options,
+    ) {
         "no fix to show for it"
     } else {
         "routed out of the action tiers"

@@ -994,9 +994,15 @@ impl ConventionsBlock {
             .iter()
             .chain(discarded)
             .map(|f| f.site_key.as_str())
+            .chain(
+                rows.iter()
+                    .flat_map(|f| f.flagged_by.iter().map(|s| s.site_key.as_str())),
+            )
             .filter(|k| !k.is_empty())
             .collect();
         let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        // Only a FINAL row's `flagged_by` accounts for a folded row (the owner's ruling).
+        let is_final = |f: &crate::onboard::Finding| rows.iter().any(|r| std::ptr::eq(r, f));
         let place = |repo: &str, path: &str, line: usize, rule: &str| {
             let path = path.trim_start_matches("./");
             rows.iter().chain(discarded).any(|f| {
@@ -1010,6 +1016,15 @@ impl ConventionsBlock {
                             && l.line == line
                             && same(&l.rule_id, rule)
                     })
+                    // A row the collapse folded into another stays on the survivor's
+                    // `flagged_by` at its own place, under its own rule id: merged, not lost.
+                    || (f.repo == repo
+                        && is_final(f)
+                        && f.flagged_by.iter().any(|s| {
+                            s.path.trim_start_matches("./") == path
+                                && s.line == line
+                                && same(&s.rule_id, rule)
+                        }))
             })
         };
         let mut lost = Vec::new();
