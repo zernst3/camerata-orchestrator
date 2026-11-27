@@ -120,6 +120,11 @@ pub struct StageUsage {
     /// written before this existed.
     #[serde(default)]
     pub models: BTreeMap<String, u64>,
+    /// Calls per mode: `batch` for a Message Batches row (backend `api/batch`), `live` for every
+    /// other call. Sums to `calls`. Empty for a record written before this existed, which is how
+    /// the client report tells "mode not recorded" from a stage that ran live.
+    #[serde(default)]
+    pub modes: BTreeMap<String, u64>,
     /// Sum of the calls' `elapsed_ms`: the time the stage's calls were in flight, added up. With
     /// calls running in parallel this exceeds the stage's wall-clock span (see
     /// `first_call_unix_ms` / `last_call_unix_ms`). A call with no timing (a record replayed from
@@ -177,6 +182,23 @@ fn model_key(r: &LlmResponse) -> String {
     }
 }
 
+/// The key a call is counted under in [`StageUsage::modes`]: `batch` for a Message Batches row,
+/// `live` for every other call.
+fn mode_key(r: &LlmResponse) -> &'static str {
+    if r.backend == BATCH_BACKEND {
+        MODE_BATCH
+    } else {
+        MODE_LIVE
+    }
+}
+
+/// The backend name a Message Batches row carries (`camerata_llm`'s batch parser).
+const BATCH_BACKEND: &str = "api/batch";
+/// [`StageUsage::modes`] key of a Message Batches call.
+pub const MODE_BATCH: &str = "batch";
+/// [`StageUsage::modes`] key of every other call.
+pub const MODE_LIVE: &str = "live";
+
 impl StageUsage {
     /// The share of billed input tokens that were cache reads: `cache_read_input_tokens /
     /// input_tokens`. `input_tokens` already INCLUDES cache read and write (see the struct doc),
@@ -210,6 +232,7 @@ impl StageUsage {
             self.cost_reported_calls += 1;
         }
         *self.models.entry(model_key(r)).or_default() += 1;
+        *self.modes.entry(mode_key(r).to_string()).or_default() += 1;
         if let Some(ms) = r.elapsed_ms {
             self.busy_ms = self.busy_ms.saturating_add(ms);
             let started = ended_unix_ms.saturating_sub(ms);
@@ -246,6 +269,9 @@ impl StageUsage {
         self.wasted_cost_usd += other.wasted_cost_usd;
         for (model, calls) in &other.models {
             *self.models.entry(model.clone()).or_default() += calls;
+        }
+        for (mode, calls) in &other.modes {
+            *self.modes.entry(mode.clone()).or_default() += calls;
         }
         self.busy_ms = self.busy_ms.saturating_add(other.busy_ms);
         self.wasted_busy_ms = self.wasted_busy_ms.saturating_add(other.wasted_busy_ms);
