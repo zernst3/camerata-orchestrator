@@ -136,6 +136,7 @@ pub mod scan_tools;
 pub mod scope_registration;
 pub mod seed;
 pub mod severity_bounds;
+pub mod stage_models;
 pub mod stage_telemetry;
 pub mod stall_sweep;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of

@@ -4035,10 +4035,16 @@ pub async fn audit_repos_with_llm_controlled(
     // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
     // never on a client export. Skipped when no model ran, so a deterministic-only scan carries
     // no empty record.
+    let telemetry = meter.stage_telemetry(code_lines_total);
+    // #584: which model each stage ran on, for the client report, recorded on every run: an empty
+    // record says no model ran, where a missing one means a run saved before the record existed.
+    report
+        .ledger
+        .record_model_stages(crate::stage_models::RecordedStageModels::from_telemetry(
+            &telemetry,
+        ));
     if report.actual_usage.as_ref().is_some_and(|u| u.calls > 0) {
-        report
-            .ledger
-            .record_stage_telemetry(meter.stage_telemetry(code_lines_total));
+        report.ledger.record_stage_telemetry(telemetry);
     }
     // W6: never a silent omission — surface every failed/timed-out pass so the export's
     // methodology and summary can disclose it explicitly instead of shipping quietly

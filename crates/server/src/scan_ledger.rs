@@ -598,6 +598,13 @@ pub struct ScanLedger {
     /// field existed.
     #[serde(default)]
     stage_telemetry: Option<crate::stage_telemetry::StageTelemetry>,
+    /// Which model each model stage ran on, and in which mode (#584): the client-facing copy of
+    /// the models and modes in [`Self::stage_telemetry`], with no cost or timing figure. The
+    /// client report's list of stages and models reads this and nothing else. An empty record is
+    /// a run that made no model call; `None` is a ledger written before the record existed (the
+    /// export then says "not recorded" for each stage it cannot name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_stages: Option<crate::stage_models::RecordedStageModels>,
     /// The question this scan's AI findings answered (model, prompt version, rule text). The
     /// delta rescan rebuilds its prior manifest from a stored inspection, and the inspection
     /// carries this ledger, so this is how the rebuilt prior proves its carried findings still
@@ -1758,6 +1765,11 @@ impl ScanLedger {
         self.stage_telemetry = Some(telemetry);
     }
 
+    /// Record which model each model stage ran on. Overwrites: one scan, one record.
+    pub fn record_model_stages(&mut self, stages: crate::stage_models::RecordedStageModels) {
+        self.model_stages = Some(stages);
+    }
+
     /// Record the question this scan's AI findings answered. See [`Self::ai_key`].
     pub fn record_ai_key(&mut self, key: crate::scan_cache::AiScanKey) {
         self.ai_key = Some(key);
@@ -1885,6 +1897,12 @@ impl ScanLedger {
     /// The scan's per-stage cost telemetry, when it recorded any.
     pub fn stage_telemetry(&self) -> Option<&crate::stage_telemetry::StageTelemetry> {
         self.stage_telemetry.as_ref()
+    }
+
+    /// Which model each model stage of the scan ran on, when the scan recorded it. See
+    /// [`crate::stage_models`].
+    pub fn model_stages(&self) -> Option<&crate::stage_models::RecordedStageModels> {
+        self.model_stages.as_ref()
     }
 
     /// What this scan was fed. Default (all zero, no model) when nothing recorded it — which
