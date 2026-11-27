@@ -99,6 +99,7 @@ pub mod onboard;
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;
 pub mod ownership;
+pub mod pinned_tools;
 pub mod pr;
 pub mod pr_resolve_run;
 pub mod preflight;
@@ -2616,6 +2617,39 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // Every scan tool and runtime this scan needs is provisioned now, before the first model call
+    // (#587). A tool set that cannot be provisioned refuses the scan here, with nothing spent.
+    let tools = match crate::pinned_tools::ToolEnv::product() {
+        Ok(tools) => tools,
+        Err(why) => {
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(why.clone());
+            r.message = Some(why);
+            return Json(r);
+        }
+    };
+    if run_deterministic {
+        let required = crate::pinned_tools::required_tool_set(
+            &sources,
+            &preview_rules,
+            corpus.as_ref(),
+            &scan_scope,
+            true,
+        );
+        let client = active_project.as_ref().is_none_or(|p| p.client_engagement);
+        if let Err(refusal) =
+            crate::pinned_tools::provision_tool_set(&tools, &required, client).await
+        {
+            let why =
+                format!("this inspection did not start: {refusal}. Nothing was sent to a model.");
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(why.clone());
+            r.message = Some(why);
+            return Json(r);
+        }
+    }
     let outcome = std::panic::AssertUnwindSafe(async move {
         let chosen_options = active_project
             .as_ref()
@@ -2675,7 +2709,9 @@ async fn onboard_audit(
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
         // (No job here, so no live deterministic progress on the synchronous path.)
         if run_deterministic {
-            merge_scan_preview(
+            // A tool that could not be provisioned mid-run makes the run incomplete (#587): the
+            // reason is the run's error, so the report says the run did not finish.
+            if let Err(stop) = merge_scan_preview(
                 &mut report,
                 &sources,
                 &preview_rules,
@@ -2683,8 +2719,14 @@ async fn onboard_audit(
                 None,
                 project_client_tooling(active_project.as_ref()),
                 &scan_scope,
+                &tools,
             )
-            .await;
+            .await
+            {
+                report.ai_error = Some(stop.to_string());
+                report.message = Some(stop.to_string());
+                return report;
+            }
         }
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
@@ -2707,10 +2749,15 @@ async fn onboard_audit(
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let repo_scope = scan_scope.for_repo(spec);
-                let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
+                let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope, &tools);
                 let (dep_findings, dep_note, dep_files) =
                     match timeout(dep_audit_timeout, run).await {
-                        Ok(result) => result,
+                        Ok(Ok(result)) => result,
+                        Ok(Err(stop)) => {
+                            report.ai_error = Some(stop.to_string());
+                            report.message = Some(stop.to_string());
+                            return report;
+                        }
                         Err(_elapsed) => (
                             Vec::new(),
                             Some(crate::onboard::CoverageNote {
@@ -3386,6 +3433,39 @@ pub(crate) async fn start_audit_job(
                     return;
                 }
             };
+            // Every scan tool and runtime this scan needs is provisioned now, before the first
+            // model call (#587). A tool set that cannot be provisioned fails the job here.
+            let tools = match crate::pinned_tools::ToolEnv::product() {
+                Ok(tools) => tools,
+                Err(why) => {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            };
+            if run_deterministic {
+                let required = crate::pinned_tools::required_tool_set(
+                    &sources,
+                    &preview_rules,
+                    corpus.as_ref(),
+                    &scan_scope,
+                    true,
+                );
+                let client = engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement);
+                if let Err(refusal) =
+                    crate::pinned_tools::provision_tool_set(&tools, &required, client).await
+                {
+                    body_jobs.fail(
+                        &body_jid,
+                        format!(
+                            "this inspection did not start: {refusal}. Nothing was sent to a \
+                             model."
+                        ),
+                    );
+                    return;
+                }
+            }
             let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
                 run_store.as_ref().map(|s| s.checkpoint_dir()),
                 crate::prompt_frame::with_seed(
@@ -3443,7 +3523,8 @@ pub(crate) async fn start_audit_job(
             // the deterministic selection; reports per-tool progress into the job so the cockpit's
             // deterministic progress view shows each preview tool start/run/done live.
             if run_deterministic {
-                merge_scan_preview(
+                // A tool that could not be provisioned mid-run stops the run (#587, #582).
+                if let Err(stop) = merge_scan_preview(
                     &mut report,
                     &sources,
                     &preview_rules,
@@ -3451,8 +3532,13 @@ pub(crate) async fn start_audit_job(
                     Some((&body_jobs, &body_jid)),
                     client_tooling,
                     &scan_scope,
+                    &tools,
                 )
-                .await;
+                .await
+                {
+                    body_jobs.fail(&body_jid, stop.to_string());
+                    return;
+                }
             }
 
             // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
@@ -3477,10 +3563,15 @@ pub(crate) async fn start_audit_job(
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let repo_scope = scan_scope.for_repo(spec);
-                    let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
+                    let run =
+                        crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope, &tools);
                     let (dep_findings, dep_note, dep_files) =
                         match timeout(dep_audit_timeout, run).await {
-                            Ok(result) => result,
+                            Ok(Ok(result)) => result,
+                            Ok(Err(stop)) => {
+                                body_jobs.fail(&body_jid, stop.to_string());
+                                return;
+                            }
                             Err(_elapsed) => (
                                 Vec::new(),
                                 Some(crate::onboard::CoverageNote {

@@ -133,6 +133,62 @@ fn tool_not_run(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(ToolNotRun(message.into()))
 }
 
+/// A scan tool that could not be provisioned DURING a run (#587, the run-integrity rule of #582).
+///
+/// The tool set is provisioned before the first model call
+/// ([`crate::pinned_tools::provision_tool_set`]), so at scan time each tool is only verified.
+/// When that verification has to provision and the provisioning fails (the tooling folder was
+/// removed mid-run, a download fails, a checksum does not match), the run STOPS: the result is
+/// this error, never a coverage note, so a missing tool can never read as a clean scope limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolProvisioningStop {
+    pub repo: String,
+    pub tool: &'static str,
+    pub reason: String,
+}
+
+impl std::fmt::Display for ToolProvisioningStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the inspection stopped: {} could not be provisioned while inspecting {}: {}",
+            self.tool, self.repo, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ToolProvisioningStop {}
+
+/// The error [`run_one_tool`] returns when provisioning its tool failed. A provisioning error
+/// that says Camerata has no build of the tool for this machine is instead a [`ToolNotRun`]: it
+/// was known, and listed, before the run started. So is the test-process guard
+/// ([`tool_provisioning::ProvisionError::RealToolingProtected`]), which only a cargo test binary
+/// can hit.
+#[derive(Debug)]
+struct ProvisioningFailed(String);
+
+impl std::fmt::Display for ProvisioningFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProvisioningFailed {}
+
+fn provisioning_error(tool: ScanTool, e: tool_provisioning::ProvisionError) -> anyhow::Error {
+    use tool_provisioning::ProvisionError as P;
+    match e {
+        // Known before the run (no build for this machine), or the guard that keeps a cargo
+        // test binary out of the real per-user tooling folder (never the product).
+        P::UnsupportedPlatform { .. }
+        | P::NoArtifactForPlatform { .. }
+        | P::RealToolingProtected { .. } => {
+            tool_not_run(format!("{} provisioning: {e}", tool.name()))
+        }
+        other => anyhow::Error::new(ProvisioningFailed(other.to_string())),
+    }
+}
+
 /// True when `error` came from a tool that was INVOKED and then failed, as opposed to one that
 /// was not run (see [`ToolNotRun`]). A program that cannot be started because it is not on the
 /// machine (`NotFound`) was never run, so it is the absence case.
@@ -1594,6 +1650,7 @@ fn tool_process_env(
     cmd
 }
 
+#[cfg(test)]
 async fn run_capture_stdout(
     dir: &Path,
     program: &str,
@@ -1789,7 +1846,9 @@ pub async fn run_scan_tools<'r>(
     // True when the scan covers more than one repo. The job's tool progress is then keyed by
     // repo and tool, so one repo's result for a tool is never written over another's.
     multi_repo: bool,
-) -> (Vec<Finding>, Vec<CoverageNote>, HashSet<&'static str>) {
+    // Where the pinned tools live and where a missing one is downloaded from.
+    tools: &crate::pinned_tools::ToolEnv,
+) -> Result<ScanToolsOutcome, ToolProvisioningStop> {
     let progress_key = |tool: &str| crate::jobs::progress_tool_key(repo, tool, multi_repo);
     let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
     let attempted: HashSet<&'static str> = by_tool.keys().map(|t| t.name()).collect();
@@ -1847,8 +1906,16 @@ pub async fn run_scan_tools<'r>(
         if let Some((jstore, jid)) = progress {
             jstore.det_tool_running(jid, &progress_key(tool.name()));
         }
-        let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone())
-            .await
+        let produced = match run_one_tool(
+            repo,
+            dir,
+            tool,
+            &rules,
+            lookup,
+            on_progress.clone(),
+            tools,
+        )
+        .await
         {
             Ok((mut fs, mut gaps)) => {
                 let n = fs.len();
@@ -1859,6 +1926,16 @@ pub async fn run_scan_tools<'r>(
                 // `run_one_tool`'s doc comment.
                 coverage_notes.append(&mut gaps);
                 n
+            }
+            Err(e) if e.downcast_ref::<ProvisioningFailed>().is_some() => {
+                if let Some((jstore, jid)) = progress {
+                    jstore.det_tool_done(jid, &progress_key(tool.name()), 0);
+                }
+                return Err(ToolProvisioningStop {
+                    repo: repo.to_string(),
+                    tool: tool.name(),
+                    reason: e.to_string(),
+                });
             }
             Err(e) => {
                 coverage_notes.push(CoverageNote {
@@ -1887,8 +1964,11 @@ pub async fn run_scan_tools<'r>(
         }
     }
 
-    (findings, coverage_notes, attempted)
+    Ok((findings, coverage_notes, attempted))
 }
+
+/// What [`run_scan_tools`] returns for one repo: `(findings, coverage_notes, attempted_tools)`.
+pub type ScanToolsOutcome = (Vec<Finding>, Vec<CoverageNote>, HashSet<&'static str>);
 
 /// Run a SINGLE tool over the repo with a Camerata-supplied config that enables
 /// exactly `rules`, and parse the result into preview findings. Returns `Err`
@@ -1925,7 +2005,12 @@ async fn run_one_tool<'r>(
     rules: &[&SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     on_progress: Option<HeartbeatFn>,
+    tools: &crate::pinned_tools::ToolEnv,
 ) -> anyhow::Result<(Vec<Finding>, Vec<CoverageNote>)> {
+    // Every provisioned tool starts with Camerata's own runtimes first on `PATH`, then the
+    // operating system's base folders: never the user's `PATH` (see `crate::pinned_tools`).
+    let child_path = PathBuf::from(tools.child_path());
+    let path_env: [(&str, &Path); 1] = [("PATH", child_path.as_path())];
     // Start the build-dir mtime probe for the duration of this tool run.
     // Targets the `target/` subdirectory of the repo root (cargo's default output
     // dir). The probe is best-effort: if `target/` doesn't exist (non-Rust repo),
@@ -1965,19 +2050,17 @@ async fn run_one_tool<'r>(
             // auto-provisions semgrep into a stable venv so the user never
             // needs to install it manually.  The preview runs against the
             // bundled offline ruleset (no network call to the semgrep registry).
-            let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
-                tool_not_run("could not resolve Camerata data dir for tool provisioning")
-            })?;
-            let semgrep_bin = tool_provisioning::ensure_semgrep(&tooling_dir)
+            let semgrep_bin = crate::pinned_tools::ensure_semgrep(tools)
                 .await
-                .map_err(|e| tool_not_run(format!("semgrep provisioning: {e}")))?;
+                .map_err(|e| provisioning_error(ScanTool::Semgrep, e))?;
             let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
             let rules_str = rules_dir.to_string_lossy().into_owned();
             let bin_str = semgrep_bin.to_string_lossy().into_owned();
             let args = semgrep_args(&rules_str);
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             let (stdout, _ok, stderr) =
-                run_capture_stdout(dir, &bin_str, &arg_refs, on_progress.as_ref()).await?;
+                run_capture_stdout_env(dir, &bin_str, &arg_refs, &path_env, on_progress.as_ref())
+                    .await?;
             match parse_sarif(repo, ScanTool::Semgrep, &stdout) {
                 Ok(fs) => Ok((fs, Vec::new())),
                 Err(e) => Err(tool_output_error(
@@ -1994,11 +2077,20 @@ async fn run_one_tool<'r>(
                     "no ruff rule codes derived from the selection",
                 ));
             }
+            // The pinned ruff from Camerata's tooling folder, provisioned now if it is somehow
+            // not there yet (it was provisioned before the first model call): never a `ruff`
+            // from the user's `PATH`, which is how #587's inspection lost its ruff pass.
+            let ruff = tools
+                .ensure_ruff()
+                .await
+                .map_err(|e| provisioning_error(ScanTool::Ruff, e))?;
+            let ruff = ruff.to_string_lossy().into_owned();
             let select = selectors.join(",");
             let args = ruff_args(&select);
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             let (stdout, _ok, stderr) =
-                run_capture_stdout(dir, "ruff", &arg_refs, on_progress.as_ref()).await?;
+                run_capture_stdout_env(dir, &ruff, &arg_refs, &path_env, on_progress.as_ref())
+                    .await?;
             match parse_ruff_json(repo, &stdout) {
                 Ok(fs) => Ok((fs, Vec::new())),
                 Err(e) => Err(tool_output_error(
@@ -2060,19 +2152,25 @@ async fn run_one_tool<'r>(
             // previous `--format @microsoft/eslint-formatter-sarif` could never
             // resolve and aborted every run with an empty stdout. See
             // [`parse_eslint_json`]'s doc comment for the full C11 post-mortem.
-            let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
-                tool_not_run("could not resolve Camerata data dir for tool provisioning")
-            })?;
-            tool_provisioning::ensure_eslint(&tooling_dir)
+            // eslint runs on the pinned Node.js, and its packages install with that Node.js's npm.
+            let node = tools
+                .ensure_node()
                 .await
-                .map_err(|e| tool_not_run(format!("eslint provisioning: {e}")))?;
+                .map_err(|e| provisioning_error(ScanTool::Eslint, e))?;
+            tool_provisioning::ensure_eslint_with(&tools.tooling, &tools.npm_command(&node))
+                .await
+                .map_err(|e| provisioning_error(ScanTool::Eslint, e))?;
+            let tooling_dir = tools.tooling.clone();
             // Resolve the `eslint` symlink ONCE to the concrete generation directory and run
             // from those paths, so a re-provision swapping the link mid-run cannot affect us.
             let run_paths = tool_provisioning::eslint_run_paths(&tooling_dir)
                 .await
                 .map_err(|e| tool_not_run(format!("eslint workspace: {e}")))?;
             let workspace = run_paths.workspace;
-            let bin_str = run_paths.bin.to_string_lossy().into_owned();
+            // `node <eslint.js>`, not the `.bin/eslint` launcher: the launcher finds `node`
+            // through `PATH`; this names the pinned one.
+            let node_str = node.node.to_string_lossy().into_owned();
+            let script_str = run_paths.script.to_string_lossy().into_owned();
             let config_str = run_paths.config.to_string_lossy().into_owned();
 
             // Withhold any selector whose plugin package is absent — handing one
@@ -2112,9 +2210,12 @@ async fn run_one_tool<'r>(
                 )));
             }
             let args = eslint_args_ignoring_links(&config_str, &runnable, &links);
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let arg_refs: Vec<&str> = std::iter::once(script_str.as_str())
+                .chain(args.iter().map(|s| s.as_str()))
+                .collect();
             let (stdout, _ok, stderr) =
-                run_capture_stdout(dir, &bin_str, &arg_refs, on_progress.as_ref()).await?;
+                run_capture_stdout_env(dir, &node_str, &arg_refs, &path_env, on_progress.as_ref())
+                    .await?;
             match parse_eslint_json(repo, &stdout) {
                 Ok((fs, shape)) => {
                     // "Read every file and could not parse a single one" is a
@@ -2165,6 +2266,8 @@ async fn run_one_tool<'r>(
     })
 }
 
+#[cfg(test)]
+mod provisioned_tools_tests;
 #[cfg(test)]
 mod redaction_tests;
 
@@ -2235,11 +2338,18 @@ mod tests {
     /// Build a `lookup` closure over a slice of hand-built rules (the real caller
     /// passes `|id| set.get_by_id(id)`; tests avoid the private `RuleSet` ctor).
     /// The explicit HRTB matches the `&dyn Fn` param's `for<'a>` bound.
-    fn lookup_over<'r>(rules: &'r [Rule]) -> impl Fn(&str) -> Option<&'r Rule> + Send + Sync {
+    pub(super) fn lookup_over<'r>(
+        rules: &'r [Rule],
+    ) -> impl Fn(&str) -> Option<&'r Rule> + Send + Sync {
         move |id: &str| rules.iter().find(|r| r.id.0 == id)
     }
 
-    fn rule_with(id: &str, enforcement: EnforcementKind, layer3: bool, linters: &[&str]) -> Rule {
+    pub(super) fn rule_with(
+        id: &str,
+        enforcement: EnforcementKind,
+        layer3: bool,
+        linters: &[&str],
+    ) -> Rule {
         Rule {
             id: RuleId(id.to_string()),
             title: id.to_string(),
@@ -2283,7 +2393,7 @@ mod tests {
         }
     }
 
-    fn selected(id: &str) -> SelectedRule {
+    pub(super) fn selected(id: &str) -> SelectedRule {
         SelectedRule {
             id: id.to_string(),
             directive: "do the thing".to_string(),
@@ -2576,6 +2686,7 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let dir = tempfile::tempdir().expect("tempdir");
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
         let (findings, notes, attempted) = run_scan_tools(
             "me/api",
             dir.path(),
@@ -2585,8 +2696,10 @@ mod tests {
             None,
             crate::client_lock::ClientTooling::INTERNAL,
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
 
         assert!(
             findings.is_empty(),
@@ -2654,6 +2767,7 @@ mod tests {
         let marker = marks.path().join("built");
         crate_that_marks_when_built(repo.path(), &marker);
 
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
         let (findings, notes, attempted) = run_scan_tools(
             "me/api",
             repo.path(),
@@ -2663,8 +2777,10 @@ mod tests {
             None,
             crate::client_lock::ClientTooling::new(true, false),
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
 
         assert!(!marker.exists(), "the client's build script must not run");
         assert!(!repo.path().join("target").exists(), "nothing was compiled");
@@ -2713,6 +2829,7 @@ mod tests {
         let marker = marks.path().join("built");
         crate_that_marks_when_built(repo.path(), &marker);
 
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
         let (_findings, notes, _attempted) = run_scan_tools(
             "me/api",
             repo.path(),
@@ -2722,8 +2839,10 @@ mod tests {
             None,
             crate::client_lock::ClientTooling::new(true, true),
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
 
         assert!(marker.exists(), "opted in: clippy built the crate");
         assert!(
@@ -3286,6 +3405,7 @@ mod tests {
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
         // the pass must emit a coverage NOTE, NOT an empty (clean) result and NOT a finding.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
         let (findings, notes, attempted) = run_scan_tools(
             "me/api",
             dir,
@@ -3295,8 +3415,10 @@ mod tests {
             None,
             crate::client_lock::ClientTooling::INTERNAL,
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
         assert!(
             findings.is_empty(),
             "missing tool must yield no finding rows"
@@ -3378,6 +3500,7 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
         let (_, notes, _) = run_scan_tools(
             "me/api",
             dir,
@@ -3387,8 +3510,10 @@ mod tests {
             None,
             crate::client_lock::ClientTooling::INTERNAL,
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
         assert!(!notes.is_empty());
         assert!(notes.iter().all(|n| !n.tool_failed), "{notes:?}");
     }
@@ -3403,6 +3528,7 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
         let (findings, notes, attempted) = run_scan_tools(
             "me/api",
             dir,
@@ -3412,8 +3538,10 @@ mod tests {
             None,
             crate::client_lock::ClientTooling::INTERNAL,
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
         assert!(
             findings.is_empty(),
             "a missing tool must yield NO finding row"
@@ -4712,11 +4840,17 @@ def get_user_safe_constant():
         }
     }
 
+    /// The product's tool environment under the name the fixture uses (`tools.env`), for the live
+    /// tests that run the real pinned tools.
+    struct LiveTools {
+        env: crate::pinned_tools::ToolEnv,
+    }
+
     /// Whether a Camerata-managed eslint workspace, with `eslint-plugin-react-hooks`
     /// already installed inside it, is cached on THIS machine from a prior real
     /// provisioning run. Mirrors `which_semgrep`'s role above: gates the live test on
     /// tool presence WITHOUT triggering a network `npm install` at test time (which would
-    /// make this test flaky/slow/offline-hostile — `ensure_eslint`'s probe-first design
+    /// make this test flaky/slow/offline-hostile — `ensure_eslint_with`'s probe-first design
     /// means this check and the live test below never provision anything new). A bare
     /// `eslint` binary on PATH is not enough here (unlike `which_semgrep`, which only
     /// needs semgrep itself): the assertion below needs `eslint-plugin-react-hooks`
@@ -4729,7 +4863,12 @@ def get_user_safe_constant():
     /// `tool_provisioning::refuse_real_tooling_in_test_process`); this probe is what keeps the
     /// skip decision honest instead of letting the refusal surface as a confusing test failure.
     async fn cached_eslint_workspace_with_react_hooks_plugin() -> Option<std::path::PathBuf> {
-        let tooling = tool_provisioning::tooling_dir()?;
+        let tools = crate::pinned_tools::ToolEnv::product().ok()?;
+        // eslint runs on the pinned Node.js (#587): without it the live test skips.
+        if !tools.is_installed(crate::pinned_tools::Artifact::Node) {
+            return None;
+        }
+        let tooling = tools.tooling;
         let workspace = tool_provisioning::eslint_workspace_dir(&tooling);
         if !tool_provisioning::eslint_is_provisioned(&workspace).await {
             return None;
@@ -4787,6 +4926,9 @@ export function Thing({ id }) {
         let lookup = lookup_over(&rules);
         let selection = vec![selected("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")];
 
+        // The real pinned tools, read only: the skip above made sure they are installed.
+        let tools = crate::pinned_tools::ToolEnv::product().expect("checked above");
+        let tools = LiveTools { env: tools };
         let (findings, notes, attempted) = run_scan_tools(
             "me/web",
             dir.path(),
@@ -4796,8 +4938,10 @@ export function Thing({ id }) {
             None,
             crate::client_lock::ClientTooling::INTERNAL,
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
 
         assert!(
             attempted.contains("eslint"),
@@ -4989,6 +5133,9 @@ export function Thing({ id }) {
             .map(selected)
             .collect();
         let lookup = |id: &str| corpus.get_by_id(id);
+        // The real pinned tools, read only: the skip above made sure they are installed.
+        let tools = crate::pinned_tools::ToolEnv::product().expect("checked above");
+        let tools = LiveTools { env: tools };
         let (findings, notes, attempted) = run_scan_tools(
             "me/web",
             dir.path(),
@@ -4998,8 +5145,10 @@ export function Thing({ id }) {
             None,
             crate::client_lock::ClientTooling::INTERNAL,
             false,
+            &tools.env,
         )
-        .await;
+        .await
+        .expect("no provisioning stop");
         assert!(attempted.contains("eslint"), "notes={notes:?}");
         assert!(
             notes.iter().all(|n| !n.message.contains(HOOKS_LINT_RULE)),
@@ -5056,7 +5205,12 @@ export function Thing({ id }) {
     /// probe, so a stale or half-installed workspace makes the live test skip instead of
     /// triggering (or racing) a re-provision of the shared tree.
     async fn cached_eslint_workspace() -> Option<std::path::PathBuf> {
-        let tooling = tool_provisioning::tooling_dir()?;
+        let tools = crate::pinned_tools::ToolEnv::product().ok()?;
+        // eslint runs on the pinned Node.js (#587): without it the live test skips.
+        if !tools.is_installed(crate::pinned_tools::Artifact::Node) {
+            return None;
+        }
+        let tooling = tools.tooling;
         let workspace = tool_provisioning::eslint_workspace_dir(&tooling);
         if !tool_provisioning::eslint_is_provisioned(&workspace).await {
             return None;
@@ -5544,7 +5698,7 @@ export function Thing({ id }) {
         let Some(tooling) = tool_provisioning::tooling_dir() else {
             return;
         };
-        let bin = tool_provisioning::semgrep_bin(&tool_provisioning::semgrep_venv_dir(&tooling));
+        let bin = crate::pinned_tools::semgrep_bin(&tooling);
         if !bin.exists() {
             eprintln!("skipping: no cached Camerata semgrep on this machine");
             return;

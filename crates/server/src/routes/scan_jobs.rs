@@ -851,7 +851,10 @@ pub async fn merge_scan_preview(
     tooling: crate::client_lock::ClientTooling,
     // The project's exclusion list: a preview finding in a file it names is dropped.
     scope: &crate::onboard::scope::ScanScope,
-) {
+    // Where the pinned scan tools live (#587). They were provisioned before the first model call;
+    // here each is only verified.
+    tools: &crate::pinned_tools::ToolEnv,
+) -> Result<(), crate::scan_tools::ToolProvisioningStop> {
     // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
     // (regardless of whether each attempt then succeeded or failed) — fed to
     // `reconcile_external_tool_ledger` so it can tell "the tool ran and found nothing" apart
@@ -926,7 +929,7 @@ pub async fn merge_scan_preview(
                     }
                 };
                 let copy_failed = mirror.copy_failed.clone();
-                let (previews, mut notes, attempted) = crate::scan_tools::run_scan_tools(
+                let ran = crate::scan_tools::run_scan_tools(
                     spec,
                     mirror.path(),
                     &for_repo,
@@ -935,8 +938,18 @@ pub async fn merge_scan_preview(
                     job,
                     tooling,
                     sources.len() > 1,
+                    tools,
                 )
                 .await;
+                // A tool that could not be provisioned mid-run stops the run (#587, #582): the
+                // mirror is removed, nothing more is merged, and the caller ends the run.
+                let (previews, mut notes, attempted) = match ran {
+                    Ok(outcome) => outcome,
+                    Err(stop) => {
+                        mirror.finish().await;
+                        return Err(stop);
+                    }
+                };
                 // A tool's message must not name the private copy's folder.
                 for note in &mut notes {
                     note.message =
@@ -993,6 +1006,7 @@ pub async fn merge_scan_preview(
     // that actually runs the tool) executed at all. See `reconcile_external_tool_ledger`'s doc
     // comment for why this correction can't happen earlier.
     reconcile_external_tool_ledger(report, &tools_attempted, corpus);
+    Ok(())
 }
 
 /// Join one repo's external-tool preview rows to the report: collapse those that overlap rows

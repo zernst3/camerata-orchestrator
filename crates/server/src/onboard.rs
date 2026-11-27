@@ -4069,7 +4069,7 @@ pub async fn audit_repos_with_llm_controlled(
     }
     // Provenance (P1): stamp exactly what was audited, so the report is board-forwardable
     // without an asterisk. `osv_scanner_version` is the PINNED version Camerata provisions
-    // (`tool_provisioning::OSV_SCANNER_VERSION`) — the dep-audit pass itself runs AFTER this
+    // (`pinned_tools::pins::OSV_SCANNER_VERSION`) — the dep-audit pass itself runs AFTER this
     // function returns (in the caller), gated on the same `run_deterministic` flag.
     // W19: hand the integrity gate what this scan was actually FED. Recorded at the same
     // point provenance is stamped, because that is where the file totals and the resolved
@@ -4123,7 +4123,7 @@ pub async fn audit_repos_with_llm_controlled(
         audited_rule_ids,
         camerata_version: env!("CARGO_PKG_VERSION").to_string(),
         osv_scanner_version: run_deterministic
-            .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
+            .then(|| crate::pinned_tools::pins::OSV_SCANNER_VERSION.to_string()),
         vulnerability_data: None,
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
@@ -6918,7 +6918,7 @@ mod tests {
     #[serial_test::serial(process_env)]
     async fn deterministic_only_runs_floor_and_skips_ai() {
         // Disable the always-on dep-audit pass so this test does not trigger
-        // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
+        // the pinned osv-scanner provisioning (a live download).
         // This test exercises the deterministic floor + scan-mode selector logic,
         // not dep-audit. See `crate::dep_audit::DISABLE_ENV_VAR`.
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
@@ -6966,7 +6966,7 @@ mod tests {
     #[serial_test::serial(process_env)]
     async fn deterministic_off_skips_floor() {
         // Disable the always-on dep-audit pass so this test does not trigger
-        // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
+        // the pinned osv-scanner provisioning (a live download).
         // This test exercises the scan-mode selector (deterministic gate), not dep-audit.
         // See `crate::dep_audit::DISABLE_ENV_VAR`.
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
