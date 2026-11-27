@@ -747,7 +747,9 @@ pub fn parse_ai_findings(
             if let Some(why) = placeholder_why {
                 junk_dropped.push(format!(
                     "{rule_id} at {}: {why}",
-                    f["path"].as_str().unwrap_or("(repo)")
+                    f["path"]
+                        .as_str()
+                        .unwrap_or(crate::onboard::placeholder_paths::REPO_PATH)
                 ));
             }
             // `snippet` holds the VERBATIM offending line when the model gave one (matches the
@@ -769,7 +771,10 @@ pub fn parse_ai_findings(
                 flagged_by: Vec::new(),
                 possible_duplicate_of: None,
                 repo: repo.to_string(),
-                path: f["path"].as_str().unwrap_or("(repo)").to_string(),
+                path: f["path"]
+                    .as_str()
+                    .unwrap_or(crate::onboard::placeholder_paths::REPO_PATH)
+                    .to_string(),
                 line: ["line", "start_line", "line_number"]
                     .iter()
                     .map(|k| parse_model_line(&f[*k]))
@@ -801,7 +806,16 @@ pub fn parse_ai_findings(
                 // `audit_system_prompt`), `parse_finding_captures` maps it through so the
                 // report can name the real object instead of falling back to a generic
                 // placeholder. Empty (the common case) falls back exactly as before.
-                captures: parse_finding_captures(f),
+                captures: {
+                    let mut captures = parse_finding_captures(f);
+                    // Where the row was born, for the evidence check: the model wrote it, whatever
+                    // calibration later does or fails to do (#546).
+                    captures.insert(
+                        crate::onboard::evidence_check::MODEL_WRITTEN_CAPTURE.to_string(),
+                        "1".to_string(),
+                    );
+                    captures
+                },
                 // Set by `audit_repo` in a blanket post-pass once the recommendation (or
                 // operator-forced pick) for this finding's rule is known — see its doc
                 // comment. `None` here is the correct pre-tag state, not a gap.

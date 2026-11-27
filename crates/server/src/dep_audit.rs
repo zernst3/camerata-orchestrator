@@ -226,7 +226,7 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
             .get("source")
             .and_then(|s| s.get("path"))
             .and_then(|p| p.as_str())
-            .unwrap_or("(unknown lockfile)");
+            .unwrap_or(crate::onboard::placeholder_paths::UNKNOWN_LOCKFILE_PATH);
 
         // osv-scanner follows a symbolic link to a lockfile, so a link pointing outside the
         // repository would put an outside file's packages in the report. Such a result is

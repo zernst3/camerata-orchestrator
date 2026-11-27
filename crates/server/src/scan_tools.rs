@@ -651,7 +651,7 @@ pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Findi
     let message = message.into();
     let mut finding = Finding {
         repo: repo.to_string(),
-        path: "(scan preview)".to_string(),
+        path: crate::onboard::placeholder_paths::SCAN_PREVIEW_PATH.to_string(),
         line: 0,
         rule_id: format!("PREVIEW-NOTE-{}", tool.to_ascii_uppercase()),
         severity: "info".to_string(),
@@ -950,7 +950,7 @@ pub fn parse_sarif(repo: &str, tool: ScanTool, json: &str) -> anyhow::Result<Vec
                         .get("artifactLocation")
                         .and_then(|al| al.get("uri"))
                         .and_then(|u| u.as_str())
-                        .unwrap_or("(repo)")
+                        .unwrap_or(crate::onboard::placeholder_paths::REPO_PATH)
                         .to_string();
                     let line = pl
                         .get("region")
@@ -959,7 +959,7 @@ pub fn parse_sarif(repo: &str, tool: ScanTool, json: &str) -> anyhow::Result<Vec
                         .unwrap_or(0) as usize;
                     (path, line)
                 })
-                .unwrap_or_else(|| ("(repo)".to_string(), 0));
+                .unwrap_or_else(|| (crate::onboard::placeholder_paths::REPO_PATH.to_string(), 0));
             out.push(preview_finding(
                 repo, tool, &path, line, &rule_id, level, &message,
             ));
@@ -1032,7 +1032,7 @@ pub fn parse_eslint_json(repo: &str, json: &str) -> anyhow::Result<(Vec<Finding>
         let path = file
             .get("filePath")
             .and_then(|p| p.as_str())
-            .unwrap_or("(repo)");
+            .unwrap_or(crate::onboard::placeholder_paths::REPO_PATH);
         let messages = file
             .get("messages")
             .and_then(|m| m.as_array())
@@ -1092,7 +1092,7 @@ pub fn parse_ruff_json(repo: &str, json: &str) -> anyhow::Result<Vec<Finding>> {
         let path = d
             .get("filename")
             .and_then(|f| f.as_str())
-            .unwrap_or("(repo)");
+            .unwrap_or(crate::onboard::placeholder_paths::REPO_PATH);
         let line = d
             .get("location")
             .and_then(|l| l.get("row"))
@@ -1268,12 +1268,12 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
                 let path = sp
                     .get("file_name")
                     .and_then(|f| f.as_str())
-                    .unwrap_or("(repo)")
+                    .unwrap_or(crate::onboard::placeholder_paths::REPO_PATH)
                     .to_string();
                 let line = sp.get("line_start").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
                 (path, line)
             })
-            .unwrap_or_else(|| ("(repo)".to_string(), 0));
+            .unwrap_or_else(|| (crate::onboard::placeholder_paths::REPO_PATH.to_string(), 0));
         out.push(preview_finding(
             repo,
             ScanTool::Clippy,

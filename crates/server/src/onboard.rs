@@ -27,6 +27,7 @@ pub mod finding_context;
 pub mod finding_context_batch;
 pub mod greenfield;
 pub mod patterns_matrix;
+pub mod placeholder_paths;
 pub mod propose;
 pub(crate) mod redact;
 pub mod report;
@@ -165,6 +166,13 @@ impl BookkeepingCaptures {
                 if *key == crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE
                     || *key == crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE
                 {
+                    continue;
+                }
+
+                // The birth mark of a model-written row stays: the evidence check reads it after
+                // this step, and held aside it would restore by row identity onto a floor row that
+                // shares the identity (#546).
+                if *key == evidence_check::MODEL_WRITTEN_CAPTURE {
                     continue;
                 }
 
@@ -4822,6 +4830,53 @@ mod tests {
                 .captures
                 .contains_key(crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE),
             "the others are still held aside"
+        );
+    }
+
+    /// #546: the birth mark of a model-written row survives the held-aside step, so the evidence
+    /// check that follows it (as the scan calls it) still knows the row is model-written, even
+    /// under a floor rule id the ledger lists as deterministic.
+    #[test]
+    fn a_model_row_under_a_floor_rule_id_is_still_held_by_the_check_after_the_held_aside_step() {
+        let dir =
+            std::env::temp_dir().join(format!("camerata-pipeline-546-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/excluded.rs"), "fn a() { db.execute(q); }\n").unwrap();
+        let mut row = Finding {
+            repo: "acme/shop".to_string(),
+            path: "src/excluded.rs".to_string(),
+            line: 0,
+            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            snippet: "db.execute(q);".to_string(),
+            ..Finding::default()
+        };
+        row.captures.insert(
+            evidence_check::MODEL_WRITTEN_CAPTURE.to_string(),
+            "1".to_string(),
+        );
+        let mut ledger = crate::scan_ledger::ScanLedger::default();
+        ledger.record_rule(
+            "acme/shop",
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            1,
+            1,
+        );
+        let mut rows = vec![row];
+        BookkeepingCaptures::default().take(&mut rows);
+        assert!(rows[0]
+            .captures
+            .contains_key(evidence_check::MODEL_WRITTEN_CAPTURE));
+        let admitted = vec![("src/a.rs".to_string(), "fn b() {}\n".to_string())];
+        evidence_check::verify_and_record(&mut ledger, &mut rows, &admitted, Some(&dir));
+        assert!(
+            rows[0]
+                .captures
+                .contains_key(evidence_check::EVIDENCE_UNVERIFIED_CAPTURE),
+            "{:?}",
+            rows[0].captures
         );
     }
 

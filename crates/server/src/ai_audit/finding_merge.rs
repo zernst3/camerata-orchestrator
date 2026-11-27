@@ -987,6 +987,7 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // M5: the sentence that says a row's quoted snippet was not found near its line.
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_SITES_CAPTURE,
+    crate::onboard::evidence_check::MODEL_WRITTEN_CAPTURE,
     // M4: the list of review flags the detail and fix stages wrote on the row (a wording problem
     // that shipped with a flag). The same flag on two rows says the same check fired, not that
     // the rows are about the same object.

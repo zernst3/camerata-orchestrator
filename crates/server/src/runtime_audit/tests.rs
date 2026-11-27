@@ -1105,11 +1105,10 @@ async fn a_vulnerable_exact_version_in_three_files_is_three_rows() {
 async fn every_runtime_row_passes_the_evidence_check() {
     let dir = repo(&THREE_FILES);
     let mut audit = run(&dir, &Fixture::online(), None).await;
-    let files: Vec<(String, String)> = THREE_FILES
-        .iter()
-        .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
-        .collect();
-    let counts = crate::onboard::evidence_check::verify_evidence(&mut audit.findings, &files, None);
+    // As production folds the rows in (`fold_runtime_audit`): no scanned files in hand, the repo
+    // folder on disk.
+    let counts =
+        crate::onboard::evidence_check::verify_evidence(&mut audit.findings, &[], Some(dir.path()));
     assert_eq!(counts.unverified, 0, "{:?}", audit.findings);
     assert_eq!(counts.checked, audit.findings.len());
     assert_eq!(counts.sites_seen(), 0);

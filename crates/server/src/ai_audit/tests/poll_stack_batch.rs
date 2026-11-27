@@ -822,7 +822,15 @@ fn parse_ai_findings_defaults_to_empty_captures_when_the_field_is_absent() {
     let none = std::collections::HashSet::new();
     let (findings, _) = parse_ai_findings("me/api", raw, &none);
     assert_eq!(findings.len(), 1);
-    assert!(findings[0].captures.is_empty());
+    // No object capture; only the birth mark the parser writes on every model row (#546).
+    assert_eq!(
+        findings[0]
+            .captures
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [crate::onboard::evidence_check::MODEL_WRITTEN_CAPTURE]
+    );
 }
 
 /// A malformed `captures` blob — wrong JSON type, an unknown/hallucinated token key, a
@@ -872,7 +880,8 @@ fn parse_ai_findings_degrades_a_malformed_captures_blob_without_panicking() {
         !findings[0].captures.contains_key("view"),
         "a value over the length cap must be dropped"
     );
-    assert_eq!(findings[0].captures.len(), 1);
+    // One kept capture plus the birth mark (#546).
+    assert_eq!(findings[0].captures.len(), 2);
 }
 
 /// `captures` being an entirely wrong JSON shape (a string, not an object) must also
@@ -886,7 +895,15 @@ fn parse_ai_findings_degrades_a_non_object_captures_value_to_empty() {
     let none = std::collections::HashSet::new();
     let (findings, _) = parse_ai_findings("me/api", raw, &none);
     assert_eq!(findings.len(), 1);
-    assert!(findings[0].captures.is_empty());
+    // No object capture; only the birth mark the parser writes on every model row (#546).
+    assert_eq!(
+        findings[0]
+            .captures
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [crate::onboard::evidence_check::MODEL_WRITTEN_CAPTURE]
+    );
 }
 
 /// The raw-audit parser must ACCEPT and PRESERVE an explicit `"critical"` severity from
