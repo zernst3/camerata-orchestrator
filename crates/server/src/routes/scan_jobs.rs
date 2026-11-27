@@ -837,6 +837,7 @@ pub(crate) fn staged_for_scan(
 /// `pub`: also called directly by `camerata inspect` (the headless CLI), so the SAME
 /// preview-linter pass the interactive `onboard_audit` handler runs also runs headlessly —
 /// see `crates/cli/src/inspect_cmd.rs`.
+#[allow(clippy::too_many_arguments)] // one preview pass's inputs, in the order the pass uses them
 pub async fn merge_scan_preview(
     report: &mut crate::onboard::ScanReport,
     sources: &[(String, std::path::PathBuf)],
