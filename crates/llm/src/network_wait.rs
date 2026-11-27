@@ -301,6 +301,43 @@ mod tests {
         assert!(waits.is_empty(), "a stopped run waited: {waits:?}");
     }
 
+    /// A sleeper that stops `wait` while the request sleeps.
+    struct StopsWhileAsleep(Arc<NetworkWait>);
+
+    impl Sleeper for StopsWhileAsleep {
+        fn sleep<'a>(
+            &'a self,
+            _d: Duration,
+        ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            self.0.stop();
+            Box::pin(async {})
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_arrives_while_asleep_ends_the_wait_without_another_send() {
+        let _g = SERIAL.lock().await;
+        let wait = Arc::new(NetworkWait::new());
+        crate::retry::set_process_sleeper(Some(Arc::new(StopsWhileAsleep(wait.clone()))));
+        let sends = AtomicU64::new(0);
+        let out = wait
+            .run(
+                || {
+                    sends.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<(), _>(transport()) }
+                },
+                &|| true,
+            )
+            .await;
+        crate::retry::set_process_sleeper(None);
+        assert!(out.is_err());
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "a stopped run sent the request again after its wait"
+        );
+    }
+
     #[tokio::test]
     async fn a_stop_during_a_wait_ends_it_without_another_send() {
         let _g = SERIAL.lock().await;

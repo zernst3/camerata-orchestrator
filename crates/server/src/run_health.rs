@@ -416,6 +416,19 @@ mod tests {
     }
 
     #[test]
+    fn a_network_wait_that_ran_out_stops_the_run_only_if_no_call_succeeded_meanwhile() {
+        let (h, _) = health();
+        let before = h.successes();
+        h.note_success(); // another piece's call got through while this one waited
+        assert!(!h.note_network_wait_exhausted("connection reset", before));
+        assert!(!h.is_stopped(), "the network is up: this request alone fails");
+        assert!(h.note_network_wait_exhausted("connection reset", h.successes()));
+        assert!(h.is_stopped());
+        assert_eq!(h.trigger().map(|t| t.class), Some(FailureClass::Transport));
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE);
+    }
+
+    #[test]
     fn a_rate_limit_that_did_not_clear_stops_the_run_and_says_so() {
         let (h, _) = health();
         assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE, "not stopped yet");

@@ -253,3 +253,67 @@ async fn a_stop_cancels_the_live_batches_before_the_run_is_dropped() {
         Ended::Finished(()) => panic!("the run cannot finish"),
     }
 }
+
+/// A provider whose submit is held until the test lets it answer.
+struct HeldSubmit {
+    inner: Provider,
+    release: tokio::sync::Notify,
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl BatchApi for HeldSubmit {
+    fn has_api_key(&self) -> bool {
+        true
+    }
+    fn realtime(&self) -> &dyn LlmPort {
+        &self.inner
+    }
+    async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+        None
+    }
+    async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.submit(items).await
+    }
+    async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
+        self.inner.poll(batch_id).await
+    }
+    async fn fetch(&self, batch_id: &str, ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        self.inner.fetch(batch_id, ttl).await
+    }
+    async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        self.inner.cancel_batch(batch_id).await
+    }
+}
+
+#[tokio::test]
+async fn a_batch_accepted_as_the_run_stops_is_cancelled_too() {
+    let provider = Arc::new(HeldSubmit {
+        inner: Provider::default(),
+        release: tokio::sync::Notify::new(),
+        entered: tokio::sync::Notify::new(),
+    });
+    let control = Arc::new(RunControl::new());
+    let base = Box::leak(Box::new(BatchSeam::new(provider.clone())));
+    let seam = crate::network_wait::wrap(base, control.clone());
+    let api = api_of(seam.as_ref());
+    let submit = api.submit(Vec::new());
+    let stop_meanwhile = async {
+        // The submit is on its way when the operator stops the run; the provider accepts it after.
+        provider.entered.notified().await;
+        let report = control.stop().await;
+        provider.release.notify_one();
+        report
+    };
+    let (id, report) = tokio::join!(submit, stop_meanwhile);
+    let id = id.expect("the provider accepted the batch");
+    assert!(report.cancelled.is_empty(), "nothing was live when the stop began");
+    assert_eq!(
+        *provider.inner.cancels.lock().unwrap(),
+        vec![id],
+        "the batch accepted after the stop began is cancelled at once"
+    );
+    assert!(control.live_batches().is_empty());
+}
