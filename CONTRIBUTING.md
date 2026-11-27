@@ -19,6 +19,10 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked -- -D wa
 RUSTFLAGS="-D warnings" cargo test --workspace --locked
 ```
 
+CI runs the tests under cargo-nextest, split across parallel jobs, plus `cargo test --doc` for
+the doctests; `scripts/gate-nextest-local.sh` is the local equivalent (see
+[`docs/NEXTEST_GATE.md`](docs/NEXTEST_GATE.md)). Either runner runs the same tests.
+
 CI also runs `scripts/check-personal-paths.sh`, which fails when a tracked file names a personal
 home directory or the private fixture folder. Write example paths as `/Users/auditor/...`. Run
 the script before you push.

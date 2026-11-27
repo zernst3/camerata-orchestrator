@@ -3,6 +3,16 @@ name: CI
 # Camerata governs its own source the way it governs the agents: mechanically, in
 # CI, on every push and pull request. The whole thesis is "examples are not
 # enforcement, the gate is", so this gate runs on Camerata's own code.
+#
+# Every gate is its own job, so they run in parallel (issue #340):
+#
+#   paths, fmt, clippy, self-measurement, doctests, deny, strict-frontier   start at once
+#   build                    compiles every test binary ONCE into a nextest archive
+#   test (partitions 1..N)   need `build`; each runs 1/N of the tests from the archive
+#   govern                   needs every blocking gate; green only if all of them are
+#
+# `govern` keeps the name of the old single gate job ("Camerata governs its own code"), so a
+# check required under that name still means "every blocking gate passed".
 
 on:
   push:
@@ -12,88 +22,281 @@ on:
     branches: [main, "feat/**", "fix/**"]
   pull_request:
 
-# Least privilege: nothing here writes to the repository, issues or packages.
+# Least privilege: nothing here writes to the repository, issues or packages. Uploading and
+# downloading this run's own artifacts needs no extra permission.
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # How many partition jobs the test suite is split across. Must equal the length of the
+  # `partition` matrix in the `test` job.
+  NEXTEST_PARTITIONS: 4
 
 # Third-party actions are pinned to full commit SHAs (a tag can be moved, a SHA cannot);
 # the version each SHA corresponds to is the trailing comment.
 
 jobs:
-  govern:
-    name: Camerata governs its own code
+  # Gate 0: this repository is public, so no tracked file may name a personal home
+  # directory or the private fixture folder. Seconds long and needs no toolchain.
+  paths:
+    name: Personal path gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Personal path gate
+        run: ./scripts/ci-gate.sh "Personal path gate" ./scripts/check-personal-paths.sh
+
+  # Gate 1: formatting is mechanically enforced (no "looks fine to me"). Needs rustfmt only,
+  # so no system packages, no cache and no build.
+  fmt:
+    name: Format gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Gate 0: this repository is public, so no tracked file may name a personal home
-      # directory or the private fixture folder. Seconds long and needs no toolchain, so
-      # it runs before anything is installed.
-      - name: Personal path gate
-        run: ./scripts/ci-gate.sh "Personal path gate" ./scripts/check-personal-paths.sh
-
-      - name: Free disk space
-        run: ./scripts/ci-free-disk.sh
-
-      - name: Install system packages
-        run: ./scripts/ci-apt-deps.sh
-
-      - name: Install typst (pinned)
-        run: ./scripts/ci-install-typst.sh
-
       # Pinned, not floating: the gate must mean the same thing on every run. The version is
       # read from rust-toolchain.toml, the same file rustup uses locally, so CI and a
-      # developer's machine cannot drift. The 1.99 findings were fixed ahead of the bump;
-      # bump the toml deliberately, together with whatever the next toolchain flags.
+      # developer's machine cannot drift. Every job below that runs cargo reads it the same way.
       - name: Read the pinned toolchain
         id: toolchain
         run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt
 
+      # Every gate runs through scripts/ci-gate.sh, which runs the command unchanged and, on
+      # failure, re-emits the tail of its output as annotations (readable without a login on
+      # a public repo). It never changes a verdict.
+      - name: Format gate
+        run: ./scripts/ci-gate.sh "Format gate" cargo fmt --all -- --check
+
+  # Gate 2: zero warnings, and `unsafe_code = "forbid"` is enforced at compile
+  # time via the workspace lint table, so unsafe code cannot land.
+  clippy:
+    name: Clippy gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: ./scripts/ci-free-disk.sh
+      - name: Install system packages
+        run: ./scripts/ci-apt-deps.sh
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      # Every gate below runs through scripts/ci-gate.sh, which runs the command
-      # unchanged and, on failure, re-emits the tail of its output as annotations
-      # (readable without a login on a public repo). It never changes a verdict.
-
-      # Gate 1: formatting is mechanically enforced (no "looks fine to me").
-      - name: Format gate
-        run: ./scripts/ci-gate.sh "Format gate" cargo fmt --all -- --check
-
-      # Gate 2: zero warnings, and `unsafe_code = "forbid"` is enforced at compile
-      # time via the workspace lint table, so unsafe code cannot land.
       - name: Clippy gate (deny all warnings)
         run: ./scripts/ci-gate.sh "Clippy gate" cargo clippy --workspace --all-targets -- -D warnings
 
-      # Gate 3: SELF-MEASUREMENT (W6 / I1 + I2). Runs BEFORE the full suite, deliberately.
-      #
-      # Every defect on the audit findings tracker was found by paying
-      # for an external graded run against benchmark repos while this very suite stayed green.
-      # The engine had elaborate honesty machinery and no self-measurement machinery. These
-      # are the checks that would have caught them: artifact parity across the PDF, the
-      # workbook and json/inspection.json; row conservation at every pipeline stage; no silent
-      # non-execution of a rule, pass or tool tier.
-      #
-      # It runs first because it is seconds long and because its failures are the expensive
-      # kind — a graded sweep of four repos costs roughly $26 and four hours. Failing here
-      # fails the build before anyone spends that. Deterministic, no network, no model calls.
-      #
-      # These tests also run again inside the workspace suite below; the duplication is the
-      # point, so the signal is named rather than buried among ~1900 other tests.
+  # Gate 3: SELF-MEASUREMENT (W6 / I1 + I2).
+  #
+  # Every defect on the audit findings tracker was found by paying
+  # for an external graded run against benchmark repos while this very suite stayed green.
+  # The engine had elaborate honesty machinery and no self-measurement machinery. These
+  # are the checks that would have caught them: artifact parity across the PDF, the
+  # workbook and json/inspection.json; row conservation at every pipeline stage; no silent
+  # non-execution of a rule, pass or tool tier.
+  #
+  # It used to run before the full suite in one job. It now runs in its own job, in parallel,
+  # and compiles only the three crates it tests, so it reports well before the partitioned
+  # suite does. Its failures are the expensive kind (a graded sweep of four repos costs hours
+  # of wall clock), and a red result here fails the build before anyone spends that.
+  # Deterministic, no network, no model calls.
+  #
+  # These tests also run again inside the partitioned suite below; the duplication is the
+  # point, so the signal is named rather than buried among ~1900 other tests.
+  self-measurement:
+    name: Self-measurement gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: ./scripts/ci-free-disk.sh
+      - name: Install system packages
+        run: ./scripts/ci-apt-deps.sh
+      - name: Install typst (pinned)
+        run: ./scripts/ci-install-typst.sh
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Self-measurement gate (parity, conservation, non-execution)
         run: ./scripts/ci-gate.sh "Self-measurement gate" ./scripts/self-measurement.sh
 
-      # Gate 4: the test suite must pass. The macOS pixel baselines run in the local release gate through scripts/visual-check.sh.
+  # Gate 4a: compile every test binary of the workspace once and pack them into a nextest
+  # archive. The partition jobs run the tests from it, so the suite is built once, not N times.
+  build:
+    name: Build test archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: ./scripts/ci-free-disk.sh
+      - name: Install system packages
+        run: ./scripts/ci-apt-deps.sh
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install cargo-nextest (pinned)
+        run: ./scripts/ci-install-nextest.sh
+      - name: Build and archive the test binaries
+        run: >
+          ./scripts/ci-gate.sh "Test build"
+          cargo nextest archive --workspace --locked
+          --archive-file nextest-archive.tar.zst
+      - name: Upload the test archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          if-no-files-found: error
+          # Already zstd-compressed, and only this run's partition jobs read it.
+          compression-level: 0
+          retention-days: 1
+      # The archive is about 4 GB. Delete it once uploaded, so the rust-cache save at the end
+      # of the job has the disk it had before.
+      - name: Remove the local copy of the archive
+        run: rm -f nextest-archive.tar.zst
+
+  # Gate 4b: the test suite must pass. Each partition runs every Nth test of the archive
+  # (`count:i/N`), so together the partitions run every test exactly once. The source is
+  # checked out next to the archive because tests read fixtures and the rule corpus from the
+  # tree; `--workspace-remap .` points the archived binaries at it.
+  #
+  # `--extract-to .` puts the binaries back at ./target, the path the build job compiled them
+  # at (every job checks out to the same runner path). Several tests find a binary through
+  # the compile-time `env!("CARGO_BIN_EXE_camerata")`, an absolute path baked in at build time;
+  # extracted anywhere else, those tests fail with "No such file or directory".
+  #
+  # The macOS pixel baselines run in the local release gate through scripts/visual-check.sh.
+  test:
+    name: Test gate (partition ${{ matrix.partition }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      # One red partition must not cancel the others: every failure in the suite is reported,
+      # as `--no-fail-fast` did for the single job.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: ./scripts/ci-free-disk.sh
+      # The runtime libraries the binaries link (GTK, WebKitGTK, D-Bus) and the fonts the PDF
+      # tests render with.
+      - name: Install system packages
+        run: ./scripts/ci-apt-deps.sh
+      - name: Install typst (pinned)
+        run: ./scripts/ci-install-typst.sh
+      # Some tests run cargo or clippy against a fixture, so the pinned toolchain is installed
+      # here as it was in the single job.
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+      - name: Install cargo-nextest (pinned)
+        run: ./scripts/ci-install-nextest.sh
+      - name: Download the test archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nextest-archive
       - name: Test gate
-        run: ./scripts/ci-gate.sh "Test gate" cargo test --workspace --locked --no-fail-fast
+        run: >
+          ./scripts/ci-gate.sh "Test gate partition ${{ matrix.partition }}"
+          cargo nextest run --profile ci --no-fail-fast
+          --archive-file nextest-archive.tar.zst
+          --workspace-remap .
+          --extract-to .
+          --partition count:${{ matrix.partition }}/${{ env.NEXTEST_PARTITIONS }}
+      # Per-test wall times, for scripts/nextest-slowest.sh. Uploaded on failure too: the
+      # timings of a red run are the ones most worth reading.
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-partition-${{ matrix.partition }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Gate 4c: doctests. nextest does not run them, so they run here, in parallel with the rest.
+  doctests:
+    name: Doctest gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: ./scripts/ci-free-disk.sh
+      - name: Install system packages
+        run: ./scripts/ci-apt-deps.sh
+      - name: Install typst (pinned)
+        run: ./scripts/ci-install-typst.sh
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Doctest gate
+        run: ./scripts/ci-gate.sh "Doctest gate" cargo test --doc --workspace --locked --no-fail-fast
+
+  # The one check that stands for all the blocking gates. It is red when any of them failed,
+  # was cancelled or was skipped (a skipped partition ran no tests), and it prints the slowest
+  # tests of the run into the job summary.
+  govern:
+    name: Camerata governs its own code
+    needs: [paths, fmt, clippy, self-measurement, build, test, doctests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download JUnit results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: junit-partition-*
+          path: junit
+      - name: Slowest tests
+        continue-on-error: true
+        run: |
+          {
+            echo '### Slowest tests'
+            echo '```'
+            ./scripts/nextest-slowest.sh junit
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Every blocking gate passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed="$(echo "$RESULTS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')"
+          if [ -n "$failed" ]; then
+            echo "::error title=Blocking gates not green::${failed}"
+            exit 1
+          fi
 
   # Supply chain: known advisories (vulnerable, unsound, unmaintained or yanked crates),
   # dependency licenses and dependency sources, all checked against deny.toml. Blocking. An
