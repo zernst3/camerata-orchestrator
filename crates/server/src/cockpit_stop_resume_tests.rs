@@ -419,7 +419,7 @@ fn an_app_inspection_paused_by_its_spend_limit_resumes_at_a_raised_limit_and_run
         assert!(pause.stopped, "{pause:?}");
         assert_eq!(pause.pieces_left, 2, "{pause:?}");
 
-        // ── The plan: what remains, its projected cost, and no refusal ──────────────────────
+        // ── The plan: what remains and its projected cost, with no refusal ──────────────────
         let plan = rig.plan(&run_id).await;
         assert!(plan["refusal"].is_null(), "{plan}");
         assert_eq!(plan["saved_limit_usd"], 5.0, "{plan}");
@@ -564,5 +564,85 @@ fn an_app_inspection_stopped_for_credit_resumes_only_the_unfinished_parts() {
             last.incomplete_reasons()
         );
         assert!(!client_export_locked(&last), "the export lock lifts");
+    });
+}
+
+/// `POST` `uri` through the app's router; the status and the JSON body.
+async fn post_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    // A route that does not exist answers with an empty body.
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// A failed part offers the diagnostic bundle from the app: the route makes the same bundle
+/// `camerata diagnose bundle` makes, from the run record and the inspection's own saved report
+/// (its ledger and its failure report), writes it to the app's diagnostics folder and answers with
+/// its preview and where it went. The bundle holds no client code and no path of the checkout.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_failed_part_of_an_app_inspection_offers_the_diagnostic_bundle() {
+    on_big_stacks(async {
+        if !camerata_test_env::python3_on_path_for("a_failed_part_of_an_app_inspection_offers") {
+            return;
+        }
+        let rig = rig();
+        let data = tempfile::tempdir().unwrap();
+        let _data = camerata_test_env::EnvGuard::set(crate::app_dirs::DATA_DIR_ENV, data.path());
+        *rig.agent.credit_out_for.lock().unwrap() = Some("beta".to_string());
+        let job = rig.start(None).await;
+        assert_eq!(job.status, "done", "{:?}", job.message);
+        let run_id = rig.last_scan().run_id.expect("the inspection was saved");
+
+        let (status, body) = post_json(
+            router(rig.state.clone()),
+            &format!("/api/inspections/{run_id}/diagnostic-bundle"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let preview = body["preview"].as_str().unwrap_or_default();
+        assert!(preview.contains("Failures"), "{preview}");
+        assert!(!preview.contains("no failure report"), "{preview}");
+        let written = std::path::PathBuf::from(body["json"].as_str().unwrap_or_default());
+        assert!(
+            written.starts_with(data.path()),
+            "the bundle is in the app's diagnostics folder: {}",
+            written.display()
+        );
+        let text = std::fs::read_to_string(&written).expect("the bundle was written");
+        let bundle: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_ne!(
+            bundle["ledger"], "absent",
+            "the inspection's ledger is in it"
+        );
+        assert_ne!(bundle["failures"], "absent", "its failure report is in it");
+        assert!(!text.contains("acme-fixture line"), "no client code");
+        let repo_dir = rig.state.settings.repo_path("acme/three").unwrap();
+        assert!(!text.contains(&repo_dir), "no path of the checkout");
+
+        // An id that names no saved inspection is a plain 404.
+        let (status, _) = post_json(
+            router(rig.state.clone()),
+            "/api/inspections/20261126T000000Z-000000/diagnostic-bundle",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     });
 }

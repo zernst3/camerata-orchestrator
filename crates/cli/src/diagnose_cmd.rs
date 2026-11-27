@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use camerata_server::diagnostic_bundle::{self, BuildOptions, WriteError};
+use camerata_server::diagnostic_bundle::{self, MakeError, MakeOptions};
 use camerata_server::run_store::{self, RunSummary};
 use serde_json::Value;
 
@@ -114,14 +114,10 @@ impl std::fmt::Display for BundleError {
 }
 
 /// Whether `id` can name a run folder: letters, digits, `.`, `_` and `-`, no `..`. The id is
-/// joined to the runs folder, so anything that could climb out of it is refused.
+/// joined to the runs folder, so anything that could climb out of it is refused. The one rule is
+/// [`diagnostic_bundle::valid_run_id`], which the app's bundle route uses too.
 pub fn valid_run_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && !id.contains("..")
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    diagnostic_bundle::valid_run_id(id)
 }
 
 /// The run `run` names. `latest` is the newest saved run of any state and origin: a bundle is
@@ -197,17 +193,10 @@ fn optional_input(
     }
 }
 
-/// The rule ids of the shipped corpus, shown in a bundle as they are.
-///
-/// Only the bundled corpus counts: `CAMERATA_CORPUS_PATH` may name a folder with rules written
-/// for one client, and their ids must be hashed, not shown. A missing folder gives an empty
-/// set, so every id is hashed.
+/// The rule ids of the shipped corpus, shown in a bundle as they are
+/// ([`diagnostic_bundle::shipped_rule_ids`], which the app's bundle route uses too).
 async fn shipped_rule_ids() -> std::collections::BTreeSet<String> {
-    let (corpus, _errors) = camerata_rules::load_corpus_lenient(std::path::Path::new(
-        camerata_rules::DEFAULT_CORPUS_PATH,
-    ))
-    .await;
-    corpus.iter().map(|r| r.id.0.clone()).collect()
+    diagnostic_bundle::shipped_rule_ids().await
 }
 
 /// `diagnose bundle`, reading the run from the user's runs folder.
@@ -269,32 +258,31 @@ pub fn bundle_from(
         )
         .map_err(BundleError::Failed)?
     };
-    let opts = BuildOptions {
-        named_paths: args.named_paths,
-        shapes: !args.no_shapes,
-        known_rule_ids,
-        home_folder,
-        lookup_dir: Some(run_dir.to_path_buf()),
-    };
-    let bundle = diagnostic_bundle::build(&run, ledger.as_ref(), failures.as_ref(), &opts);
-    match diagnostic_bundle::write(&bundle, out_dir) {
-        Ok(written) => Ok(BundleOutcome {
-            preview: bundle.preview().to_string(),
-            json: written.json,
-            preview_path: written.preview,
-            lookup: written.lookup,
-            notes: {
-                notes.extend(written.notes);
-                notes
-            },
-        }),
-        Err(e @ WriteError::Leak(_)) => Err(BundleError::Refused(format!(
-            "{e}. A field reached the bundle that must not: report the location above (it \
-             names where, never what; a map key shows as `<key>`) to the developers so the \
-             decision table can be fixed"
-        ))),
-        Err(e) => Err(BundleError::Failed(e.to_string())),
-    }
+    // The build, the leak check, the write and the refusal words are the app's too.
+    let made = diagnostic_bundle::make(
+        run_dir,
+        ledger.as_ref(),
+        failures.as_ref(),
+        out_dir,
+        MakeOptions {
+            named_paths: args.named_paths,
+            shapes: !args.no_shapes,
+            known_rule_ids,
+            home_folder,
+        },
+    )
+    .map_err(|e| match e {
+        MakeError::Refused(m) => BundleError::Refused(m),
+        MakeError::Failed(m) => BundleError::Failed(m),
+    })?;
+    notes.extend(made.written.notes);
+    Ok(BundleOutcome {
+        preview: made.preview,
+        json: made.written.json,
+        preview_path: made.written.preview,
+        lookup: made.written.lookup,
+        notes,
+    })
 }
 
 /// `diagnose preview`: the preview of a written bundle, rendered again from its JSON.

@@ -3672,7 +3672,9 @@ fn the_stored_spend_counts_the_agent_finders_stored_pieces_once() {
     finder.record_absorbed(&line("alpha", Some(1.0))).unwrap();
     // A later line for the same key replaces the earlier one, as the replay reads it.
     finder.record_absorbed(&line("alpha", Some(2.0))).unwrap();
-    finder.record_absorbed(&line("joints:abc", Some(0.5))).unwrap();
+    finder
+        .record_absorbed(&line("joints:abc", Some(0.5)))
+        .unwrap();
     let other = crate::checkpoint::StageCheckpoint::new(&checkpoints, "calibration_acme/three");
     other.record_absorbed(&line("site-1", Some(7.0))).unwrap();
     assert!(

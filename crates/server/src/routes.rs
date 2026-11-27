@@ -4,6 +4,7 @@
 mod chat_models;
 mod decompose_routines;
 mod design_routes;
+mod diagnostic_bundle_route;
 mod drift_updates;
 mod investigation_pr;
 mod onboarding;
@@ -21,6 +22,7 @@ mod uow_state;
 pub use chat_models::*;
 pub(crate) use decompose_routines::*;
 pub(crate) use design_routes::*;
+pub(crate) use diagnostic_bundle_route::diagnostic_bundle_routes;
 pub(crate) use drift_updates::*;
 pub(crate) use investigation_pr::*;
 pub(crate) use onboarding::*;

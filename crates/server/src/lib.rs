@@ -2013,6 +2013,8 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::routes::review_routes())
         // The operator's rewrite advisory (internal only): `routes/rewrite_advisory_route.rs`.
         .merge(crate::routes::rewrite_advisory_routes())
+        // The diagnostic bundle of a saved inspection: `routes/diagnostic_bundle_route.rs`.
+        .merge(crate::routes::diagnostic_bundle_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::native_units::unknown_native_unit_gate,

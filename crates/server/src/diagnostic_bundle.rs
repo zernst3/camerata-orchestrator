@@ -162,6 +162,117 @@ pub fn home_folder_name() -> Option<String> {
         .filter(|n| !n.is_empty())
 }
 
+/// Whether `id` can name a run folder: letters, digits, `.`, `_` and `-`, no `..`. The id is
+/// joined to the runs folder, so anything that could climb out of it is refused.
+pub fn valid_run_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// The rule ids of the shipped corpus, shown in a bundle as they are.
+///
+/// Only the bundled corpus counts: `CAMERATA_CORPUS_PATH` may name a folder with rules written
+/// for one client, and their ids must be hashed, not shown. A missing folder gives an empty
+/// set, so every id is hashed.
+pub async fn shipped_rule_ids() -> BTreeSet<String> {
+    let (corpus, _errors) =
+        camerata_rules::load_corpus_lenient(Path::new(camerata_rules::DEFAULT_CORPUS_PATH)).await;
+    corpus.iter().map(|r| r.id.0.clone()).collect()
+}
+
+/// How [`make`] builds a bundle: [`BuildOptions`] less the run folder, which [`make`] is given.
+#[derive(Debug, Clone, Default)]
+pub struct MakeOptions {
+    pub named_paths: bool,
+    pub shapes: bool,
+    pub known_rule_ids: BTreeSet<String>,
+    pub home_folder: Option<String>,
+}
+
+/// A bundle [`make`] wrote, and its preview.
+#[derive(Debug, Clone)]
+pub struct MadeBundle {
+    pub preview: String,
+    pub written: WrittenBundle,
+}
+
+/// Why [`make`] wrote nothing.
+#[derive(Debug)]
+pub enum MakeError {
+    /// The leak check refused the bundle; the words say where, never what.
+    Refused(String),
+    /// The bundle could not be made (no such run, an unreadable record, a folder that cannot be
+    /// written).
+    Failed(String),
+}
+
+impl std::fmt::Display for MakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(m) | Self::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Make and write the bundle of the run in `run_dir` (`runs/<run-id>/`), with the integrity
+/// ledger and the failure report when they were found, into `out_dir`. The one implementation
+/// behind `camerata diagnose bundle` and the app's bundle route: the same build, the same leak
+/// check and the same words when the leak check refuses it. The lookup file goes into `run_dir`.
+pub fn make(
+    run_dir: &Path,
+    ledger: Option<&Value>,
+    failures: Option<&Value>,
+    out_dir: &Path,
+    opts: MakeOptions,
+) -> Result<MadeBundle, MakeError> {
+    let run_path = run_dir.join("run.json");
+    if !run_path.is_file() {
+        return Err(MakeError::Failed(format!(
+            "there is no saved run at {}",
+            run_dir.display()
+        )));
+    }
+    let run: Value = std::fs::read(&run_path)
+        .map_err(|e| {
+            MakeError::Failed(format!(
+                "could not read the run record at {}: {e}",
+                run_path.display()
+            ))
+        })
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|e| {
+                MakeError::Failed(format!(
+                    "{} is not a readable run record: {e}",
+                    run_path.display()
+                ))
+            })
+        })?;
+    let build_opts = BuildOptions {
+        named_paths: opts.named_paths,
+        shapes: opts.shapes,
+        known_rule_ids: opts.known_rule_ids,
+        home_folder: opts.home_folder,
+        lookup_dir: Some(run_dir.to_path_buf()),
+    };
+    let bundle = build(&run, ledger, failures, &build_opts);
+    match write(&bundle, out_dir) {
+        Ok(written) => Ok(MadeBundle {
+            preview: bundle.preview().to_string(),
+            written,
+        }),
+        Err(e @ WriteError::Leak(_)) => Err(MakeError::Refused(format!(
+            "{e}. A field reached the bundle that must not: report the location above (it \
+             names where, never what; a map key shows as `<key>`) to the developers so the \
+             decision table can be fixed"
+        ))),
+        Err(e) => Err(MakeError::Failed(e.to_string())),
+    }
+}
+
 /// A fresh bundle id: the time made plus 8 random hex characters, so ids sort by time.
 fn bundle_id(now: chrono::DateTime<chrono::Utc>) -> String {
     let mut bytes = [0u8; 4];
