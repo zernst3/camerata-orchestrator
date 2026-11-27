@@ -979,6 +979,46 @@ pub(in crate::cockpit) async fn resume_start_at(
     }
 }
 
+/// A diagnostic bundle the app made for a saved inspection (mirror of the server's answer to
+/// `POST /api/inspections/:id/diagnostic-bundle`).
+#[derive(Clone, PartialEq, serde::Deserialize, Default, Debug)]
+pub(in crate::cockpit) struct DiagnosticBundleView {
+    /// What the bundle holds, in plain words, to read before passing it on.
+    #[serde(default)]
+    pub preview: String,
+    /// Where the bundle was saved on this computer.
+    #[serde(default)]
+    pub json: String,
+    /// Plain notes (a part of the inspection that could not be included, a folder others can
+    /// read).
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Make the diagnostic bundle of a saved inspection; the bundle, or the server's plain reason.
+pub(in crate::cockpit) async fn make_diagnostic_bundle(
+    run_id: &str,
+) -> Result<DiagnosticBundleView, String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/inspections/{run_id}/diagnostic-bundle",
+            crate::bff_base()
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    if !resp.status().is_success() {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("the bundle could not be made")
+            .to_string());
+    }
+    resp.json::<DiagnosticBundleView>()
+        .await
+        .map_err(|e| format!("the bundle's answer could not be read: {e}"))
+}
+
 /// The whole of "Run what remains" for one run, with the Bombe held from the first request to the
 /// end of the polling: the guard is the first thing built, so it covers the start request, the
 /// job's whole run (`poll`) and every early return. `start` and `poll` are the requests, passed in

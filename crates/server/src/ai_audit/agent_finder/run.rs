@@ -1314,6 +1314,26 @@ pub async fn with_agent_override<F: std::future::Future>(
     AGENT_OVERRIDE.scope(agent, fut).await
 }
 
+/// The test agent standing in for the run's piece agent in the caller's task, if one does (see
+/// [`with_agent_override`]). A job that runs its audit in a task of its own reads it before the
+/// task starts and carries it there with [`with_carried_agent_override`]. Production never sets
+/// one, so this is `None` there.
+pub fn current_agent_override() -> Option<std::sync::Arc<dyn PieceAgent>> {
+    AGENT_OVERRIDE.try_with(std::sync::Arc::clone).ok()
+}
+
+/// Run `fut` with `agent` standing in for the run's piece agent when it is `Some` (the value
+/// [`current_agent_override`] read in the task that started the job), else as it is.
+pub async fn with_carried_agent_override<F: std::future::Future>(
+    agent: Option<std::sync::Arc<dyn PieceAgent>>,
+    fut: F,
+) -> F::Output {
+    match agent {
+        Some(agent) => with_agent_override(agent, fut).await,
+        None => fut.await,
+    }
+}
+
 /// Whether a test agent stands in for the run's piece agent (see [`with_agent_override`]).
 pub fn agent_override_is_set() -> bool {
     #[cfg(feature = "test-support")]

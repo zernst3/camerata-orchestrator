@@ -3643,3 +3643,63 @@ fn a_client_inspection_does_not_start_on_a_dirty_or_commitless_build() {
         None
     );
 }
+
+/// The agent finder keeps each finished piece in its stage checkpoint (`finder_<repo>`), not in
+/// `calls/`, and a resume replays it onto the meter as resumed usage. The stored spend counts it
+/// too (the last line of each key, as the replay reads it), or a resume would take a finished
+/// piece's dollars off the limit and the limit would no longer count the whole run (#567). Another
+/// stage's checkpoint lines are not added: their replies are already under `calls/` or
+/// `batches/`.
+#[test]
+fn the_stored_spend_counts_the_agent_finders_stored_pieces_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoints = crate::checkpoint::checkpoint_dir_of(dir.path());
+    std::fs::create_dir_all(&checkpoints).unwrap();
+    let line = |key: &str, cost: Option<f64>| crate::checkpoint::AbsorbedLine {
+        key: key.to_string(),
+        model: "claude-opus-5-5".to_string(),
+        backend: "api".to_string(),
+        cost_usd: cost,
+        input_tokens: Some(1_000),
+        output_tokens: Some(100),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        text: "{}".to_string(),
+        members: Vec::new(),
+        batch_id: None,
+    };
+    let finder = crate::checkpoint::StageCheckpoint::new(&checkpoints, "finder_acme/three");
+    finder.record_absorbed(&line("alpha", Some(1.0))).unwrap();
+    // A later line for the same key replaces the earlier one, as the replay reads it.
+    finder.record_absorbed(&line("alpha", Some(2.0))).unwrap();
+    finder
+        .record_absorbed(&line("joints:abc", Some(0.5)))
+        .unwrap();
+    let other = crate::checkpoint::StageCheckpoint::new(&checkpoints, "calibration_acme/three");
+    other.record_absorbed(&line("site-1", Some(7.0))).unwrap();
+    assert!(
+        (journal::stored_spend(dir.path()) - 2.5).abs() < 1e-9,
+        "{}",
+        journal::stored_spend(dir.path())
+    );
+
+    // A line with no cost recorded is priced from its tokens, as the replay prices it.
+    finder.record_absorbed(&line("beta", None)).unwrap();
+    let priced = crate::llm::usage_cost_usd(
+        "claude-opus-5-5",
+        &crate::llm::CallUsage {
+            input: Some(1_000),
+            output: Some(100),
+            cache_read: 0,
+            cache_creation: 0,
+            cache_creation_1h: None,
+        },
+        crate::llm::PriceBasis::realtime(),
+    )
+    .expect("the model is priced");
+    assert!(
+        (journal::stored_spend(dir.path()) - (2.5 + priced)).abs() < 1e-9,
+        "{}",
+        journal::stored_spend(dir.path())
+    );
+}

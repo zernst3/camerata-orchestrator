@@ -15,7 +15,7 @@ use axum::extract::Query;
 use axum::http::Request;
 use http_body_util::BodyExt;
 
-const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
+pub(crate) const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
 import json, os, re, sys, time
 args = sys.argv[1:]
 # The run's pre-flight reads the Claude Code version before any model call; it is not a call.
@@ -130,13 +130,13 @@ fn stage_fixture(dest: &std::path::Path) {
     g(&["commit", "-q", "-m", "fixture"]);
 }
 
-async fn body_json(resp: Response) -> serde_json::Value {
+pub(crate) async fn body_json(resp: Response) -> serde_json::Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
 }
 
 /// Wait for the audit job `id` to leave `running`; the job's final state.
-async fn finished(state: &AppState, id: &str) -> crate::jobs::JobState {
+pub(crate) async fn finished(state: &AppState, id: &str) -> crate::jobs::JobState {
     let started = std::time::Instant::now();
     loop {
         let job = state.jobs.get(id).expect("the job exists");

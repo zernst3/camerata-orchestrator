@@ -1588,8 +1588,23 @@ Every inspection is saved part by part; failed or unrun parts are retried, not s
   what it should cost. Nothing is sent until you confirm."). The plan has a field "Spend limit in
   dollars (change it to raise the limit for this resume)" and **Start: run only these parts**.
   Only what failed or did not run is sent again; work already paid for is not paid for again. The
-  spend limit counts the whole run, stored replies included, so raise it by what the operator will
-  allow for what remains.
+  spend limit counts the whole run, stored replies included (the agent finder's finished pieces
+  too), so raise it by what the operator will allow for what remains.
+- **A raised limit is only for a run the spend limit stopped** (a hard stop or a pause at a cost
+  checkpoint). On any other run the app refuses it: "a new spend limit can be set only on a run the
+  spend limit stopped; this run was not stopped by its spend limit". A run that stopped because the
+  model provider refused it for billing (credit) is resumed at the limit it had, once the credit is
+  back.
+- **A raised limit still under the projection pauses again, before any new piece is sent**, exactly
+  as `camerata inspect --resume --max-cost-usd` does. The cost panel then names the limit that
+  covers what remains ("resume with a spend limit of at least ..."). The export stays locked until
+  every part is done.
+- **Make a diagnostic bundle** (button, under the list of parts) saves the bundle a developer needs
+  to fix a failed part: counts, rule ids and hashed paths from the run record and the inspection's
+  own ledger and failure report, never client code. It is the bundle `camerata diagnose bundle`
+  makes, with the same leak check. The banner shows where it was saved on this computer and its
+  preview; read the preview before you pass it on. Nothing is sent anywhere. When the leak check
+  refuses a bundle, nothing is written and the banner shows the reason.
 - **`--resume` refuses** (in plain words) when its stored answers would no longer fit: the repository
   is at another commit, a file was edited or added, the models or the rules differ, **or this is
   another version of Camerata**. It refuses while another process works on the same run. A complete
