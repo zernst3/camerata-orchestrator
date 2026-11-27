@@ -158,7 +158,17 @@ impl BatchApi for Shared {
     }
     async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
         if self.0.was_cancelled(id) {
-            return Ok(Vec::new());
+            // As the provider does: every item the cancel caught comes back as a `canceled` row.
+            let items = self.0.items.lock().unwrap().get(id).cloned().unwrap_or_default();
+            return Ok(items
+                .iter()
+                .map(|item| BatchResultRow {
+                    custom_id: item.custom_id.clone(),
+                    response: None,
+                    error: Some("canceled".to_string()),
+                    billed: None,
+                })
+                .collect());
         }
         let items = self
             .0
@@ -416,7 +426,12 @@ async fn ctrl_c_during_a_live_batch_cancels_it_saves_the_run_and_a_resume_finish
     )
     .await
     .expect("the resume completes");
-    assert!(resumed.incomplete_reasons.is_empty(), "{:?}", resumed.incomplete_reasons);
+    assert!(
+        resumed.incomplete_reasons.is_empty(),
+        "{:?}\n{:#?}",
+        resumed.incomplete_reasons,
+        resumed.failure_lines
+    );
     assert_eq!(findings_of(&export), want, "the same output as an uninterrupted run");
 }
 
