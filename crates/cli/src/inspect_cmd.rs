@@ -1004,7 +1004,16 @@ pub async fn run_inspect_pipeline_with(
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
 ) -> Result<InspectOutcome, InspectError> {
-    run_inspect_pipeline_as(args, has_api_key, creds, seams, false).await
+    // Boxed: the pipeline is one very large future, and callers (a test thread, the command line)
+    // hold this one on a small stack. The box keeps theirs a pointer.
+    Box::pin(run_inspect_pipeline_as(
+        args,
+        has_api_key,
+        creds,
+        seams,
+        false,
+    ))
+    .await
 }
 
 /// The one pipeline, as a new run or a resume (`rerun` false) or as a rerun of a saved run's
@@ -2170,7 +2179,7 @@ pub async fn rerun_deterministic_inspect(
     if let Some(export) = export {
         args.export = export;
     }
-    run_inspect_pipeline_as(
+    Box::pin(run_inspect_pipeline_as(
         args,
         true,
         creds,
@@ -2179,7 +2188,7 @@ pub async fn rerun_deterministic_inspect(
             ..seams
         },
         true,
-    )
+    ))
     .await
 }
 
