@@ -242,3 +242,13 @@ async fn the_plan_route_shows_the_plan_and_what_start_would_say() {
         "{body}"
     );
 }
+
+/// A start with no project is a client engagement (the routes treat it so): it needs a limit.
+#[tokio::test]
+async fn a_start_with_no_project_needs_a_spend_limit() {
+    let fx = client_project();
+    let why = super::start_spend_refusal(&fx.state, None, &audit_req(None))
+        .await
+        .unwrap_or_default();
+    assert!(why.contains(NEEDS_LIMIT), "{why}");
+}
