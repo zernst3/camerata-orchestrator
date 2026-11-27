@@ -1801,9 +1801,8 @@ where
         .await
         {
             Ok(rows) => {
-                let (stale_rows, rows): (Vec<BatchResultRow>, Vec<BatchResultRow>) = rows
-                    .into_iter()
-                    .partition(|r| stale.contains(&r.custom_id));
+                let (stale_rows, rows): (Vec<BatchResultRow>, Vec<BatchResultRow>) =
+                    rows.into_iter().partition(|r| stale.contains(&r.custom_id));
                 meter_stale_rows(stage, ctx, &record.batch_id, ttl, stale_rows);
                 let origin = BatchOrigin {
                     batch_id: &record.batch_id,

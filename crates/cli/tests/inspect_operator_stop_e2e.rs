@@ -159,7 +159,14 @@ impl BatchApi for Shared {
     async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
         if self.0.was_cancelled(id) {
             // As the provider does: every item the cancel caught comes back as a `canceled` row.
-            let items = self.0.items.lock().unwrap().get(id).cloned().unwrap_or_default();
+            let items = self
+                .0
+                .items
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
             return Ok(items
                 .iter()
                 .map(|item| BatchResultRow {
@@ -313,7 +320,10 @@ impl Workspace {
 async fn stopped_run(
     ws: &Workspace,
     provider: &Arc<Provider>,
-) -> (camerata::inspect_cmd::operator_stop::OperatorStopped, Duration) {
+) -> (
+    camerata::inspect_cmd::operator_stop::OperatorStopped,
+    Duration,
+) {
     let seam = BatchSeam::new(Arc::new(Shared(provider.clone())));
     let export = ws.export("stopped.zip");
     let pressed: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
@@ -383,10 +393,15 @@ async fn ctrl_c_during_a_live_batch_cancels_it_saves_the_run_and_a_resume_finish
         let provider = Provider::new(false, &[]);
         let seam = BatchSeam::new(Arc::new(Shared(provider)));
         let export = ws.export("reference.zip");
-        let outcome = run_inspect_pipeline_with(args(ws.repo.path(), &export), true, &creds(), seams(&seam))
-            .await
-            .expect("the reference run completes");
-        assert!(outcome.incomplete_reasons.is_empty(), "{:?}", outcome.incomplete_reasons);
+        let outcome =
+            run_inspect_pipeline_with(args(ws.repo.path(), &export), true, &creds(), seams(&seam))
+                .await
+                .expect("the reference run completes");
+        assert!(
+            outcome.incomplete_reasons.is_empty(),
+            "{:?}",
+            outcome.incomplete_reasons
+        );
         findings_of(&export)
     };
 
@@ -395,18 +410,27 @@ async fn ctrl_c_during_a_live_batch_cancels_it_saves_the_run_and_a_resume_finish
     let (stopped, took) = stopped_run(&ws, &provider).await;
     assert!(took < Duration::from_secs(5), "the stop took {took:?}");
     // The live batch was cancelled at the provider.
-    assert_eq!(stopped.report.cancelled, vec!["msgbatch_acme_0".to_string()]);
+    assert_eq!(
+        stopped.report.cancelled,
+        vec!["msgbatch_acme_0".to_string()]
+    );
     assert!(provider.was_cancelled("msgbatch_acme_0"));
     assert!(stopped.report.not_cancelled.is_empty());
     // The run was saved, and the failure report records the stop.
     let run_id = stopped.run_id.clone().expect("the run was saved");
-    let failures = stopped.failure_report.clone().expect("the stop is recorded");
+    let failures = stopped
+        .failure_report
+        .clone()
+        .expect("the stop is recorded");
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&failures).unwrap()).unwrap();
     assert!(json["operator_stop"].is_object(), "{json}");
     let record = camerata_server::run_store::read_record(&run_id).unwrap();
     assert!(
-        record.notes.iter().any(|n| n.contains("stopped by the operator")),
+        record
+            .notes
+            .iter()
+            .any(|n| n.contains("stopped by the operator")),
         "{:?}",
         record.notes
     );
@@ -432,7 +456,11 @@ async fn ctrl_c_during_a_live_batch_cancels_it_saves_the_run_and_a_resume_finish
         resumed.incomplete_reasons,
         resumed.failure_lines
     );
-    assert_eq!(findings_of(&export), want, "the same output as an uninterrupted run");
+    assert_eq!(
+        findings_of(&export),
+        want,
+        "the same output as an uninterrupted run"
+    );
 }
 
 #[tokio::test]
@@ -447,7 +475,10 @@ async fn a_batch_that_cannot_be_cancelled_is_listed_with_its_id_in_the_failure_r
     assert_eq!(stopped.report.not_cancelled.len(), 1);
     assert_eq!(stopped.report.not_cancelled[0].batch_id, "msgbatch_acme_0");
     assert!(stopped.to_string().contains("msgbatch_acme_0"), "{stopped}");
-    let failures = stopped.failure_report.clone().expect("the stop is recorded");
+    let failures = stopped
+        .failure_report
+        .clone()
+        .expect("the stop is recorded");
     let json = std::fs::read_to_string(&failures).unwrap();
     assert!(json.contains("msgbatch_acme_0"), "{json}");
     let md = std::fs::read_to_string(failures.with_extension("md")).unwrap();

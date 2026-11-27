@@ -1561,7 +1561,11 @@ async fn group_review_outage_ends_in_bounded_time(mode: &str) {
         .iter()
         .map(std::time::Duration::as_secs)
         .collect();
-    let allowed: Vec<u64> = quick.iter().copied().chain(network.iter().copied()).collect();
+    let allowed: Vec<u64> = quick
+        .iter()
+        .copied()
+        .chain(network.iter().copied())
+        .collect();
     for w in &waits {
         assert!(
             allowed.contains(w),

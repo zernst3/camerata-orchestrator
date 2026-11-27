@@ -196,7 +196,10 @@ async fn a_batch_that_ended_or_was_fetched_is_not_cancelled() {
     api.poll("msgbatch_earlier").await.unwrap();
     assert_eq!(
         control.live_batches(),
-        vec!["msgbatch_acme_2".to_string(), "msgbatch_earlier".to_string()]
+        vec![
+            "msgbatch_acme_2".to_string(),
+            "msgbatch_earlier".to_string()
+        ]
     );
     let report = control.stop().await;
     assert_eq!(report.cancelled, vec![live, "msgbatch_earlier".to_string()]);

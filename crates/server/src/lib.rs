@@ -93,8 +93,10 @@ pub mod live_fleet;
 pub mod llm;
 pub mod machine_files;
 mod native_units;
+pub mod network_wait;
 pub mod notify;
 pub mod onboard;
+pub mod operator_stop;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;
@@ -124,8 +126,6 @@ pub mod review_tree;
 pub mod review_view;
 pub mod routine;
 pub mod run;
-pub mod network_wait;
-pub mod operator_stop;
 pub mod run_health;
 pub mod run_store;
 mod run_target;
@@ -3348,11 +3348,8 @@ pub(crate) async fn start_audit_job(
             // The run's seam, built by the one function the command line uses: journaled into
             // the run folder, with the long network wait around every send (#582).
             let run_control = std::sync::Arc::new(crate::operator_stop::RunControl::new());
-            let run_seam = crate::network_wait::run_model_seam(
-                &real,
-                run_store.clone(),
-                run_control.clone(),
-            );
+            let run_seam =
+                crate::network_wait::run_model_seam(&real, run_store.clone(), run_control.clone());
             let model_seam: &dyn crate::llm::LlmPort = run_seam.as_ref();
             // The review tree's stage 2 reads the final report with the run's own controls, and
             // never runs where the compliance gate blocked the AI review.

@@ -24,8 +24,10 @@ pub use camerata_llm::set_process_sleeper;
 pub use camerata_llm::Sleeper;
 
 use crate::ai_audit::{BatchApi, BatchSeam};
+use crate::llm::{
+    BatchItem, BatchResultRow, BatchStatus, CacheTtl, LlmPort, LlmRequest, LlmResponse,
+};
 use crate::operator_stop::RunControl;
-use crate::llm::{BatchItem, BatchResultRow, BatchStatus, CacheTtl, LlmPort, LlmRequest, LlmResponse};
 use crate::run_store::RunStore;
 
 /// Build a run's model seam over `base`: journaled into `store` when the run has a folder, then
@@ -141,7 +143,9 @@ async fn complete_streaming_waiting(
             async move {
                 let mut forward = |d: &str| {
                     delivered.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let mut guard = sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut guard = sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     (*guard)(d);
                 };
                 inner.complete_streaming(req, &mut forward).await

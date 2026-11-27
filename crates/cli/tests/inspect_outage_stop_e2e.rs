@@ -130,7 +130,12 @@ impl Provider {
     }
 
     fn refused(&self) -> usize {
-        self.calls.lock().unwrap().iter().filter(|(_, ok)| !ok).count()
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .count()
     }
 
     fn respond(&self, req: &LlmRequest) -> anyhow::Result<LlmResponse> {
@@ -143,16 +148,24 @@ impl Provider {
                 if started.is_none() && stage == from {
                     *started = Some(now);
                 }
-                started
-                    .filter(|at| now < at + secs)
-                    .map(|_| (FailureClass::Transport, "Anthropic API request failed: connection reset by peer"))
+                started.filter(|at| now < at + secs).map(|_| {
+                    (
+                        FailureClass::Transport,
+                        "Anthropic API request failed: connection reset by peer",
+                    )
+                })
             }
             Some(Fault::Auth { from }) => {
                 let mut started = self.started_at.lock().unwrap();
                 if started.is_none() && stage == from {
                     *started = Some(now);
                 }
-                started.map(|_| (FailureClass::AuthOrBilling, "Anthropic API HTTP 401: invalid x-api-key"))
+                started.map(|_| {
+                    (
+                        FailureClass::AuthOrBilling,
+                        "Anthropic API HTTP 401: invalid x-api-key",
+                    )
+                })
             }
         };
         self.calls.lock().unwrap().push((stage, failure.is_none()));
@@ -312,11 +325,7 @@ impl Workspace {
         }
     }
 
-    async fn run(
-        &self,
-        llm: &Provider,
-        export: &Path,
-    ) -> Result<InspectOutcome, InspectError> {
+    async fn run(&self, llm: &Provider, export: &Path) -> Result<InspectOutcome, InspectError> {
         run_inspect_pipeline_with(
             self.args(export),
             true,
@@ -395,8 +404,15 @@ async fn reference(repos: usize) -> (Vec<String>, usize) {
     let ws = Workspace::new(repos);
     let llm = Provider::new(&clock, None);
     let export = ws.export("reference.zip");
-    let outcome = ws.run(&llm, &export).await.expect("the reference run completes");
-    assert!(outcome.incomplete_reasons.is_empty(), "{:?}", outcome.incomplete_reasons);
+    let outcome = ws
+        .run(&llm, &export)
+        .await
+        .expect("the reference run completes");
+    assert!(
+        outcome.incomplete_reasons.is_empty(),
+        "{:?}",
+        outcome.incomplete_reasons
+    );
     assert_eq!(clock.now(), 0, "an uninterrupted run never waits");
     (findings_of(&export), llm.calls_of(Stage::GroupReview))
 }
@@ -413,9 +429,16 @@ async fn a_short_drop_waits_and_finishes_like_an_uninterrupted_run(from: Stage, 
     // Three minutes: far past the transport's own retries, well inside the network wait.
     let llm = Provider::new(&clock, Some(Fault::Drop { from, secs: 180 }));
     let export = ws.export("short.zip");
-    let outcome = ws.run(&llm, &export).await.expect("the run waits and completes");
+    let outcome = ws
+        .run(&llm, &export)
+        .await
+        .expect("the run waits and completes");
     assert!(llm.refused() > 0, "the drop happened");
-    assert!(clock.now() >= 180, "the run waited out the drop: {} s", clock.now());
+    assert!(
+        clock.now() >= 180,
+        "the run waited out the drop: {} s",
+        clock.now()
+    );
     assert!(
         outcome.incomplete_reasons.is_empty(),
         "a short drop left the run incomplete: {:?}",
@@ -423,7 +446,11 @@ async fn a_short_drop_waits_and_finishes_like_an_uninterrupted_run(from: Stage, 
     );
     assert!(!outcome.outage_stopped());
     assert_eq!(outcome.exit_code(), 0);
-    assert_eq!(findings_of(&export), want, "the same output as an uninterrupted run");
+    assert_eq!(
+        findings_of(&export),
+        want,
+        "the same output as an uninterrupted run"
+    );
 }
 
 #[tokio::test]
@@ -457,9 +484,18 @@ async fn a_long_drop_stops_the_run_and_a_resume_reviews_every_repo_once(from: St
     let clock = ClockGuard::install();
     let ws = Workspace::new(2);
     // A day: past any wait.
-    let down = Provider::new(&clock, Some(Fault::Drop { from, secs: 24 * 3600 }));
+    let down = Provider::new(
+        &clock,
+        Some(Fault::Drop {
+            from,
+            secs: 24 * 3600,
+        }),
+    );
     let export = ws.export("stopped.zip");
-    let outcome = ws.run(&down, &export).await.expect("an internal export is written");
+    let outcome = ws
+        .run(&down, &export)
+        .await
+        .expect("an internal export is written");
     assert!(outcome.outage_stopped(), "{:?}", outcome.incomplete_reasons);
     assert_eq!(outcome.exit_code(), EXIT_OUTAGE_STOPPED);
     assert!(
@@ -544,9 +580,18 @@ async fn after_an_outage_stop_the_internal_export_makes_no_model_call() {
         }),
     );
     let export = ws.export("internal.zip");
-    let outcome = ws.run(&llm, &export).await.expect("an internal export is written");
+    let outcome = ws
+        .run(&llm, &export)
+        .await
+        .expect("an internal export is written");
     assert!(outcome.outage_stopped());
-    let answered_before_stop = llm.calls.lock().unwrap().iter().filter(|(_, ok)| *ok).count();
+    let answered_before_stop = llm
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, ok)| *ok)
+        .count();
     // Nothing after the stop was answered: every request from the drop on was refused, and none
     // came from a stage after the scan.
     assert_eq!(llm.calls_of(Stage::GroupReview), 0);
@@ -573,7 +618,10 @@ async fn an_auth_failure_stops_the_run_without_waiting_for_the_network() {
         }),
     );
     let export = ws.export("auth.zip");
-    let outcome = ws.run(&llm, &export).await.expect("an internal export is written");
+    let outcome = ws
+        .run(&llm, &export)
+        .await
+        .expect("an internal export is written");
     assert!(outcome.outage_stopped());
     assert_eq!(outcome.exit_code(), EXIT_OUTAGE_STOPPED);
     assert_eq!(clock.now(), 0, "an auth failure waited for the network");

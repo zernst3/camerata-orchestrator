@@ -1167,12 +1167,19 @@ async fn a_resumed_batch_whose_items_no_longer_match_is_metered_in_full_and_abso
     )
     .await;
     assert_eq!(*api.fetched.lock().unwrap(), vec!["msgbatch_0".to_string()]);
-    assert!(out.resumed.is_empty(), "a stale row was absorbed: {:?}", out.resumed);
+    assert!(
+        out.resumed.is_empty(),
+        "a stale row was absorbed: {:?}",
+        out.resumed
+    );
     assert_eq!(sorted(out.absorbed), ids(&now), "every item is asked again");
     assert_eq!(api.realtime.call_count(), 4);
     let usage = meter.snapshot();
     // Four real-time replies and the four stale rows, each 100 in and 10 out.
-    assert_eq!(usage.calls, 8, "the stale rows are not in the ledger: {usage:?}");
+    assert_eq!(
+        usage.calls, 8,
+        "the stale rows are not in the ledger: {usage:?}"
+    );
     assert_eq!(usage.input_tokens, 800);
     assert!(
         usage.cost_usd > 4.0 * 0.02,

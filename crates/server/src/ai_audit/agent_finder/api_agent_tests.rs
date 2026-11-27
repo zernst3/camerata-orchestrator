@@ -2912,7 +2912,11 @@ async fn a_network_drop_past_the_quick_retries_waits_for_the_network_and_the_pie
     let meter = Arc::new(UsageMeter::default());
     let (agent, pauses) = metered(&wire, &meter);
     let run = run_ok(&agent, &room(), &limits()).await;
-    assert_eq!(run.stop, AgentStop::Finished, "the drop cost minutes, not the piece");
+    assert_eq!(
+        run.stop,
+        AgentStop::Finished,
+        "the drop cost minutes, not the piece"
+    );
     assert_eq!(wire.calls(), 7);
     let waits = waits_of(&pauses);
     assert_eq!(waits.len(), 6, "{waits:?}");
@@ -2935,7 +2939,11 @@ async fn a_network_drop_past_the_whole_wait_stops_the_run_at_once() {
     let run = run_ok(&agent, &room(), &limits()).await;
     assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
     let waits = waits_of(&pauses);
-    assert_eq!(waits[3..].to_vec(), NETWORK_WAIT_STEPS.to_vec(), "{waits:?}");
+    assert_eq!(
+        waits[3..].to_vec(),
+        NETWORK_WAIT_STEPS.to_vec(),
+        "{waits:?}"
+    );
     assert!(
         meter.outage_stopped(),
         "the network wait ran out with nothing through: the outage stop"

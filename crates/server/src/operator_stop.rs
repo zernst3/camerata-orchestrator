@@ -103,11 +103,7 @@ impl RunControl {
 
     /// The ids of the batches the provider accepted and has not finished, sorted.
     pub fn live_batches(&self) -> Vec<String> {
-        let ids: BTreeSet<String> = self
-            .live_lock()
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
+        let ids: BTreeSet<String> = self.live_lock().iter().map(|(id, _)| id.clone()).collect();
         ids.into_iter().collect()
     }
 

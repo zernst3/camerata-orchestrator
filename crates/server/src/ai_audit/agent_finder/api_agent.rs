@@ -426,89 +426,91 @@ impl ApiPieceAgent {
         loop {
             let mut record = AttemptRecord::new("api", &self.model);
             let attempt_started = std::time::Instant::now();
-            let (class, message, status, retryable, retry_after, overloaded, reply_timed_out) = match self
-                .post(body, use_caching)
-                .await
-            {
-                Ok(reply) => return Ok(reply),
-                Err(AnthropicPostError::Refusal(v)) => return Err(SendFailure::Refused(v)),
-                Err(AnthropicPostError::BadReply(e)) => (
-                    FailureClass::Content,
-                    format!("the provider's reply was not JSON: {e}"),
-                    None,
-                    false,
-                    None,
-                    false,
-                    false,
-                ),
-                Err(
-                    err @ (AnthropicPostError::Network(_) | AnthropicPostError::ReplyTimeout(_)),
-                ) => {
-                    let reply_timeout = matches!(err, AnthropicPostError::ReplyTimeout(_));
-                    let (AnthropicPostError::Network(e) | AnthropicPostError::ReplyTimeout(e)) =
-                        err
-                    else {
-                        unreachable!("matched above")
-                    };
-                    // A call that timed out may still have been billed and nothing came back to
-                    // price it from: it counts once, at the request's cost ceiling. A failure
-                    // that never reached the model counts nothing.
-                    if e.to_ascii_lowercase().contains("timed out") {
-                        self.count_timed_out_call(body, attempt_started.elapsed());
-                    }
-                    (
-                        FailureClass::Transport,
-                        // Only a time-out of the wait for the reply says the request itself is
-                        // too slow to answer; a connect time-out is the network and reruns whole.
-                        if reply_timeout {
-                            format!("{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: {e}")
-                        } else {
-                            format!("Anthropic API request failed: {e}")
-                        },
-                        None,
-                        true,
+            let (class, message, status, retryable, retry_after, overloaded, reply_timed_out) =
+                match self.post(body, use_caching).await {
+                    Ok(reply) => return Ok(reply),
+                    Err(AnthropicPostError::Refusal(v)) => return Err(SendFailure::Refused(v)),
+                    Err(AnthropicPostError::BadReply(e)) => (
+                        FailureClass::Content,
+                        format!("the provider's reply was not JSON: {e}"),
                         None,
                         false,
-                        reply_timeout,
-                    )
-                }
-                Err(AnthropicPostError::Http {
-                    status,
-                    body: text,
-                    retry_after,
-                }) => {
-                    let (etype, emsg) = camerata_llm::failure::provider_error_of(&text);
-                    let message = camerata_llm::failure::scrub_message(
-                        emsg.as_deref().unwrap_or(&text),
-                        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
-                    );
-                    let (class, helps) =
-                        camerata_llm::failure::classify_http(status, etype.as_deref(), &message);
-                    record.http_status = Some(status);
-                    record.error_type = etype.clone();
-                    // The engine retries 429, 529 and every 5xx, and only when the answer is
-                    // not an exhausted account.
-                    let retryable =
-                        helps && (status == 429 || status == 529 || (500..600).contains(&status));
-                    let overloaded =
-                        matches!(status, 529 | 503) || etype.as_deref() == Some("overloaded_error");
-                    (
-                        class,
-                        if request_too_large(status, etype.as_deref(), &message) {
-                            format!(
+                        None,
+                        false,
+                        false,
+                    ),
+                    Err(
+                        err
+                        @ (AnthropicPostError::Network(_) | AnthropicPostError::ReplyTimeout(_)),
+                    ) => {
+                        let reply_timeout = matches!(err, AnthropicPostError::ReplyTimeout(_));
+                        let (AnthropicPostError::Network(e) | AnthropicPostError::ReplyTimeout(e)) =
+                            err
+                        else {
+                            unreachable!("matched above")
+                        };
+                        // A call that timed out may still have been billed and nothing came back to
+                        // price it from: it counts once, at the request's cost ceiling. A failure
+                        // that never reached the model counts nothing.
+                        if e.to_ascii_lowercase().contains("timed out") {
+                            self.count_timed_out_call(body, attempt_started.elapsed());
+                        }
+                        (
+                            FailureClass::Transport,
+                            // Only a time-out of the wait for the reply says the request itself is
+                            // too slow to answer; a connect time-out is the network and reruns whole.
+                            if reply_timeout {
+                                format!("{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: {e}")
+                            } else {
+                                format!("Anthropic API request failed: {e}")
+                            },
+                            None,
+                            true,
+                            None,
+                            false,
+                            reply_timeout,
+                        )
+                    }
+                    Err(AnthropicPostError::Http {
+                        status,
+                        body: text,
+                        retry_after,
+                    }) => {
+                        let (etype, emsg) = camerata_llm::failure::provider_error_of(&text);
+                        let message = camerata_llm::failure::scrub_message(
+                            emsg.as_deref().unwrap_or(&text),
+                            camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+                        );
+                        let (class, helps) = camerata_llm::failure::classify_http(
+                            status,
+                            etype.as_deref(),
+                            &message,
+                        );
+                        record.http_status = Some(status);
+                        record.error_type = etype.clone();
+                        // The engine retries 429, 529 and every 5xx, and only when the answer is
+                        // not an exhausted account.
+                        let retryable = helps
+                            && (status == 429 || status == 529 || (500..600).contains(&status));
+                        let overloaded = matches!(status, 529 | 503)
+                            || etype.as_deref() == Some("overloaded_error");
+                        (
+                            class,
+                            if request_too_large(status, etype.as_deref(), &message) {
+                                format!(
                                 "{REQUEST_TOO_LARGE_PREFIX}Anthropic API HTTP {status}: {message}"
                             )
-                        } else {
-                            format!("Anthropic API HTTP {status}: {message}")
-                        },
-                        Some((status, text)),
-                        retryable,
-                        retry_after,
-                        overloaded,
-                        false,
-                    )
-                }
-            };
+                            } else {
+                                format!("Anthropic API HTTP {status}: {message}")
+                            },
+                            Some((status, text)),
+                            retryable,
+                            retry_after,
+                            overloaded,
+                            false,
+                        )
+                    }
+                };
             record.message = camerata_llm::failure::scrub_message(
                 &message,
                 camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,

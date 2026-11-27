@@ -257,7 +257,10 @@ impl RunHealth {
             );
             return;
         }
-        self.note_failure(crate::ai_audit::classify_pass_error(error), &error.to_string());
+        self.note_failure(
+            crate::ai_audit::classify_pass_error(error),
+            &error.to_string(),
+        );
     }
 
     /// A rate limit or an overload did not clear within the longest a call waits for one.

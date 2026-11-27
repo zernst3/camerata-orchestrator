@@ -3446,7 +3446,15 @@ async fn the_group_reviewer_does_not_start_on_an_incomplete_or_stopped_run() {
     assert!(report.cross_repo_stage_refusal().is_some());
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
     let ran = review_scan_report(
-        &mut report, &llm, &controls, &rules, false, false, None, None, None,
+        &mut report,
+        &llm,
+        &controls,
+        &rules,
+        false,
+        false,
+        None,
+        None,
+        None,
     )
     .await;
     assert!(ran.is_none(), "the group reviewer ran on an incomplete run");
@@ -3466,7 +3474,15 @@ async fn the_group_reviewer_does_not_start_on_an_incomplete_or_stopped_run() {
     assert!(report.cross_repo_stage_refusal().is_none());
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
     let ran = review_scan_report(
-        &mut report, &llm, &controls, &rules, false, false, None, None, None,
+        &mut report,
+        &llm,
+        &controls,
+        &rules,
+        false,
+        false,
+        None,
+        None,
+        None,
     )
     .await;
     assert!(ran.is_some());

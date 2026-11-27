@@ -53,7 +53,10 @@ async fn judge_through_the_seam(stub: &StubJudge, meter: &UsageMeter) -> JudgeOu
 async fn a_short_drop_during_the_clone_check_waits_and_gives_the_undisturbed_verdicts() {
     let waits = InstantWaits::install();
     let undisturbed = judge_through_the_seam(&dropping(0), &UsageMeter::default()).await;
-    assert!(!undisturbed.findings.is_empty(), "the fixture confirms a candidate");
+    assert!(
+        !undisturbed.findings.is_empty(),
+        "the fixture confirms a candidate"
+    );
     assert!(waits.waits().is_empty());
 
     let meter = UsageMeter::default();

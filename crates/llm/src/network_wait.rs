@@ -288,7 +288,8 @@ mod tests {
     async fn an_auth_failure_never_waits_and_stops_every_other_wait() {
         let _g = SERIAL.lock().await;
         let wait = NetworkWait::new();
-        let (out, waits) = with_recorder(wait.run(|| async { Err::<(), _>(auth()) }, &|| true)).await;
+        let (out, waits) =
+            with_recorder(wait.run(|| async { Err::<(), _>(auth()) }, &|| true)).await;
         let e = out.unwrap_err();
         assert!(!is_network_wait_exhausted(&e));
         assert!(waits.is_empty(), "an auth failure waited: {waits:?}");
