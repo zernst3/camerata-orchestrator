@@ -125,6 +125,7 @@ pub mod review_view;
 pub mod routine;
 pub mod run;
 pub mod run_health;
+pub mod run_plan;
 pub mod run_store;
 mod run_target;
 pub mod runtime_audit;
@@ -1587,6 +1588,10 @@ pub fn router(state: AppState) -> Router {
             "/api/onboard/preflight",
             post(preflight::onboard_preflight).layer(source_gate.clone()),
         )
+        .route(
+            "/api/onboard/plan",
+            post(onboard_plan).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         // Saved inspections: one namespace, distinct from the agent runs under /api/runs. The two
@@ -2365,6 +2370,9 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
+    // The spend checks of a start (#564) need the whole request; they run after the client lock
+    // and the build check below, before any repository is located.
+    let spend_req = req.clone();
     let run_controls = req.run_controls_for(&state);
     let scan_scope = run_controls.scope.clone();
     let repos: Vec<String> = req
@@ -2423,6 +2431,12 @@ async fn onboard_audit(
             &crate::run_store::engine_pin::BuildId::current(),
         )
     }) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
+    // A client inspection needs a spend limit, and a limit under the projection refuses (#564).
+    if let Some(why) =
+        start_spend_refusal(&state, state.projects.active().as_ref(), &spend_req).await
+    {
         return Json(client_lock_blocked_report(&repos, why));
     }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
@@ -2850,6 +2864,8 @@ pub(crate) async fn start_audit_job(
         .or_else(|| state.projects.active());
     let mut run_controls = req.run_controls_for_project(active_project.as_ref());
     let scan_scope = run_controls.scope.clone();
+    // The request as given, for the spend checks after the client lock (#564).
+    let spend_req = options.spend_checks.then(|| req.clone());
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
@@ -2923,6 +2939,15 @@ pub(crate) async fn start_audit_job(
         let job_id = state.jobs.create("audit", project_id);
         state.jobs.fail(&job_id, why);
         return job_id;
+    }
+    // A fresh start's spend checks (#564): a client inspection needs a spend limit, and a limit
+    // under the projection refuses as the command line's does.
+    if let Some(spend_req) = &spend_req {
+        if let Some(why) = start_spend_refusal(&state, active_project.as_ref(), spend_req).await {
+            let job_id = state.jobs.create("audit", project_id);
+            state.jobs.fail(&job_id, why);
+            return job_id;
+        }
     }
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let LocalSources {

@@ -211,7 +211,7 @@ pub(crate) async fn onboard_scan(
 /// `repos` means PROJECT-LEVEL (scanned against every repo); a non-empty `repos` scopes the
 /// rule to just those repos. The UI sends each repo's selections plus the project-level set,
 /// and the audit scopes each repo to the rules that apply to it.
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct AuditRuleReq {
     #[serde(default)]
     pub(crate) id: String,
@@ -223,7 +223,7 @@ pub(crate) struct AuditRuleReq {
     pub(crate) repos: Vec<String>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct AuditReq {
     /// Go ahead when some repos have no local clone; the report then lists them as not
     /// inspected and the release gate refuses to package it. Without it the audit is refused

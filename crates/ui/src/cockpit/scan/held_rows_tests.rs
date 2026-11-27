@@ -1087,6 +1087,18 @@ fn note_tours(m: &dioxus::dioxus_core::Mutations, tours: &mut Vec<(String, Eleme
         {
             tours.push((text.clone(), *id));
         }
+        // The pre-flight's Start (#564) is found by its html id, kept with the markers.
+        if let Mutation::SetAttribute {
+            name: "id",
+            value: AttributeValue::Text(text),
+            id,
+            ..
+        } = e
+        {
+            if text == super::PREFLIGHT_START_ID {
+                tours.push((text.clone(), *id));
+            }
+        }
     }
 }
 
@@ -1179,6 +1191,7 @@ async fn an_unreadable_draft_switches_off_only_the_draft_save_never_a_decision()
         })))
         .mount(&server)
         .await;
+    super::preflight_start_tests::mount_open_plan(&server).await;
     let report = serde_json::json!({
         "repos": ["acme/portal"], "files_scanned": 1, "gated": false, "proposed_rules": [],
         "findings": [finding_json(0, true)], "run_id": "20261118T101500Z-ab12cd"
@@ -1220,6 +1233,20 @@ async fn an_unreadable_draft_switches_off_only_the_draft_save_never_a_decision()
         &vdom,
         "click",
         run,
+        Box::new(dioxus::html::SerializedMouseData::default()),
+    );
+    // Start in the pre-flight panel sends the inspection (#564).
+    pump_tours(&mut vdom, 400, &mut tours).await;
+    let go = tours
+        .iter()
+        .rev()
+        .find(|(t, _)| t == super::PREFLIGHT_START_ID)
+        .map(|(_, id)| *id)
+        .expect("the pre-flight's Start");
+    send(
+        &vdom,
+        "click",
+        go,
         Box::new(dioxus::html::SerializedMouseData::default()),
     );
     let mut html = String::new();

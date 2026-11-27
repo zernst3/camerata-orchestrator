@@ -1667,7 +1667,16 @@ pub(crate) async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<serde_json::Value> {
-    let job_id = start_audit_job(&state, req, AuditJobOptions::default()).await;
+    // A fresh start from the scan screen makes the spend checks (#564).
+    let job_id = start_audit_job(
+        &state,
+        req,
+        AuditJobOptions {
+            spend_checks: true,
+            ..AuditJobOptions::default()
+        },
+    )
+    .await;
     Json(serde_json::json!({ "job_id": job_id }))
 }
 
@@ -1753,6 +1762,10 @@ pub(crate) struct AuditJobOptions {
     /// The saved run to resume instead of starting a new one ("Run what remains"). The job then
     /// runs only the parts that are not done, through [`crate::run_store::open_for_resume`].
     pub resume_run: Option<String>,
+    /// Make the spend checks of a fresh start (#564): a client inspection needs a spend limit,
+    /// and a limit under the projection refuses ([`start_spend_refusal`]). Checked right after
+    /// the client lock, before any repository is located. Set by [`onboard_audit_start`] only.
+    pub spend_checks: bool,
 }
 
 /// The commits a delta retest ran between.
