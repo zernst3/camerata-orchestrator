@@ -91,6 +91,13 @@ pub struct FailureReport {
     /// so a report written before it existed still loads.
     #[serde(default)]
     pub judged_not_a_problem: Vec<String>,
+    /// The operator's stop (#583: Ctrl+C or SIGTERM on the command line, or the app's stop), when
+    /// the run was stopped: when, which live batches the provider cancelled, and every batch it
+    /// did NOT cancel, by id, since each may still run and be billed. Kept as history by later
+    /// attempts. Operator only. `serde(default)` so a report written before it existed still
+    /// loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_stop: Option<crate::operator_stop::StopReport>,
 }
 
 /// The entries for every failed part of `report`. A disclosed scope limit (a tool not run by
@@ -178,6 +185,7 @@ pub fn build(report: &crate::onboard::ScanReport) -> FailureReport {
             .iter()
             .map(|n| camerata_secrets::redact_str(n).into_owned())
             .collect(),
+        operator_stop: None,
     }
 }
 
@@ -187,6 +195,10 @@ impl FailureReport {
             && self.standard_fixes.is_empty()
             && self.detail_fallbacks.is_empty()
             && self.judged_not_a_problem.is_empty()
+            && self
+                .operator_stop
+                .as_ref()
+                .is_none_or(|s| s.not_cancelled.is_empty())
     }
 
     /// The entries that still fail.
@@ -197,8 +209,18 @@ impl FailureReport {
     /// One structured line per failure that still fails, for stderr: `key=value` pairs, stable
     /// order. A resolved entry is history and is not printed.
     pub fn stderr_lines(&self) -> Vec<String> {
-        self.unresolved()
-            .map(|e| {
+        let not_cancelled = self
+            .operator_stop
+            .iter()
+            .flat_map(|s| s.not_cancelled.iter())
+            .map(|b| {
+                format!(
+                    "camerata failure: class=batch_not_cancelled batch={} message=\"{}\"",
+                    b.batch_id, b.error
+                )
+            });
+        not_cancelled
+            .chain(self.unresolved().map(|e| {
                 format!(
                     "camerata failure: class={} repo={} part=\"{}\" files={} attempts={} first={} last={} message=\"{}\"",
                     e.class.as_str(),
@@ -210,7 +232,7 @@ impl FailureReport {
                     if e.last_at.is_empty() { "-" } else { &e.last_at },
                     e.message,
                 )
-            })
+            }))
             .collect()
     }
 
@@ -231,6 +253,25 @@ impl FailureReport {
                 )
             }
         );
+        if let Some(stop) = &self.operator_stop {
+            out.push_str(&format!(
+                "\n## Stopped by the operator\n\nThe inspection was stopped by the operator at {}. \
+                 What had finished is saved, and `camerata inspect --resume` runs what remains. \
+                 {} live batch(es) were cancelled at the provider.\n",
+                stop.at,
+                stop.cancelled.len()
+            ));
+            if !stop.not_cancelled.is_empty() {
+                out.push_str(
+                    "\nThese batches could NOT be cancelled and may still run and be billed. \
+                     Cancel each in the Anthropic console:\n",
+                );
+                for b in &stop.not_cancelled {
+                    out.push_str(&format!("\n- batch {}: {}", b.batch_id, b.error));
+                }
+                out.push('\n');
+            }
+        }
         if !self.standard_fixes.is_empty() {
             out.push_str(&format!(
                 "\n## Standard fixes ({})\n\nThese findings ship the rule's own authored fix, \
@@ -407,7 +448,35 @@ pub fn merge_history(previous: &FailureReport, current: &FailureReport) -> Failu
         detail_fallbacks: current.detail_fallbacks.clone(),
         runner_notes: current.runner_notes.clone(),
         judged_not_a_problem: current.judged_not_a_problem.clone(),
+        // A stop stays on record: a batch it could not cancel was billed whatever came after.
+        operator_stop: current
+            .operator_stop
+            .clone()
+            .or_else(|| previous.operator_stop.clone()),
     }
+}
+
+/// Record the operator's stop in the failure report next to `ledger_file`, keeping what the file
+/// already holds. Returns the two paths, as [`write`] does.
+pub fn write_operator_stop(
+    ledger_file: &Path,
+    stop: &crate::operator_stop::StopReport,
+) -> std::io::Result<Option<(PathBuf, PathBuf)>> {
+    let (json_path, _) = paths_next_to(ledger_file);
+    let mut current: FailureReport = std::fs::read(&json_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    current.generated_at = crate::client_source::records::now_rfc3339();
+    current.operator_stop = Some(stop.clone());
+    if let Some(parent) = json_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let (json_path, md_path) = paths_next_to(ledger_file);
+    let json = serde_json::to_string_pretty(&current).map_err(std::io::Error::other)?;
+    std::fs::write(&json_path, json)?;
+    std::fs::write(&md_path, current.render_md())?;
+    Ok(Some((json_path, md_path)))
 }
 
 /// Write `failures.json` and `failures.md` next to `ledger_file`. Returns the two paths, or

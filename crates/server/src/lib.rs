@@ -124,6 +124,8 @@ pub mod review_tree;
 pub mod review_view;
 pub mod routine;
 pub mod run;
+pub mod network_wait;
+pub mod operator_stop;
 pub mod run_health;
 pub mod run_store;
 mod run_target;
@@ -3343,13 +3345,15 @@ pub(crate) async fn start_audit_job(
                 Some(usage_ledger.clone()),
             )
             .with_session_sink(sessions.clone());
-            let journaled = run_store
-                .as_ref()
-                .map(|s| rs::journal::wrap(&real, s.clone()));
-            let model_seam: &dyn crate::llm::LlmPort = match &journaled {
-                Some(j) => j.as_ref(),
-                None => &real,
-            };
+            // The run's seam, built by the one function the command line uses: journaled into
+            // the run folder, with the long network wait around every send (#582).
+            let run_control = std::sync::Arc::new(crate::operator_stop::RunControl::new());
+            let run_seam = crate::network_wait::run_model_seam(
+                &real,
+                run_store.clone(),
+                run_control.clone(),
+            );
+            let model_seam: &dyn crate::llm::LlmPort = run_seam.as_ref();
             // The review tree's stage 2 reads the final report with the run's own controls, and
             // never runs where the compliance gate blocked the AI review.
             let review_controls = run_controls.clone();
