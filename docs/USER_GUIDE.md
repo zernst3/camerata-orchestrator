@@ -2585,6 +2585,23 @@ name, so a report is never marked for the wrong client. The name is at most 100 
 when it holds many "&" signs, because the workbook footer has room for 255 characters and writes each
 "&" twice; a name that does not fit is refused with a message saying so.
 
+**Which model ran each stage.** The PDF's "How this was done" page lists, under **Inspection
+models by stage**, every stage of the run that called a model and the model it ran on: the finder
+(with the checks across repositories on a project of several repos), the group review, the
+duplicate check, the clone check, the fix text, calibration, the finding detail, the alternative
+options and the deep compliance and security review. Each line also says whether the stage ran as a
+batch or live, and the fix text line says how many findings use the rule's standard fix instead of
+a fix written for the codebase. A model the CLI backend was asked for is marked "(requested)",
+because the CLI does not confirm which model answered. A stage that made no model call is left
+off; a run that called no model says "No model was used in this inspection." The workbook's Start
+here sheet prints the same list under the same heading, one row per stage, and
+`json/inspection.json` carries it as `provenance.model_stages`. The list is read from the run's own
+record, never from the current settings, so re-exporting a saved run names the models that run
+used. A run saved before this record existed (before #584) names the finder, calibration, group
+review and clone check models it saved, shows "model not recorded" for the fix text, the duplicate
+check and the deep review when the run shows they ran, and says the run was saved before each
+stage's model was recorded. Re-exporting such a run makes no model call.
+
 Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
 Anthropic API, is the default and uses the Anthropic key the operator saved in the app (Settings), with the
 `ANTHROPIC_API_KEY` environment variable only as the fallback when no key is saved there; with no key
