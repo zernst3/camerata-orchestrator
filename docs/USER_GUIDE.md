@@ -2845,6 +2845,15 @@ commits.
 
 ---
 
+### Rerunning a saved run's deterministic checks (`--rerun-deterministic`)
+
+A resume refuses a different build of Camerata, which is right for model work but means a bug in a deterministic stage (the tool previews and their merges, the convention accounting, the ledger and integrity checks, the collapse, the export) cannot be fixed on a saved run without paying for a whole new inspection. `camerata inspect --rerun-deterministic <RUN-ID|latest>` runs those stages again on the build you are running, from the run's saved inputs, and asks no model.
+
+- Every model reply comes from the run's store. The finder, the group review, the fix text and the clone and duplicate checks keep the results and models of the build that made the run. A reply the run does not hold refuses the whole rerun: the refusal lists every missing reply, nothing is sent and no export is written. A run with a failed or never-answered model part needs a normal `--resume` on its own build first.
+- It refuses, naming the cause, when the models, the rules the scan asks about, the questions Camerata asks the model (the prompt schema numbers) or the rule library differ from the saved run. Until runs carry their own rule snapshot (#560) the live rule library digest must equal the one the run recorded.
+- A normal `--resume` on another build is still refused. A client inspection needs a build with a commit and no uncommitted changes, because the report names it.
+- Both builds are recorded in the run (`reruns` in `run.json`), in the ledger, and in the report's "How this was done". No API key is needed. `--export` may be given again; everything else is the saved run's. A run that is already complete is not rerun.
+
 ## 12. Feature flags (opt-out)
 
 Camerata uses **feature flags** to gate features that are optional or under evaluation without code

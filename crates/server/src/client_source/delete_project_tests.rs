@@ -228,6 +228,7 @@ fn seed(
         attempt: 1,
         engine_version: "9.9.9".to_string(),
         pin: None,
+        reruns: Vec::new(),
         project_key: "k".to_string(),
         repos: vec![crate::run_store::RepoRecord {
             name: repo.to_string(),
@@ -1552,6 +1553,7 @@ fn put_run(fx: &Fx, run_id: &str, project_id: Option<&str>) -> PathBuf {
         attempt: 1,
         engine_version: "9.9.9".to_string(),
         pin: None,
+        reruns: Vec::new(),
         project_key: "k".to_string(),
         repos: vec![crate::run_store::RepoRecord {
             name: REPO.to_string(),

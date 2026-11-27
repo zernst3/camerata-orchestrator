@@ -492,6 +492,26 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
 enum Planned {
     Replay(Box<LlmResponse>),
     Fresh(FreshCall),
+    /// A rerun (#588) holds no stored reply for the request and may not ask a model: the miss is
+    /// recorded in the run's list and the call fails. Nothing is stored and no part is started.
+    Missing,
+}
+
+/// How a missing reply is named in a rerun's refusal: the stage, the repo and the files its
+/// request framed.
+pub(crate) fn describe_missing(kind: PartKind, repo: &str, files: &[String]) -> String {
+    let mut out = format!("{} reply", kind.label());
+    if !repo.is_empty() {
+        out.push_str(&format!(" for {repo}"));
+    }
+    match files {
+        [] => {}
+        [one] => out.push_str(&format!(" (file {one})")),
+        [first, rest @ ..] => {
+            out.push_str(&format!(" (file {first} and {} more)", rest.len()));
+        }
+    }
+    out
 }
 
 struct FreshCall {
@@ -504,6 +524,37 @@ struct FreshCall {
     repo: String,
     files: Vec<String>,
     owner: Option<CallOwner>,
+}
+
+/// The slots of `file` a request is answered from, in the order they answer. A resume answers
+/// from the good replies only. A rerun answers the same way and falls back to a reply the run
+/// stored but a resume would ask again (rejected, unusable) only when the request has no good one,
+/// so a bad first attempt never comes before a good later one.
+fn replayable_slots(file: &CallFile, rerun: bool) -> Vec<usize> {
+    let kind = file.kind;
+    let good: Vec<usize> = file
+        .entries
+        .iter()
+        .filter(|(_, e)| entry_replays(e, kind) && e.response.is_some())
+        .map(|(s, _)| *s)
+        .collect();
+    if rerun && good.is_empty() {
+        return file
+            .entries
+            .iter()
+            .filter(|(_, e)| e.response.is_some())
+            .map(|(s, _)| *s)
+            .collect();
+    }
+    good
+}
+
+/// What a stage sees when a rerun has no stored reply for its request.
+pub(crate) fn missing_reply_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "this is a rerun of the deterministic stages: it answers only from the run's stored \
+         replies and never asks a model, and this reply is not stored"
+    )
 }
 
 fn load_call_file(dir: &Path, key: &str) -> Option<CallFile> {
@@ -535,17 +586,19 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
         });
         // The idx-th ask is answered by the idx-th good reply, in the order they were stored.
         let file_kind = file.kind;
-        let good_slot = file
-            .entries
-            .iter()
-            .filter(|(_, e)| entry_replays(e, file_kind) && e.response.is_some())
-            .map(|(slot, _)| *slot)
-            .nth(idx);
+        // A rerun keeps the model work as the saved run made it: every stored reply is the answer,
+        // whatever the stage made of it (a reply the stage turned down is turned down again, the
+        // way it was). Only a call that never got a reply is missing. A resume asks those again.
+        let rerun = store.rerun_misses().is_some();
+        let good_slot = replayable_slots(file, rerun).into_iter().nth(idx);
         let good = good_slot.and_then(|slot| {
             // A refused reply the current parser accepts is a good reply from here on: stored as
             // one, so the run's accounting (a later set-aside, the counts) agrees with the replay.
+            // A rerun changes nothing it stored.
             let entry = file.entries.get_mut(&slot)?;
-            if entry.status == EntryStatus::Unusable && !replays_on_resume(entry.status, file_kind)
+            if !rerun
+                && entry.status == EntryStatus::Unusable
+                && !replays_on_resume(entry.status, file_kind)
             {
                 entry.status = EntryStatus::Done;
                 entry.reason = None;
@@ -567,6 +620,12 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 Planned::Replay(Box::new(replay))
             }
             None => {
+                // A rerun answers from the store alone: a missing reply is recorded by name
+                // and the call fails before anything is stored or started.
+                if let Some(misses) = store.rerun_misses() {
+                    misses.record(describe_missing(kind, &repo, &files));
+                    return Planned::Missing;
+                }
                 // A fresh call is stored in the next free slot of the file, never over an
                 // existing entry (a good one at a later slot must stay).
                 let next = st
@@ -616,12 +675,8 @@ fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
             entries: BTreeMap::new(),
         })
     });
-    let file_kind = file.kind;
-    file.entries
-        .values()
-        .filter(|e| entry_replays(e, file_kind) && e.response.is_some())
-        .nth(idx)
-        .is_some()
+    let rerun = store.rerun_misses().is_some();
+    replayable_slots(file, rerun).get(idx).is_some()
 }
 
 impl FreshCall {
@@ -740,6 +795,10 @@ const MAX_REASON_CHARS: usize = 1_500;
 /// key) instead of paying for the whole reply again. A reply that was already unusable keeps
 /// its status and gains the reason after the one it has. No reply is touched except that one.
 pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str, whole: bool) {
+    // A rerun keeps the saved run's replies exactly as they are stored.
+    if store.rerun_misses().is_some() {
+        return;
+    }
     let reason = crate::failure::scrub_message(reason, MAX_REASON_CHARS);
     let dir = store.dir().to_path_buf();
     let mut st = store.lock_state();
@@ -786,6 +845,7 @@ impl LlmPort for JournalLlm<'_> {
         let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.complete(req).await;
                 after_call(&self.store, call, &result);
@@ -806,6 +866,7 @@ impl LlmPort for JournalLlm<'_> {
                 on_delta(&resp.text);
                 Ok(*resp)
             }
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.complete_streaming(req, on_delta).await;
                 after_call(&self.store, call, &result);
@@ -842,6 +903,7 @@ impl LlmPort for JournalRealtime {
         let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.realtime().complete(req).await;
                 after_call(&self.store, call, &result);
@@ -862,6 +924,7 @@ impl LlmPort for JournalRealtime {
                 on_delta(&resp.text);
                 Ok(*resp)
             }
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self
                     .inner

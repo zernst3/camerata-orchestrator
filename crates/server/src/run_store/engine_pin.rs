@@ -208,6 +208,99 @@ pub fn check_pin(
     Ok(())
 }
 
+/// The refusal when a saved run's deterministic stages cannot be rerun on this build, in plain
+/// words; `Ok` when they can (#588). A rerun never asks a model, so the build that made the model
+/// work may differ from this one, but everything a stored reply answers must be what it was: the
+/// questions the model is asked (the two prompt schema numbers) and the rule library the finder
+/// and the group reviewer read (its digest). The run's own rule snapshot (#560) will replace the
+/// digest comparison when a run carries one; until then the live digest must equal the pinned one.
+pub fn check_pin_for_rerun(
+    saved: Option<&EnginePin>,
+    now: &BuildId,
+    corpus_version: &str,
+) -> Result<(), String> {
+    let Some(saved) = saved else {
+        return Err(
+            "This inspection was started before Camerata recorded which build ran it, so its \
+             deterministic checks cannot be rerun. Start it again."
+                .to_string(),
+        );
+    };
+    let Some(saved_commit) = &saved.build.commit else {
+        return Err(
+            "This inspection was started on a build that did not record its commit, so its \
+             deterministic checks cannot be rerun. Start it again."
+                .to_string(),
+        );
+    };
+    if now.commit.is_none() {
+        return Err(
+            "This copy of Camerata does not know which build it is, so it cannot rerun the \
+             deterministic checks of a saved inspection: the rerun records the build it ran on. \
+             Build it from a git checkout."
+                .to_string(),
+        );
+    }
+    if saved.build.prompt_schema != now.prompt_schema
+        || saved.build.clone_prompt_schema != now.clone_prompt_schema
+    {
+        return Err(format!(
+            "The questions Camerata asks the model changed between build {} and this build, so \
+             the stored replies would answer different questions and the model work would have \
+             to be done again. A rerun never asks a model. Start the inspection again on this \
+             build.",
+            short(saved_commit)
+        ));
+    }
+    if saved.corpus_version != corpus_version {
+        return Err(format!(
+            "The rule library changed since this inspection started on build {}, and the finder \
+             and the group reviewer read it, so their prompts would differ from the ones the \
+             stored replies answer. A rerun never asks a model. Put the rule library back as it \
+             was on that build, or start the inspection again.",
+            short(saved_commit)
+        ));
+    }
+    Ok(())
+}
+
+/// One rerun of a saved run's deterministic stages: the build that made the model work and the
+/// build the deterministic stages ran on (#588). Kept in the run, in the ledger, and named in the
+/// report's "How this was done".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RerunRecord {
+    /// The build the run started on: the finder, the group review, the fix text and the clone and
+    /// duplicate checks are its results, from the stored replies.
+    pub model_build: BuildId,
+    /// The build that ran the deterministic stages this time.
+    pub deterministic_build: BuildId,
+    /// When the rerun started (RFC 3339 UTC).
+    pub at: String,
+}
+
+impl RerunRecord {
+    pub fn new(model_build: &BuildId, deterministic_build: &BuildId) -> Self {
+        Self {
+            model_build: model_build.clone(),
+            deterministic_build: deterministic_build.clone(),
+            at: super::now(),
+        }
+    }
+
+    /// The sentence the report's "How this was done" carries, in the client's words: no dashes,
+    /// no serial commas, American English.
+    pub fn report_sentence(&self) -> String {
+        let name = |b: &BuildId| b.short_commit().unwrap_or_else(|| "(unnamed)".to_string());
+        format!(
+            "The model work in this inspection ran on Camerata build {}. The deterministic checks \
+             were run again on Camerata build {}, using the stored model replies and with no new \
+             model calls.",
+            name(&self.model_build),
+            name(&self.deterministic_build)
+        )
+    }
+}
+
 /// The note for a resume on the same commit when the saved build carried uncommitted changes (a
 /// clean saved build is never continued on a dirty one, see [`check_pin`]).
 pub fn dirty_note(saved: Option<&EnginePin>, now: &BuildId) -> Option<String> {

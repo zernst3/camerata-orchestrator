@@ -135,7 +135,7 @@ enum Command {
     Inspect {
         /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
         /// project (one scan, one report, one cache); each then needs a `--repo-name`.
-        #[arg(long, required_unless_present = "resume")]
+        #[arg(long, required_unless_present_any = ["resume", "rerun_deterministic"])]
         repo: Vec<PathBuf>,
         /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
         /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
@@ -144,7 +144,7 @@ enum Command {
         repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         /// With `--resume`, defaults to where the saved run was to write it.
-        #[arg(long, required_unless_present = "resume")]
+        #[arg(long, required_unless_present_any = ["resume", "rerun_deterministic"])]
         export: Option<PathBuf>,
         /// `api` (the Anthropic Messages API; uses the key saved in the app, or
         /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
@@ -229,7 +229,7 @@ enum Command {
         /// Who the inspection is for. Printed in the export's confidentiality line ("Confidential,
         /// prepared for <client> on <date>") on every PDF page and workbook sheet. Required: it
         /// is checked before anything is read or spent.
-        #[arg(long, value_name = "NAME", required_unless_present = "resume")]
+        #[arg(long, value_name = "NAME", required_unless_present_any = ["resume", "rerun_deterministic"])]
         client: Option<String>,
         /// Not a client engagement: the maintainer's own development. Without this flag every
         /// inspection is a client engagement, which runs only on the Anthropic API with
@@ -287,6 +287,24 @@ enum Command {
         /// else is the saved run's. A run that is already complete says so and does nothing.
         #[arg(long, value_name = "RUN-ID|latest")]
         resume: Option<String>,
+        /// Rerun the deterministic stages of a saved run on THIS build, with no model calls:
+        /// `--rerun-deterministic <RUN-ID>` or `--rerun-deterministic latest`. For a saved run
+        /// whose bookkeeping (the tool previews and their merges, the convention accounting, the
+        /// ledger and integrity checks, the collapse, the export) was wrong on the build that made
+        /// it and is fixed on this one. Every model reply comes from the run's store; the finder,
+        /// the group review, the fix text and the clone and duplicate checks keep the original
+        /// build's results and models. A reply the run does not hold refuses the whole rerun,
+        /// listing every missing one, and nothing is sent. Refuses if the models, the rules, the
+        /// questions asked of the model or the rule library differ from the saved run (a normal
+        /// `--resume` on another build is still refused). Records both builds in the run, the
+        /// ledger and the report's "How this was done". No key is needed. `--export` may be given
+        /// again; everything else is the saved run's.
+        #[arg(
+            long = "rerun-deterministic",
+            value_name = "RUN-ID|latest",
+            conflicts_with = "resume"
+        )]
+        rerun_deterministic: Option<String>,
         /// Print what this run would take on, then stop: per repo the files, lines and bytes
         /// admitted and the files left out by reason; per piece its files, bytes, context and
         /// checklist bytes, first request size and turn limit; the pre-flight cost projection
@@ -296,7 +314,7 @@ enum Command {
         /// same flags as the real run. Exits 0 when a real run would start, non-zero with the
         /// reason when it would refuse (a spend limit under the projection, a build with
         /// uncommitted changes on a client run).
-        #[arg(long = "plan-only", conflicts_with = "resume")]
+        #[arg(long = "plan-only", conflicts_with_all = ["resume", "rerun_deterministic"])]
         plan_only: bool,
     },
 
@@ -666,8 +684,14 @@ async fn main() -> anyhow::Result<()> {
             finder_force_pieces,
             compare_with,
             resume,
+            rerun_deterministic,
             plan_only,
         } => {
+            if let Some(run) = rerun_deterministic {
+                return report_inspect_result(
+                    inspect_cmd::run_rerun_deterministic(&run, &repo, export).await,
+                );
+            }
             if let Some(run) = resume {
                 return run_resume_cmd(&run, &repo, export, max_cost_usd).await;
             }
@@ -1520,8 +1544,10 @@ mod cli_parse_tests {
                 finder_force_pieces,
                 compare_with,
                 resume,
+                rerun_deterministic,
                 plan_only,
             } => {
+                assert!(rerun_deterministic.is_none());
                 assert!(!plan_only, "a real run unless --plan-only is given");
                 assert!(exclude.is_empty(), "nothing is excluded unless agreed");
                 assert!(resume.is_none(), "a new run unless --resume is given");

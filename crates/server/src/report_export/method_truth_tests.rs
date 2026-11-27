@@ -399,3 +399,50 @@ fn the_inspected_types_sentence_names_every_admitted_type_and_no_unadmitted_one(
     }
     assert!(crate::onboard::files::text_kind("Makefile.am").is_none());
 }
+
+/// A rerun of the deterministic stages on another build (#588): "How this was done" names both
+/// builds, in the client's words (no dashes, no serial commas), and a report that was not rerun
+/// says nothing of it.
+#[test]
+fn the_methodology_of_a_rerun_names_the_build_of_the_model_work_and_the_build_of_the_checks() {
+    use crate::run_store::engine_pin::{BuildId, RerunRecord};
+    let build = |c: &str| BuildId {
+        commit: Some(c.repeat(40)),
+        ..BuildId::clean_test_build()
+    };
+    let mut report = mixed_report();
+    let plain = {
+        let sealed = report.clone().seal();
+        let reviewed = ReviewedReport::unreviewed(&sealed, &HashMap::new());
+        build_report_json(&reviewed, None, &empty_opts())
+            .methodology
+            .deterministic_note
+    };
+    assert!(!plain.contains("run again"), "not a rerun: {plain}");
+    report
+        .ledger
+        .record_rerun(RerunRecord::new(&build("b"), &build("c")));
+    let sealed = report.seal();
+    let reviewed = ReviewedReport::unreviewed(&sealed, &HashMap::new());
+    let note = build_report_json(&reviewed, None, &empty_opts())
+        .methodology
+        .deterministic_note;
+    assert!(
+        note.starts_with(&plain),
+        "the rerun sentence follows: {note}"
+    );
+    assert!(
+        note.contains(&format!("build {}", "b".repeat(12)))
+            && note.contains(&format!("build {}", "c".repeat(12))),
+        "both builds are named: {note}"
+    );
+    assert!(
+        note.contains("model work in this inspection ran on"),
+        "{note}"
+    );
+    assert!(note.contains("run again"), "{note}");
+    assert!(
+        !note.contains('\u{2014}') && !note.contains('\u{2013}'),
+        "no dashes: {note}"
+    );
+}

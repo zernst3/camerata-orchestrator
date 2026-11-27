@@ -2073,10 +2073,15 @@ pub fn build_report_json_with_counts(
         next_steps: counts_prose::next_steps(counts, multi_repo, review_state, opts.internal),
         deterministic_note: {
             let base = deterministic_note_for(method_facts.finder);
-            if pom_checked(report.ledger.audited_dependency_files()) {
+            let base = if pom_checked(report.ledger.audited_dependency_files()) {
                 format!("{base} {MAVEN_DECLARED_ONLY}")
             } else {
                 base
+            };
+            // A rerun of the deterministic stages on another build (#588) names both builds.
+            match report.ledger.rerun() {
+                Some(rerun) => format!("{base} {}", rerun.report_sentence()),
+                None => base,
             }
         },
         ai_tier_note: ai_tier_note_for(

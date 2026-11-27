@@ -3967,6 +3967,8 @@ pub async fn audit_repos_with_llm_controlled(
         &report.findings,
         &report.discarded,
     );
+    #[cfg(any(test, feature = "test-support"))]
+    let lost_finder_rows = crate::test_defects::lost_finder_rows(lost_finder_rows);
     report.conventions = all_conventions;
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never

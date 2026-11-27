@@ -625,6 +625,11 @@ pub struct ScanLedger {
     /// existed, or by a caller that does not record one.
     #[serde(default)]
     engagement: Option<crate::client_lock::EngagementRecord>,
+    /// Set when this ledger came from a rerun of a saved run's deterministic stages on another
+    /// build (#588): the build that made the model work and the build that ran the checks. The
+    /// report's "How this was done" names both. `None` for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rerun: Option<crate::run_store::engine_pin::RerunRecord>,
     /// The dependency files (manifests and lockfiles) the dependency audit was given, per repo,
     /// with those inside a bundled-code folder marked vendored. Disclosed in the dependency
     /// section of every export. `serde(default)` so an older ledger still loads.
@@ -1838,6 +1843,16 @@ impl ScanLedger {
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.
     pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
         self.engagement = Some(record);
+    }
+
+    /// Record that this ledger came from a rerun of the deterministic stages (#588). Overwrites.
+    pub fn record_rerun(&mut self, rerun: crate::run_store::engine_pin::RerunRecord) {
+        self.rerun = Some(rerun);
+    }
+
+    /// The rerun this ledger came from, when it did.
+    pub fn rerun(&self) -> Option<&crate::run_store::engine_pin::RerunRecord> {
+        self.rerun.as_ref()
     }
 
     /// Add what one repository held: waiver comments and baseline entries that were not honoured.
