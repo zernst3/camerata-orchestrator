@@ -850,6 +850,10 @@ struct StoredRow {
     billed: Option<StoredResponse>,
 }
 
+/// The error text of a batch row the provider never ran because its batch was cancelled: the
+/// Message Batches result type, which stands in when the row carries no message.
+const CANCELED_ROW: &str = "canceled";
+
 impl StoredRow {
     fn of(row: &BatchResultRow) -> Self {
         Self {
@@ -901,11 +905,17 @@ impl StoredRow {
     /// its own hash and found by the stage on the resume), and sending it from here too would
     /// pay for it twice or duplicate a batch that may be running. What a row was billed stays in
     /// the stored spend ([`stored_spend`]).
+    ///
+    /// One more row never ran: a row of a batch that was CANCELLED (the operator's stop, #583),
+    /// which the provider answers as `canceled`, nothing billed. The stop ended the attempt, so
+    /// the stage never sent it again; without this a resume would answer the item from the
+    /// cancelled batch for ever and the run could never complete.
     fn needs_resend(&self) -> bool {
         self.response.is_none()
             && self.billed.is_none()
             && self.error.as_deref().is_some_and(|e| {
-                camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
+                e.trim() == CANCELED_ROW
+                    || camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
             })
     }
 }
