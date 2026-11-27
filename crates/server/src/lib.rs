@@ -1588,6 +1588,10 @@ pub fn router(state: AppState) -> Router {
             "/api/onboard/preflight",
             post(preflight::onboard_preflight).layer(source_gate.clone()),
         )
+        .route(
+            "/api/onboard/plan",
+            post(onboard_plan).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         // Saved inspections: one namespace, distinct from the agent runs under /api/runs. The two
@@ -2366,6 +2370,10 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
+    // The spend checks of a start (#564), before anything else is read.
+    if let Some(why) = start_spend_refusal(&state, state.projects.active().as_ref(), &req).await {
+        return Json(client_lock_blocked_report(&req.repos, why));
+    }
     let run_controls = req.run_controls_for(&state);
     let scan_scope = run_controls.scope.clone();
     let repos: Vec<String> = req

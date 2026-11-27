@@ -1667,6 +1667,14 @@ pub(crate) async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<serde_json::Value> {
+    // A client inspection needs a spend limit, and a limit under the projection refuses as the
+    // command line's does (#564). The job fails at once with the reason; nothing is spawned.
+    let project = state.projects.active();
+    if let Some(why) = start_spend_refusal(&state, project.as_ref(), &req).await {
+        let job_id = state.jobs.create("audit", project.map(|p| p.id));
+        state.jobs.fail(&job_id, why);
+        return Json(serde_json::json!({ "job_id": job_id }));
+    }
     let job_id = start_audit_job(&state, req, AuditJobOptions::default()).await;
     Json(serde_json::json!({ "job_id": job_id }))
 }
