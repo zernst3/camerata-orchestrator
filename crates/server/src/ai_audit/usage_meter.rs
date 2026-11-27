@@ -1022,8 +1022,7 @@ impl UsageMeter {
             self.stages.record_failed_time(stage, ms);
         }
         // The outage stop watches every failed call, after the transport's own retries.
-        self.health
-            .note_failure(classify_pass_error(error), &error.to_string());
+        self.health.note_failed_error(error);
     }
 
     pub fn snapshot(&self) -> ActualUsage {

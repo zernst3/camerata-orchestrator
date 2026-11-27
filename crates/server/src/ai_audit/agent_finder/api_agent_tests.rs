@@ -11,7 +11,7 @@ use camerata_secrets::fixtures::planted;
 use camerata_secrets::SecretShape;
 use serde_json::{json, Value};
 
-use super::{ApiPieceAgent, FinderWire, PauseFn};
+use super::{ApiPieceAgent, FinderWire, PauseFn, NETWORK_WAIT_STEPS};
 use crate::ai_audit::agent_finder::coverage::coverage_of;
 use crate::ai_audit::agent_finder::{
     AgentRun, AgentStop, FollowUp, Piece, PieceAgent, PieceLimits, Room, ToolEvent,
@@ -2848,7 +2848,9 @@ async fn a_reply_time_out_on_every_attempt_ends_with_the_reply_timeout_prefix_an
     );
     assert_eq!(wire.calls(), 4, "tried, then 3 retries");
 
-    let connect_timeouts = (0..4)
+    // A connect time-out is the network: tried, 3 retries, then the 4 steps of the long network
+    // wait (#582).
+    let connect_timeouts = (0..8)
         .map(|_| {
             Err(AnthropicPostError::Network(
                 "connect: operation timed out".into(),
@@ -2890,5 +2892,57 @@ async fn the_output_reserve_counts_against_the_window() {
         matches!(&run.stop, AgentStop::Failed(why) if why.starts_with(super::CONTEXT_FULL_PREFIX)),
         "got {:?}",
         run.stop
+    );
+}
+
+// ─── the long network wait (#582) ────────────────────────────────────────────────────────────
+
+fn connection_reset() -> Reply {
+    Err(AnthropicPostError::Network(
+        "Anthropic API request failed: connection reset by peer".to_string(),
+    ))
+}
+
+#[tokio::test]
+async fn a_network_drop_past_the_quick_retries_waits_for_the_network_and_the_piece_finishes() {
+    // Down for the first send, the 3 quick retries and two steps of the network wait.
+    let mut script: Vec<Reply> = (0..6).map(|_| connection_reset()).collect();
+    script.push(text_reply("done"));
+    let wire = ScriptedWire::new(script);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished, "the drop cost minutes, not the piece");
+    assert_eq!(wire.calls(), 7);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 6, "{waits:?}");
+    assert_eq!(
+        waits[3..].to_vec(),
+        NETWORK_WAIT_STEPS[..3].to_vec(),
+        "after the quick retries, the network wait's steps"
+    );
+    // The same body went each time.
+    let bodies = wire.bodies();
+    assert!(bodies.iter().all(|b| *b == bodies[0]));
+    assert!(!meter.outage_stopped());
+}
+
+#[tokio::test]
+async fn a_network_drop_past_the_whole_wait_stops_the_run_at_once() {
+    let wire = ScriptedWire::new((0..8).map(|_| connection_reset()).collect());
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits[3..].to_vec(), NETWORK_WAIT_STEPS.to_vec(), "{waits:?}");
+    assert!(
+        meter.outage_stopped(),
+        "the network wait ran out with nothing through: the outage stop"
+    );
+    let trigger = meter.health().trigger().expect("a trigger is recorded");
+    assert_eq!(
+        trigger.class,
+        camerata_llm::failure::FailureClass::Transport
     );
 }

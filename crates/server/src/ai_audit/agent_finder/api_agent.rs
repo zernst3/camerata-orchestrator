@@ -104,6 +104,9 @@ const CONTINUE_MESSAGE: &str =
 /// overload, by the engine's schedule (`crates/llm/src/retry.rs`): 2, 8 and 30 seconds, then the
 /// call fails. Every wait is jittered ([`jittered`]).
 const BACKOFF_SECS: [u64; 3] = [2, 8, 30];
+// After `BACKOFF_SECS`, a network failure waits the engine's long network wait (1, 2, 4 and 8
+// minutes, `camerata_llm::network_wait`) before the run's outage stop (#582).
+use camerata_llm::network_wait::NETWORK_WAIT_STEPS;
 /// A rate limit (429) or an overload (529, 503) is waited out, never counted out: the wait when
 /// the provider gave no `retry-after`, before jitter.
 const WAIT_OUT_SECS: u64 = 30;
@@ -413,6 +416,9 @@ impl ApiPieceAgent {
     ) -> Result<LlmResponse, SendFailure> {
         let mut attempts: Vec<AttemptRecord> = Vec::new();
         let mut retries = 0usize;
+        // Steps of the long network wait taken (#582): after the transport schedule, a network
+        // failure waits 1, 2, 4 and 8 minutes before the outage stop.
+        let mut network_steps = 0usize;
         let mut waited = Duration::ZERO;
         // What the run had succeeded at when this call started: a wait that runs out stops the
         // run only if nothing has succeeded since ([`RunHealth::note_wait_exhausted`]).
@@ -420,7 +426,7 @@ impl ApiPieceAgent {
         loop {
             let mut record = AttemptRecord::new("api", &self.model);
             let attempt_started = std::time::Instant::now();
-            let (class, message, status, retryable, retry_after, overloaded) = match self
+            let (class, message, status, retryable, retry_after, overloaded, reply_timed_out) = match self
                 .post(body, use_caching)
                 .await
             {
@@ -432,6 +438,7 @@ impl ApiPieceAgent {
                     None,
                     false,
                     None,
+                    false,
                     false,
                 ),
                 Err(
@@ -462,6 +469,7 @@ impl ApiPieceAgent {
                         true,
                         None,
                         false,
+                        reply_timeout,
                     )
                 }
                 Err(AnthropicPostError::Http {
@@ -497,6 +505,7 @@ impl ApiPieceAgent {
                         retryable,
                         retry_after,
                         overloaded,
+                        false,
                     )
                 }
             };
@@ -513,6 +522,11 @@ impl ApiPieceAgent {
                         .as_ref()
                         .is_some_and(|(code, _)| matches!(code, 429 | 503 | 529)));
             let mut wait_exhausted = false;
+            // The long network wait covers what a down network looks like: a transport-class
+            // failure, but not a reply that timed out (the request itself is too slow, and waiting
+            // for the network does not make it faster).
+            let network_wait = class == FailureClass::Transport && !reply_timed_out;
+            let mut network_exhausted = false;
             let delay = if !retryable {
                 None
             } else if wait_out {
@@ -531,7 +545,12 @@ impl ApiPieceAgent {
                 );
                 retries += 1;
                 Some(d)
+            } else if network_wait && network_steps < NETWORK_WAIT_STEPS.len() {
+                let d = NETWORK_WAIT_STEPS[network_steps];
+                network_steps += 1;
+                Some(d)
             } else {
+                network_exhausted = network_wait;
                 None
             };
             if let Some(delay) = delay {
@@ -558,6 +577,13 @@ impl ApiPieceAgent {
                 // it again.
                 if let (Some(meter), Some(before)) = (&self.meter, successes_at_start) {
                     meter.health().note_wait_exhausted(&message, before);
+                }
+            }
+            if network_exhausted {
+                // The network wait ran out. If no call got through meanwhile, the network is down
+                // for the whole run: the outage stop, at once (#582).
+                if let (Some(meter), Some(before)) = (&self.meter, successes_at_start) {
+                    meter.health().note_network_wait_exhausted(&message, before);
                 }
             }
             let mut failure = LlmCallFailure::new(class, message);

@@ -330,6 +330,7 @@ mod stage_batch_tests;
 pub use batch_mode::{
     resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
 };
+pub(crate) use batch_mode::disclosable_error;
 use calibration::*;
 pub use calibration::{
     apply_verdicts, outlier_reasons_of, stage1_of, verify_findings, verify_system_prompt, Real,

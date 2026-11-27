@@ -639,9 +639,7 @@ pub(crate) fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Re
     let Some(m) = meter else { return };
     match result {
         Ok(_) => m.health().note_success(),
-        Err(e) => m
-            .health()
-            .note_failure(classify_pass_error(e), &e.to_string()),
+        Err(e) => m.health().note_failed_error(e),
     }
 }
 

@@ -239,6 +239,27 @@ impl RunHealth {
         }
     }
 
+    /// A model call failed with `error`, after its retries and the long network wait. The one
+    /// entry point for a failed call's error: an error tagged
+    /// [`camerata_llm::network_wait::NetworkWaitExhausted`] (the call waited the full network
+    /// wait while no other call got an answer) stops the run at once, since the streak's own
+    /// span has been waited out already, many times over; any other error goes to
+    /// [`Self::note_failure`] with its class.
+    pub fn note_failed_error(&self, error: &anyhow::Error) {
+        if camerata_llm::network_wait::is_network_wait_exhausted(error) {
+            self.trip(
+                FailureClass::Transport,
+                format!(
+                    "a model call waited {} minutes for the network and no other call got through \
+                     (last: {error})",
+                    camerata_llm::network_wait::NETWORK_WAIT_TOTAL.as_secs() / 60
+                ),
+            );
+            return;
+        }
+        self.note_failure(crate::ai_audit::classify_pass_error(error), &error.to_string());
+    }
+
     /// A rate limit or an overload did not clear within the longest a call waits for one.
     /// `successes_before` is [`Self::successes`] as the call started. If no call succeeded since,
     /// the provider is answering but will not serve the run at all, and every piece would wait
@@ -254,6 +275,26 @@ impl RunHealth {
         self.trip(
             FailureClass::RateLimited,
             format!("a rate limit or overload did not clear in time (last: {detail})"),
+        );
+        true
+    }
+
+    /// A call waited the whole long network wait ([`camerata_llm::network_wait`]) and the
+    /// provider still could not be reached. `successes_before` is [`Self::successes`] as the call
+    /// started. If no call succeeded since, the network is down for the whole run: stop it, as a
+    /// transport outage, at once. If one did, this request alone is failing and the run goes on.
+    /// Returns whether the run was stopped.
+    pub fn note_network_wait_exhausted(&self, detail: &str, successes_before: u64) -> bool {
+        if self.successes() != successes_before {
+            return false;
+        }
+        self.trip(
+            FailureClass::Transport,
+            format!(
+                "a model call waited {} minutes for the network and no other call got through \
+                 (last: {detail})",
+                camerata_llm::network_wait::NETWORK_WAIT_TOTAL.as_secs() / 60
+            ),
         );
         true
     }

@@ -33,6 +33,10 @@ if os.environ.get("CAMERATA_FAKE_WARM"):
 # warm-up run has the test harness's stdin, which never ends.
 prompt = sys.stdin.read() if "-p" in args else ""
 def note(stage):
+    drop = os.environ.get("FAKE_DROP_STAGE_FILE", "")
+    if drop and os.path.exists(drop) and open(drop).read().strip() == stage:
+        sys.stderr.write("API Error: Unable to connect to API (ECONNREFUSED): connection refused\\n")
+        sys.exit(1)
     down = os.environ.get("FAKE_503_STAGE_FILE", "")
     if down and os.path.exists(down) and open(down).read().strip() == stage:
         sys.stderr.write("API Error: 503 Service Unavailable\\n")
@@ -1118,9 +1122,14 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     let group_review_down = root.path().join("group-review-down");
     // `stage503:<stage>` takes that stage's calls down with a 503 instead of the group review's.
     let stage_down = root.path().join("stage-503");
+    // `drop:<stage>` drops that stage's connections (a transport failure) instead (#582).
+    let stage_drop = root.path().join("stage-drop");
     let outage_flag = if let Some(stage) = mode.strip_prefix("stage503:") {
         std::fs::write(&stage_down, stage).unwrap();
         stage_down.clone()
+    } else if let Some(stage) = mode.strip_prefix("drop:") {
+        std::fs::write(&stage_drop, stage).unwrap();
+        stage_drop.clone()
     } else {
         std::fs::write(&group_review_down, mode).unwrap();
         group_review_down.clone()
@@ -1133,6 +1142,7 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     let guards = vec![
         camerata_test_env::EnvGuard::set("FAKE_GROUP_REVIEW_DOWN", &group_review_down),
         camerata_test_env::EnvGuard::set("FAKE_503_STAGE_FILE", &stage_down),
+        camerata_test_env::EnvGuard::set("FAKE_DROP_STAGE_FILE", &stage_drop),
         camerata_test_env::EnvGuard::set("PATH", &path),
         camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir),
         camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
@@ -2027,4 +2037,51 @@ async fn the_synchronous_scan_route_refuses_a_client_inspection_on_a_dirty_build
         why.contains("cannot start an inspection for a client"),
         "{why}"
     );
+}
+
+// ---- #582: the app job stops on a long outage and starts no later stage --------------------
+
+/// The app's job path, end to end: the fix stage's connections drop for good. Every call waits the
+/// long network wait (instant here), the run stops with the outage stop, and the group reviewer is
+/// never called. Once the network is back, "Run what remains" finishes the run and the group review
+/// runs then, over the whole set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn an_app_scan_stopped_by_an_outage_starts_no_group_review_and_a_resume_runs_it() {
+    if !camerata_test_env::python3_on_path_for("an_app_scan_stopped_by_an_outage") {
+        return;
+    }
+    let waits = crate::network_wait::InstantWaits::install();
+    let rig = interrupted_scan_with("drop:fix").await;
+    let scan = rig.state.get_last_scan(&rig.project_id).unwrap();
+    assert!(
+        scan.ledger.is_outage_stopped(),
+        "the long drop stopped the run: {:?}",
+        scan.failed_passes
+    );
+    assert!(
+        waits
+            .waits()
+            .contains(crate::network_wait::NETWORK_WAIT_STEPS.last().unwrap()),
+        "the run waited the whole network wait first: {:?}",
+        waits.waits()
+    );
+    let calls = |log: &std::path::Path| std::fs::read_to_string(log).unwrap_or_default();
+    let group_reviews = |text: &str| text.lines().filter(|l| *l == "group_review").count();
+    assert_eq!(
+        group_reviews(&calls(&rig.log)),
+        0,
+        "the group reviewer was called after the outage stop: {}",
+        calls(&rig.log)
+    );
+
+    // The network is back: the resume finishes the run, and the group review runs then.
+    std::fs::remove_file(&rig.outage_flag).unwrap();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().status,
+        crate::run_store::RunStatus::Complete
+    );
+    assert!(group_reviews(&calls(&rig.log)) > 0, "{}", calls(&rig.log));
 }
