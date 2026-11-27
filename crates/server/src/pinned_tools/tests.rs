@@ -242,7 +242,7 @@ async fn a_failed_download_is_a_refusal_naming_the_tool() {
 #[tokio::test]
 async fn the_official_source_refuses_a_url_outside_the_official_locations() {
     // Refused before any request is made, so this test reaches no network.
-    let err = OfficialReleaseSource
+    let err = OfficialReleaseSource::default()
         .fetch("https://mirror.acme-downloads.example/ruff.tar.gz")
         .await
         .expect_err("refused");
@@ -463,10 +463,16 @@ fn the_product_environment_uses_the_official_source() {
 #[ignore = "on demand: downloads every pinned tool for real (about 200 MB); see the doc comment"]
 async fn real_first_run_provision() {
     let dir = tempfile::tempdir().expect("a temporary tooling folder");
+    // A network that re-signs TLS through a proxy (a cloud sandbox) names its CA in
+    // SSL_CERT_FILE; on a Mac on an ordinary network this is unset and changes nothing.
+    let source = match std::env::var_os("SSL_CERT_FILE").map(std::fs::read) {
+        Some(Ok(pem)) => OfficialReleaseSource::with_extra_roots(pem),
+        _ => OfficialReleaseSource::default(),
+    };
     let env = ToolEnv::new(
         dir.path().join("tooling"),
         Platform::current(),
-        Arc::new(OfficialReleaseSource),
+        Arc::new(source),
     );
     let platform = env
         .platform

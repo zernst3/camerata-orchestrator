@@ -10,7 +10,7 @@
 //!
 //! The audit paths run on a real git folder with the same line twice in one file (two sites with
 //! one fingerprint, told apart only by the ordinal) and, where the path runs the dependency
-//! audit, a fake `osv-scanner` on PATH that reports two advisories on one package version. No
+//! audit, a fake `osv-scanner` served as the pinned one that reports two advisories on one package version. No
 //! model is called (deterministic scans only), and the vulnerability feeds are pointed at a dead
 //! local proxy so nothing leaves the machine.
 
@@ -42,10 +42,11 @@ struct Fixture {
     state: AppState,
     _root: tempfile::TempDir,
     _env: Vec<EnvGuard>,
+    _tools: crate::pinned_tools::fixtures::FakeTools,
 }
 
 /// A project over `acme/one`, a git folder holding the repeated line, and (with `osv`) a fake
-/// osv-scanner first on PATH.
+/// osv-scanner as the pinned one.
 fn fixture(osv: bool) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let repo = root.path().join("repo");
@@ -75,17 +76,10 @@ fn fixture(osv: bool) -> Fixture {
     git(&["commit", "-q", "-m", "fixture"]);
 
     let mut env = Vec::new();
+    // The fake osv-scanner is served as Camerata's pinned one (#587: never one from PATH).
+    let tools = crate::pinned_tools::fixtures::FakeTools::with_osv_script(FAKE_OSV);
     if osv {
-        use std::os::unix::fs::PermissionsExt;
-        let osv_bin = bin.join("osv-scanner");
-        std::fs::write(&osv_bin, FAKE_OSV).unwrap();
-        std::fs::set_permissions(&osv_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        env.push(EnvGuard::set("PATH", path));
+        env.push(EnvGuard::remove("CAMERATA_DISABLE_DEP_AUDIT"));
     } else {
         env.push(EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"));
     }
@@ -105,7 +99,7 @@ fn fixture(osv: bool) -> Fixture {
         env.push(EnvGuard::set(var, "http://127.0.0.1:9"));
     }
 
-    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new())).with_tool_env(tools.env.clone());
     let project = state
         .projects
         .create("Keys", vec!["acme/one".to_string()])
@@ -125,6 +119,7 @@ fn fixture(osv: bool) -> Fixture {
         state,
         _root: root,
         _env: env,
+        _tools: tools,
     }
 }
 

@@ -27,8 +27,22 @@ pub trait ArtifactSource: Send + Sync {
 /// Every URL Camerata asks for comes from the pin table, which the tests hold to the official
 /// locations. This source checks again at the moment of download, so a future caller that builds
 /// a URL some other way is refused rather than trusted ([`is_official_url`]).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct OfficialReleaseSource;
+#[derive(Debug, Default, Clone)]
+pub struct OfficialReleaseSource {
+    /// Extra trusted root certificates (PEM), on top of the bundled web roots. Only the
+    /// on-demand first-run harness sets it, for a machine whose network re-signs TLS through a
+    /// proxy; the product never does.
+    extra_roots_pem: Option<Vec<u8>>,
+}
+
+impl OfficialReleaseSource {
+    /// The source with `pem` (one or more PEM certificates) also trusted.
+    pub fn with_extra_roots(pem: Vec<u8>) -> Self {
+        Self {
+            extra_roots_pem: Some(pem),
+        }
+    }
+}
 
 /// The official release location of every artifact Camerata downloads.
 pub fn official_sources() -> impl Iterator<Item = &'static str> {
@@ -52,10 +66,18 @@ impl ArtifactSource for OfficialReleaseSource {
         }
         // Both timeouts are bounds, not estimates: the largest artifact (Node) is about 50 MB,
         // and a stalled transfer must end in a disclosed refusal rather than a hung inspection.
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(15 * 60))
+            .timeout(Duration::from_secs(15 * 60));
+        if let Some(pem) = &self.extra_roots_pem {
+            let roots = reqwest::Certificate::from_pem_bundle(pem)
+                .map_err(|e| format!("could not read the extra root certificates: {e}"))?;
+            for root in roots {
+                builder = builder.add_root_certificate(root);
+            }
+        }
+        let client = builder
             .build()
             .map_err(|e| format!("could not build the HTTP client: {e}"))?;
         let resp = client

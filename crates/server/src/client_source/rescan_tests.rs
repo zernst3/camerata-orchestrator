@@ -727,17 +727,15 @@ async fn rescan_changes_does_not_refuse_a_file_over_the_limit() {
 
 // ── Item 4 (gap closed): the preview linters' results honor Excluded by agreement ───────────
 
-/// A stub `ruff` (first on PATH) that reports one problem in `seeds/q.py` and one in `src/a.py`.
-fn install_stub_ruff(rig: &Rig) {
-    use std::os::unix::fs::PermissionsExt;
+/// A stub `ruff`, served as Camerata's pinned ruff (#587: never one from PATH), that reports one
+/// problem in `seeds/q.py` and one in `src/a.py`. The returned fixture must outlive the test.
+fn install_stub_ruff(rig: &mut Rig) -> crate::pinned_tools::fixtures::FakeTools {
     let json = r#"[{"code":"S608","message":"Possible SQL injection","filename":"seeds/q.py","location":{"row":1,"column":1}},{"code":"S608","message":"Possible SQL injection","filename":"src/a.py","location":{"row":1,"column":1}}]"#;
-    let bin = rig.tools.path().join("ruff");
-    std::fs::write(
-        &bin,
-        format!("#!/bin/sh\ncat <<'EOF'\n{json}\nEOF\nexit 1\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tools = crate::pinned_tools::fixtures::FakeTools::with_tool_script(
+        crate::pinned_tools::Artifact::Ruff,
+        &format!("#!/bin/sh\ncat <<'EOF'\n{json}\nEOF\nexit 1\n"),
+    );
+    rig.fx.state = rig.fx.state.clone().with_tool_env(tools.env.clone());
     write_file(&rig.fx.checkout, "src/a.py", "q = 1\n");
     write_file(&rig.fx.checkout, "seeds/q.py", "q = 1\n");
     commit_all(&rig.fx.checkout, "python files");
@@ -753,6 +751,7 @@ fn install_stub_ruff(rig: &Rig) {
             });
         })
         .unwrap();
+    tools
 }
 
 fn preview_paths(findings: &[crate::onboard::Finding]) -> Vec<String> {
@@ -768,8 +767,8 @@ fn preview_paths(findings: &[crate::onboard::Finding]) -> Vec<String> {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn the_job_path_drops_a_linter_result_in_an_excluded_file() {
-    let rig = rig();
-    install_stub_ruff(&rig);
+    let mut rig = rig();
+    let _ruff = install_stub_ruff(&mut rig);
     let entry = first_inspection(&rig).await;
     assert_eq!(
         preview_paths(&entry.report.findings),
@@ -792,8 +791,8 @@ async fn the_synchronous_path_drops_a_linter_result_in_an_excluded_file() {
     use axum::http::{header, Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-    let rig = rig();
-    install_stub_ruff(&rig);
+    let mut rig = rig();
+    let _ruff = install_stub_ruff(&mut rig);
     rig.fx
         .state
         .projects

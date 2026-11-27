@@ -295,6 +295,10 @@ pub struct AppState {
     /// state built by `new()` can touch nothing outside a checkout; only `from_env()` installs
     /// the real ones. See [`crate::client_source::storage`].
     storage_roots: Arc<crate::client_source::storage::StorageRoots>,
+    /// Where the scan tools are provisioned and downloaded from (#587). `None` is the product's
+    /// ([`crate::pinned_tools::ToolEnv::product`]); a test installs fake tools with
+    /// [`AppState::with_tool_env`].
+    tool_env: Option<crate::pinned_tools::ToolEnv>,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
@@ -417,6 +421,7 @@ impl AppState {
             source_ops: crate::client_source::ops::SourceOps::new(),
             git_remotes: crate::client_source::remote::GitRemotes::default(),
             storage_roots: Arc::new(crate::client_source::storage::StorageRoots::default()),
+            tool_env: None,
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -1223,6 +1228,22 @@ impl AppState {
     ) -> Self {
         self.storage_roots = Arc::new(roots);
         self
+    }
+
+    /// Replace where the scan tools are provisioned and downloaded from. The test seam that
+    /// serves fake tools from memory; production never calls this.
+    #[must_use]
+    pub fn with_tool_env(mut self, tools: crate::pinned_tools::ToolEnv) -> Self {
+        self.tool_env = Some(tools);
+        self
+    }
+
+    /// The scan tool environment this state's scans use.
+    pub fn scan_tool_env(&self) -> Result<crate::pinned_tools::ToolEnv, String> {
+        match &self.tool_env {
+            Some(tools) => Ok(tools.clone()),
+            None => crate::pinned_tools::ToolEnv::product(),
+        }
     }
 
     /// Open every JSON-file-backed store under `dir`. The single list of those stores: both
@@ -2619,7 +2640,7 @@ async fn onboard_audit(
     };
     // Every scan tool and runtime this scan needs is provisioned now, before the first model call
     // (#587). A tool set that cannot be provisioned refuses the scan here, with nothing spent.
-    let tools = match crate::pinned_tools::ToolEnv::product() {
+    let tools = match state.scan_tool_env() {
         Ok(tools) => tools,
         Err(why) => {
             let mut r = crate::onboard::ScanReport::gated(&repos);
@@ -3070,6 +3091,8 @@ pub(crate) async fn start_audit_job(
         }
     });
     let scan_cache = state.scan_cache.clone();
+    // Resolved now, before the job starts: where its scan tools live (#587).
+    let tool_env = state.scan_tool_env();
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
@@ -3435,7 +3458,7 @@ pub(crate) async fn start_audit_job(
             };
             // Every scan tool and runtime this scan needs is provisioned now, before the first
             // model call (#587). A tool set that cannot be provisioned fails the job here.
-            let tools = match crate::pinned_tools::ToolEnv::product() {
+            let tools = match tool_env {
                 Ok(tools) => tools,
                 Err(why) => {
                     body_jobs.fail(&body_jid, why);

@@ -123,7 +123,7 @@ impl ToolEnv {
         Ok(Self::new(
             tooling,
             Platform::current(),
-            Arc::new(OfficialReleaseSource),
+            Arc::new(OfficialReleaseSource::default()),
         ))
     }
 

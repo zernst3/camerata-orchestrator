@@ -236,10 +236,23 @@ impl FakeTools {
 
     /// Fakes where osv-scanner is `script` (a test that needs it to report something).
     pub fn with_osv_script(script: &str) -> Self {
-        Self::with_archives(
-            Platform::current().unwrap_or(Platform::LinuxX64),
-            &[(Artifact::OsvScanner, script.as_bytes().to_vec())],
-        )
+        Self::with_tool_script(Artifact::OsvScanner, script)
+    }
+
+    /// Fakes where the single-program tool `artifact` (ruff or osv-scanner) is `script`, packed
+    /// the way its release is (a tar archive for ruff, a bare binary for osv-scanner).
+    pub fn with_tool_script(artifact: Artifact, script: &str) -> Self {
+        let platform = Platform::current().unwrap_or(Platform::LinuxX64);
+        let real = pins::pins(artifact);
+        let entry = real
+            .for_platform(platform)
+            .expect("the real pins cover every platform")
+            .files[0];
+        let bytes = match real.kind {
+            ArchiveKind::TarGz => tar_gz(&[(entry, script.as_bytes())]),
+            ArchiveKind::Binary => script.as_bytes().to_vec(),
+        };
+        Self::with_archives(platform, &[(artifact, bytes)])
     }
 
     /// Fakes for `platform`, with `overrides` as the exact bytes served (and pinned) for those
