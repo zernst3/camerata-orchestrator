@@ -228,9 +228,10 @@ fn balanced_end(text: &str, start: usize) -> Option<usize> {
 /// array. Prose with braces before or after it, or a fenced block, does not hide it; an object
 /// that has no `verdicts` array is not a verdict object and is skipped, never loosened into one.
 ///
-/// More than one DISTINCT top-level verdict object in a reply is no reading at all (`None`): a
-/// draft, a quoted or an example object, and candidate code is untrusted, so which one is the
-/// answer cannot be told. The same object twice (a bare copy beside a fenced one) is one reading.
+/// Several top-level verdict objects are merged when their ids are disjoint (one object per
+/// candidate) and the same object twice (a bare copy beside a fenced one) is one reading; two
+/// that answer the same id differently are no reading at all (`None`): a draft, a quoted or an
+/// example object, and candidate code is untrusted, so which one is the answer cannot be told.
 pub fn find_verdict_object(text: &str) -> Option<serde_json::Value> {
     let mut found: Vec<serde_json::Value> = Vec::new();
     let mut from = 0usize;
@@ -261,11 +262,32 @@ pub fn find_verdict_object(text: &str) -> Option<serde_json::Value> {
             None => from = start + 1,
         }
     }
-    if found.len() == 1 {
-        found.pop()
-    } else {
-        None
+    merge_verdict_objects(found)
+}
+
+/// One verdict object from the ones found. The prompt asks for a single object, but a model that
+/// answers one object per candidate gives disjoint ids: those are merged, and an identical entry
+/// repeated is kept once. A conflict (the same id with different answers) is no reading, because
+/// which answer is the real one cannot be told.
+fn merge_verdict_objects(found: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+    if found.len() <= 1 {
+        return found.into_iter().next();
     }
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    for object in &found {
+        for item in object["verdicts"].as_array()? {
+            let id = item.get("id").and_then(serde_json::Value::as_str);
+            let same_id = merged
+                .iter()
+                .find(|m| id.is_some() && m.get("id").and_then(serde_json::Value::as_str) == id);
+            match same_id {
+                Some(existing) if existing == item => {}
+                Some(_) => return None,
+                None => merged.push(item.clone()),
+            }
+        }
+    }
+    Some(serde_json::json!({ "verdicts": merged }))
 }
 
 /// Read a judge response against the ids that were asked about. An id that was not asked about

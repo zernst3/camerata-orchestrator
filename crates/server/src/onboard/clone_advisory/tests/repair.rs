@@ -424,3 +424,21 @@ async fn a_transport_attempt_message_is_redacted_like_the_reply_sample() {
     assert!(!message.contains("hunter2hunter2"), "{message}");
     assert!(!message.contains("AKIAIOSFODNN7EXAMPLE9"), "{message}");
 }
+
+/// The prompt asks for ONE object, but a model that answers one object per candidate gives
+/// disjoint verdicts: they are merged. Only a conflict (the same id, different answers) is no
+/// reading.
+#[test]
+fn objects_with_disjoint_ids_are_merged_and_only_a_conflict_is_refused() {
+    use super::prompt::{find_verdict_object, parse_verdicts};
+    let one = r#"{"verdicts":[{"id":"a","verdict":"same_decision","concept":"the discount"}]}"#;
+    let two = r#"{"verdicts":[{"id":"b","verdict":"different","concept":""}]}"#;
+    let merged = find_verdict_object(&format!("{one}\n{two}")).expect("disjoint ids merge");
+    assert_eq!(merged["verdicts"].as_array().unwrap().len(), 2);
+    let asked: std::collections::HashSet<&str> = ["a", "b"].into_iter().collect();
+    let read = parse_verdicts(&format!("{one}\n{two}"), RULE, &asked);
+    assert!(read.parsed);
+    assert_eq!(read.verdicts.len(), 2);
+    let clash = r#"{"verdicts":[{"id":"a","verdict":"different","concept":""}]}"#;
+    assert!(find_verdict_object(&format!("{one}\n{clash}")).is_none());
+}
