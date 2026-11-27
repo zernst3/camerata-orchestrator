@@ -455,11 +455,11 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum RunAction {
     /// Bring a saved `camerata inspect` run into the app for review (#562). Reads the run's
-    /// record and its saved report and never changes the run folder. Refused, with the reason,
-    /// when the run is not complete, when its engine pin is missing or does not match its report,
-    /// when the rule library loaded now is not the run's, or when the report is missing or cannot
-    /// be read. Importing a run twice changes nothing. Close the app first: it reads its store
-    /// when it opens.
+    /// record and its saved report and never changes the run folder. Refused with the reason
+    /// when: the run is not complete; its engine pin is missing or does not match its report; the
+    /// rule library loaded now is not the run's; the report is missing or cannot be read.
+    /// Importing a run twice changes nothing. Close the app first: it reads its store when it
+    /// opens.
     Import {
         /// The run's id, as `camerata inspect` printed it.
         #[arg(long, value_name = "ID")]
