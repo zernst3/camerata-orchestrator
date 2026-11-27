@@ -210,6 +210,11 @@ mod order_preset_followup_tests;
 #[cfg(test)]
 mod resume_button_tests;
 
+/// A failed part offers the diagnostic bundle: the click asks the server to make it and the
+/// banner shows where it was saved and its preview, or the server's reason.
+#[cfg(test)]
+mod diagnostic_bundle_button_tests;
+
 /// The pre-start check: a file over the read limit is a warning and leaves Start on; a pattern
 /// that matches nothing holds Start until it is fixed or removed.
 #[cfg(test)]

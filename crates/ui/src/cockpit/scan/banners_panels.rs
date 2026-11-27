@@ -187,6 +187,8 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
 ) -> Element {
     // What the operator typed in the confirmation's limit field; `None` shows the saved limit.
     let mut limit_edit = use_signal(|| Option::<String>::None);
+    // The diagnostic bundle, once asked for: where it was saved and its preview, or the reason.
+    let mut bundle = use_signal(|| Option::<Result<DiagnosticBundleView, String>>::None);
     if failed_passes.is_empty() {
         return rsx! {};
     }
@@ -271,6 +273,44 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
                         }
                     },
                     "Run what remains"
+                }
+                button {
+                    class: "scan-diagnostic-bundle",
+                    r#type: "button",
+                    disabled: run_id.is_none(),
+                    title: if run_id.is_some() {
+                        "Save a bundle of this inspection's facts for a developer: counts, rule ids and hashed paths, never client code. Nothing is sent anywhere."
+                    } else {
+                        "This scan was not saved, so there is no run to make a bundle from."
+                    },
+                    onclick: {
+                        let run_id = run_id.clone();
+                        move |_| {
+                            if let Some(id) = run_id.clone() {
+                                spawn(async move {
+                                    bundle.set(Some(make_diagnostic_bundle(&id).await));
+                                });
+                            }
+                        }
+                    },
+                    "Make a diagnostic bundle"
+                }
+                match bundle() {
+                    Some(Ok(made)) => rsx! {
+                        div { class: "scan-diagnostic-result",
+                            p { class: "onboard-gate-b",
+                                "Diagnostic bundle saved on this computer at {made.json}. Nothing was sent anywhere. Read the preview before you pass it on."
+                            }
+                            for (i , note) in made.notes.iter().enumerate() {
+                                p { key: "{i}", class: "onboard-gate-hint", "{note}" }
+                            }
+                            pre { class: "scan-diagnostic-preview", "{made.preview}" }
+                        }
+                    },
+                    Some(Err(why)) => rsx! {
+                        p { class: "onboard-gate-b scan-resume-refusal", "The diagnostic bundle was not made: {why}" }
+                    },
+                    None => rsx! {},
                 }
                 if let Some(plan) = plan.clone() {
                     div { class: "scan-resume-plan",
