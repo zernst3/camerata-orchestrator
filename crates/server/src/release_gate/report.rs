@@ -72,11 +72,15 @@ pub enum CheckId {
     /// names (`camerata_api_types::rewrite_advisory`): owner ruling, fix or rewrite is the
     /// architect's call alone. Its label says neither, because the README a client reads lists it.
     InternalNotes,
+    /// No file names a folder of the operator's own machine: the home directory, the state, scan
+    /// copy and temp folders, or a repo's clone folder. Not `/home/` or the macOS home root as such: a
+    /// client's code quotes paths like `/home/node`.
+    OperatorPaths,
 }
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 20] = [
+    pub const ALL: [CheckId; 21] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -97,6 +101,7 @@ impl CheckId {
         CheckId::FixParity,
         CheckId::ClientTextStyle,
         CheckId::InternalNotes,
+        CheckId::OperatorPaths,
     ];
 
     /// The name the operator reads (`[secrets]`, and the README's "Release checks" line).
@@ -124,6 +129,7 @@ impl CheckId {
             CheckId::FixParity => "one fix per row",
             CheckId::ClientTextStyle => "client text style",
             CheckId::InternalNotes => "internal notes kept out",
+            CheckId::OperatorPaths => "operator paths kept out",
         }
     }
 }

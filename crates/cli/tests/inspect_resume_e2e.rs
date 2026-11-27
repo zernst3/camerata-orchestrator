@@ -1778,6 +1778,121 @@ async fn a_client_inspection_is_refused_at_start_on_a_dirty_or_commitless_build(
     );
 }
 
+// ---- the operator's clone folder never reaches a client export (#557) -----------------------
+
+/// Moves every folder the gate knows by itself (the home directory, the data folder, the temp
+/// folder) away from where the fixture repo lives, so the only thing that can tell the gate about
+/// the repo's clone folder is the export being handed the run's repo folders. Hold it for the
+/// whole test.
+struct ElsewhereFolders {
+    _root: tempfile::TempDir,
+    _guards: Vec<camerata_test_env::EnvGuard>,
+}
+
+fn elsewhere_folders() -> ElsewhereFolders {
+    let root = tempfile::tempdir().unwrap();
+    for sub in ["home", "tmp", "data"] {
+        std::fs::create_dir_all(root.path().join(sub)).unwrap();
+    }
+    let guards = vec![
+        camerata_test_env::EnvGuard::set("HOME", root.path().join("home")),
+        camerata_test_env::EnvGuard::set("TMPDIR", root.path().join("tmp")),
+        camerata_test_env::EnvGuard::set("CAMERATA_DATA_DIR", root.path().join("data")),
+    ];
+    ElsewhereFolders {
+        _root: root,
+        _guards: guards,
+    }
+}
+
+/// The harmless fixture, with the clone folder written on the first line of a source file: the
+/// scripted model quotes the first line of each file it reviews, so the folder reaches client
+/// text the way a client's own code, a tool's words or a copied error would.
+fn stage_fixture_naming_its_clone_folder(dest: &Path) -> String {
+    stage_fixture(dest);
+    let folder = dest.to_string_lossy().into_owned();
+    std::fs::write(
+        dest.join("src/config.rs"),
+        format!("// built at {folder}\npub const RETRIES: u32 = 3;\n"),
+    )
+    .unwrap();
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dest)
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "names its folder"]);
+    folder
+}
+
+fn assert_refused_for_the_clone_folder(err: &InspectError, folder: &str, export: &Path) {
+    assert_eq!(err.exit_code(), EXIT_RELEASE_BLOCKED, "{err}");
+    match err {
+        InspectError::ReleaseBlocked(failure) => {
+            let text = failure.to_string();
+            assert!(text.contains("operator paths kept out"), "{text}");
+            assert!(text.contains(folder), "{text}");
+        }
+        other => panic!("expected the release to be blocked, got {other}"),
+    }
+    assert!(!export.exists(), "no zip is written");
+}
+
+/// A new client run: the export is handed the run's repo folders, so a client file that names the
+/// repo's clone folder is refused, and the refusal names the folder.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_export_naming_the_repos_clone_folder_is_refused() {
+    if !typst_available("a_client_export_naming_the_repos_clone_folder") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    let folder = stage_fixture_naming_its_clone_folder(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("named.zip");
+    let _elsewhere = elsewhere_folders();
+    let model = Scripted::new(Outage::default());
+    let err = run(&model, &[repo.path()], &["acme/one"], &export)
+        .await
+        .expect_err("a client file naming the clone folder is not released");
+    assert_refused_for_the_clone_folder(&err, &folder, &export);
+}
+
+/// The same on a resume: the saved run's repo folders are what the resumed export hands the gate.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resumed_client_export_naming_the_repos_clone_folder_is_refused() {
+    if !typst_available("a_resumed_client_export_naming_the_repos_clone_folder") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    let folder = stage_fixture_naming_its_clone_folder(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("named-resumed.zip");
+    let _elsewhere = elsewhere_folders();
+    let (model, run_id) = interrupted_run(
+        repo.path(),
+        &export,
+        Outage {
+            fix_stage: true,
+            ..Outage::default()
+        },
+    )
+    .await;
+    let err = resume(&model, &run_id, Some(export.clone()))
+        .await
+        .expect_err("a resumed client file naming the clone folder is not released");
+    assert_refused_for_the_clone_folder(&err, &folder, &export);
+}
+
 /// The sealed report the command line saves in the run folder (#561).
 #[path = "inspect_resume_e2e/saved_report.rs"]
 mod saved_report;

@@ -916,6 +916,31 @@ impl AppState {
         self.active_repo_dirs().into_iter().next()
     }
 
+    /// The folders of this machine that hold the project's repos, for the release gate: the
+    /// workspace root, and each repo's resolved folder (its own path override or
+    /// `<workspace_root>/<owner>/<repo>`), whether or not the folder exists now. A client file
+    /// that names one is refused.
+    pub(crate) fn export_operator_roots(
+        &self,
+        project: &crate::project::Project,
+    ) -> Vec<std::path::PathBuf> {
+        let workspace_root = self.settings.workspace_root();
+        let mut roots: Vec<std::path::PathBuf> = workspace_root
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        for repo in &project.repos {
+            let override_path = self.settings.repo_path(repo);
+            roots.extend(crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo,
+            ));
+        }
+        roots
+    }
+
     /// Resolve the local clones of ALL of the active project's repos — the UNION read scope
     /// for in-project agents. A project contains MULTIPLE distinct repos (e.g. a frontend
     /// and a backend); every in-project agent should be able to READ across all of them
@@ -4023,6 +4048,7 @@ async fn export_audit_report(
     // The same options, set the same way, as the package route: the PDF is the one the package
     // carries, built by the same code (`prepare_export_options`).
     prepare_export_options(&mut req.options, &project, &report);
+    req.options.operator_roots = state.export_operator_roots(&project);
 
     // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
     // after the seal, before the gate, in every export.
@@ -4355,6 +4381,7 @@ async fn export_product(
 
     // The same options, set the same way, as the PDF route (`prepare_export_options`).
     prepare_export_options(&mut req.options, &project, &report);
+    req.options.operator_roots = state.export_operator_roots(&project);
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, the PDF route, `camerata inspect

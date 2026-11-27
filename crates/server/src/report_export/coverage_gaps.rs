@@ -540,7 +540,8 @@ pub fn dependency_gaps(report: &crate::onboard::ScanReport) -> Vec<String> {
             .filter(|n| n.tool == "osv-scanner")
             .filter(|n| !crate::dep_audit::note_proves_clean(n))
             .map(|n| {
-                let message = n.message.trim();
+                let rendered = crate::dep_audit::client_note_message(&n.message);
+                let message = rendered.trim();
                 let mut chars = message.chars();
                 match chars.next() {
                     Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),

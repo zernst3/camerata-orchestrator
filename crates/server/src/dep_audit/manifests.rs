@@ -441,8 +441,7 @@ fn scrub_token(token: &str) -> String {
     format!("{head}{name}{tail}{ws}")
 }
 
-/// The lines of osv-scanner's stderr that report a problem reading a file, with every local
-/// path removed, as the sentence for [`crate::dep_audit::UNREAD_FILES`]; `None` when stderr
+/// The sentence for [`crate::dep_audit::UNREAD_FILES`]; `None` when stderr
 /// holds no such line. A lockfile osv-scanner failed to parse was not audited, and a clean exit
 /// code does not say so.
 pub fn unread_files_sentence(stderr: &str, repo_dir: &Path) -> Option<String> {
@@ -459,11 +458,15 @@ pub fn unread_files_sentence(stderr: &str, repo_dir: &Path) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
+    // The lines are osv-scanner's own words: the operator log has them, the note does not.
+    tracing::warn!(
+        lines = %lines.join(" | "),
+        "osv-scanner reported problems reading some files"
+    );
     Some(format!(
         "{}: osv-scanner reported problems reading some files, so they may not have been \
-         checked ({}).",
+         checked.",
         crate::dep_audit::UNREAD_FILES,
-        lines.join(" | ")
     ))
 }
 
@@ -628,12 +631,13 @@ mod tests {
     }
 
     #[test]
-    fn stderr_problems_are_quoted_without_the_local_path() {
+    fn stderr_problems_make_a_sentence_that_quotes_none_of_them() {
         let stderr = "Scanned /tmp/clone/package-lock.json file and found 3 packages\n\
                       Error during extraction: could not parse /tmp/clone/yarn.lock\n";
         let s = unread_files_sentence(stderr, Path::new("/tmp/clone")).unwrap();
         assert!(s.starts_with("Dependency files not read:"), "{s}");
-        assert!(s.contains("could not parse ./yarn.lock"), "{s}");
+        assert!(s.contains("problems reading some files"), "{s}");
+        assert!(!s.contains("yarn.lock"), "{s}");
         assert!(!s.contains("/tmp/clone"), "{s}");
         assert!(!s.contains("found 3 packages"), "{s}");
         assert!(unread_files_sentence("Scanned a file\n", Path::new("/x")).is_none());
@@ -690,7 +694,8 @@ mod tests {
         assert!(crate::dep_audit::note_means_scanned(&note));
         assert!(!crate::dep_audit::note_proves_clean(&note));
         assert!(note.message.contains("package.json"));
-        assert!(note.message.contains("error: bad lock"));
+        // The tool's own words go to the operator log, never into the stored note.
+        assert!(!note.message.contains("error: bad lock"));
     }
 
     /// Item 31: a manifest the project's exclusion list names is not read, so it is not named as

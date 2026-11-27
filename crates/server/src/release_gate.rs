@@ -31,6 +31,7 @@ pub mod holds;
 pub mod junk;
 pub mod needs_decision;
 mod operator_only;
+mod operator_paths;
 mod report;
 mod secrets;
 pub mod split_rules;
@@ -105,6 +106,10 @@ pub struct ProductPackage {
     /// Outside review item 2: the rows shown at critical severity, and the rows the finder was
     /// unsure of, that carry no reviewer decision in the export request, one problem each.
     pub critical_or_unsure_without_decision: Vec<Problem>,
+    /// The folders of the operator's own machine no client file may name ([`operator_paths`]),
+    /// worked out when the package was assembled: the home directory at that moment, the state,
+    /// scan copy and temp folders, and each repo's clone folder.
+    pub operator_roots: Vec<String>,
     /// Where the summary's claim about missing preview tools and the ledger disagree
     /// ([`tool_claim::problems`]). Checked for every package, an internal one too: the claim is
     /// false whoever reads it. Recorded under the content check.
@@ -306,6 +311,7 @@ pub(crate) fn assemble_package(
         undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
         tool_claim_problems,
         critical_or_unsure_without_decision,
+        operator_roots: operator_paths::roots(&options.operator_roots),
         internal: options.internal,
     })
 }
@@ -382,7 +388,13 @@ pub fn gate_failure_of(error: &anyhow::Error) -> Option<&GateFailure> {
 /// cannot run row parity (that needs the in-memory rows), so that check is absent from the
 /// report.
 pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
-    audit_zip_with(zip_bytes, pdf_text, false, true)
+    audit_zip_with(
+        zip_bytes,
+        pdf_text,
+        false,
+        true,
+        &operator_paths::roots(&[]),
+    )
 }
 
 /// [`audit_zip`], optionally letting a package that records an incomplete run through (the
@@ -397,6 +409,26 @@ fn audit_zip_with(
     pdf_text: Option<&str>,
     allow_incomplete: bool,
     archive_content: bool,
+    operator_roots: &[String],
+) -> GateReport {
+    audit_zip_with_home(
+        zip_bytes,
+        pdf_text,
+        allow_incomplete,
+        archive_content,
+        operator_roots,
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// [`audit_zip_with`] with the home folder given, so a test can hold the case where it is unknown.
+fn audit_zip_with_home(
+    zip_bytes: &[u8],
+    pdf_text: Option<&str>,
+    allow_incomplete: bool,
+    archive_content: bool,
+    operator_roots: &[String],
+    home: Option<&std::path::Path>,
 ) -> GateReport {
     let mut report = GateReport::default();
     let entries = match read_zip_entries(zip_bytes) {
@@ -438,6 +470,13 @@ fn audit_zip_with(
         CheckId::InternalNotes,
         operator_only::archive_problems(&entries, pdf_text, &pdf_pages),
     );
+    // Held for every package, internal included: no export names a folder of the machine that made
+    // it.
+    report.record(
+        CheckId::OperatorPaths,
+        operator_paths::archive_problems(&entries, pdf_text, &pdf_pages, operator_roots),
+    );
+    report.record(CheckId::OperatorPaths, operator_paths::home_problems(home));
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::DatasetParity, csv_formula_problems(&entries));
@@ -704,7 +743,13 @@ fn release_checked(
 /// the assembly holds a stand-in-PDF archive to the same function before it compiles
 /// ([`held_refusal`]), so the two can never disagree about a check.
 fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -> GateReport {
-    let mut report = audit_zip_with(bytes, None, allow_incomplete, false);
+    let mut report = audit_zip_with(
+        bytes,
+        None,
+        allow_incomplete,
+        false,
+        &package.operator_roots,
+    );
     // An internal package (the operator's own review, never a client's) may carry rows held for a
     // reviewer's decision: each is marked held in its workbook. A client package is refused until
     // every held row has a decision.
@@ -717,6 +762,15 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     report.record(
         CheckId::InternalNotes,
         operator_only::text_problems("PDF data (data.json)", "data.json", &package.data_json),
+    );
+    report.record(
+        CheckId::OperatorPaths,
+        operator_paths::text_problems(
+            "PDF data (data.json)",
+            "data.json",
+            &package.data_json,
+            &package.operator_roots,
+        ),
     );
     // The PDF's text is whatever its data and its template make of it; a banned character in the
     // data is caught here before Typst is given anything, and the compiled PDF's own text is read
@@ -824,6 +878,19 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
         CheckId::InternalNotes,
         operator_only::text_problems("PDF data (data.json)", "data.json", data_json),
     );
+    report.record(
+        CheckId::OperatorPaths,
+        operator_paths::text_problems(
+            "PDF data (data.json)",
+            "data.json",
+            data_json,
+            &operator_paths::roots(&[]),
+        ),
+    );
+    report.record(
+        CheckId::OperatorPaths,
+        operator_paths::home_problems(dirs::home_dir().as_deref()),
+    );
     if report.is_clean() {
         Ok(())
     } else {
@@ -924,6 +991,9 @@ mod internal_only_tests;
 
 #[cfg(test)]
 mod operator_only_tests;
+
+#[cfg(test)]
+mod operator_path_tests;
 
 #[cfg(test)]
 mod published_example_tests;

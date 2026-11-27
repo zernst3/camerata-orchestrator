@@ -445,7 +445,8 @@ fn release_passes_a_clean_package_and_reports_sixteen_checks() {
             "reviewer decision on split rules",
             "one fix per row",
             "client text style",
-            "internal notes kept out"
+            "internal notes kept out",
+            "operator paths kept out"
         ]
     );
     assert_eq!(&z.bytes[0..2], b"PK");
@@ -464,7 +465,7 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
              reviewer decision on split-out problems, reviewer correction on flagged findings, \
              reviewer decision on critical and unsure findings, confidentiality marking, manifest, \
              provenance, unsynced reviewer changes, reviewer decision on split rules, one fix per \
-             row, client text style, internal notes kept out (all passed)"
+             row, client text style, internal notes kept out, operator paths kept out (all passed)"
         ),
         "{readme}"
     );
@@ -845,10 +846,10 @@ fn audit_zip_over_a_released_zip_is_clean() {
     );
     // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own json/decisions.json, so a standalone
     // audit of a zip runs it too. Item #1 adds the one-fix-per-row check: 11. The rewrite
-    // advisory's internal-notes check makes 12.
+    // advisory's internal-notes check makes 12; the operator-paths check makes 13.
     assert_eq!(
         report.checks.len(),
-        12,
+        13,
         "row parity needs the in-memory rows"
     );
 }
@@ -1260,7 +1261,7 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
              flagged findings, reviewer decision on critical and unsure findings, \
              confidentiality marking, manifest, provenance, unsynced \
              reviewer changes, reviewer decision on split rules, one fix per row, client text \
-             style, internal notes kept out"
+             style, internal notes kept out, operator paths kept out"
         )
     );
 }

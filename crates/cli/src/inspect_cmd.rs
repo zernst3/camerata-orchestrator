@@ -848,7 +848,7 @@ pub async fn build_product_export_bytes(
     corpus: Option<&camerata_rules::RuleSet>,
     client: &str,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus, None, client, false).await?;
+    let released = release_product_export(report, corpus, None, client, false, &[]).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -860,6 +860,7 @@ async fn release_product_export(
     model: Option<camerata_server::ModelRecord>,
     client: &str,
     internal: bool,
+    repo_dirs: &[PathBuf],
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
@@ -870,6 +871,8 @@ async fn release_product_export(
     // `--internal` is the operator's own review: only then may an export come from a run that
     // did not complete, and it is marked INTERNAL INCOMPLETE.
     options.internal = internal;
+    // The folders the run read: no client file may name one.
+    options.operator_roots = repo_dirs.to_vec();
 
     let package = camerata_server::release_gate::build_product_package(
         &camerata_server::report_export::ReviewedReport::unreviewed(report, &dispositions),
@@ -1790,6 +1793,7 @@ pub async fn run_inspect_pipeline_with(
         Some(model_record),
         &args.client,
         !args.client_engagement,
+        &args.repo_dirs(),
     )
     .await
     {

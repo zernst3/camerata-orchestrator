@@ -100,6 +100,76 @@ pub const MANIFESTS_UNAUDITED: &str = "Dependency manifests not audited";
 /// could not read (M12).
 pub const UNREAD_FILES: &str = "Dependency files not read";
 
+/// What a client reads for a dependency audit that did not run, whatever osv-scanner said: fixed
+/// wording, so no word of the tool's own output (which holds paths of the operator's machine)
+/// reaches a client file.
+pub const DID_NOT_RUN_FIXED: &str = "dependency audit (osv-scanner) did not run on this repository";
+
+/// The start of every "did not run" note that carries a reason of the tool's or the system's.
+const DID_NOT_RUN_PREFIX: &str = "dependency audit (osv-scanner) did not run: ";
+
+/// The start of the note for a result osv-scanner printed that could not be read.
+const COULD_NOT_PARSE_PREFIX: &str = "dependency audit (osv-scanner) could not parse output";
+
+/// The reasons the engine owns, in client style, with no word of the tool's: the timeout, the
+/// empty result, and a missing network. A stored reason equal to one of them stays as written; any
+/// other (a process exit with stderr, an install failure, a spawn error, free text) is the tool's
+/// or the system's own words and becomes the fixed wording.
+const ENGINE_REASONS: [&str; 3] = [
+    "subprocess timed out after 120 s",
+    "it exited normally but produced no output",
+    "no network",
+];
+
+/// Where the unread-files sentence once quoted osv-scanner's stderr lines.
+const UNREAD_QUOTE_MARKER: &str = "so they may not have been checked (";
+
+/// The text of an osv-scanner coverage note as a client reads it. A note a scan stored may carry
+/// the tool's stderr (a process exit, a failed install, a spawn error, an unreadable result, or
+/// the unread-files sentence quoting stderr lines), so the export renders fixed wording instead:
+/// the client still learns the audit did not run, or did not read some files, and never the
+/// tool's words. Every other note is returned as written.
+pub fn client_note_message(message: &str) -> String {
+    if let Some(at) = message.find(UNREAD_QUOTE_MARKER) {
+        let end = at + UNREAD_QUOTE_MARKER.len() - " (".len();
+        // Only the parenthetical goes, up to its matching `)` (the quoted lines hold parentheses
+        // of their own). What follows it, such as the files-not-copied sentence
+        // `with_copy_failures` appends, stays. An unclosed parenthesis runs to the end.
+        let quoted = &message[at + UNREAD_QUOTE_MARKER.len()..];
+        let mut depth = 1usize;
+        let mut close = None;
+        for (i, c) in quoted.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let tail = close
+            .map(|i| &quoted[i + 1..])
+            .map(|rest| rest.strip_prefix('.').unwrap_or(rest))
+            .unwrap_or("");
+        return format!("{}.{tail}", &message[..end]);
+    }
+    if let Some(at) = message.find(DID_NOT_RUN_PREFIX) {
+        let reason = &message[at + DID_NOT_RUN_PREFIX.len()..];
+        if ENGINE_REASONS.contains(&reason.trim().trim_end_matches('.')) {
+            return message.to_string();
+        }
+        return DID_NOT_RUN_FIXED.to_string();
+    }
+    if message.contains(COULD_NOT_PARSE_PREFIX) {
+        return DID_NOT_RUN_FIXED.to_string();
+    }
+    message.to_string()
+}
+
 /// The `Finding::captures` key every dependency row carries: the advisory id (for example
 /// `GHSA-...` or `RUSTSEC-...`). Two advisories on one package version share a snippet, path
 /// and line, so the finding key needs this to tell them apart (M9).
@@ -780,9 +850,10 @@ async fn run_dep_audit_core(
                     tool_failed: false,
                     repo: None,
                     tool: TOOL_NAME.to_string(),
-                    message: scrub_local_paths(
-                        &format!("dependency audit (osv-scanner) did not run: {e}"),
-                        scan_dir,
+                    message: operator_only_failure(
+                        repo,
+                        "osv-scanner could not be provisioned",
+                        &e.to_string(),
                     ),
                 }),
             );
@@ -822,12 +893,10 @@ async fn run_dep_audit_core(
                     tool_failed: false,
                     repo: None,
                     tool: TOOL_NAME.to_string(),
-                    message: scrub_local_paths(
-                        &format!(
-                            "dependency audit (osv-scanner) did not run: \
-                             could not spawn process: {e}"
-                        ),
-                        scan_dir,
+                    message: operator_only_failure(
+                        repo,
+                        "osv-scanner could not be started",
+                        &e.to_string(),
                     ),
                 }),
             );
@@ -880,12 +949,10 @@ async fn run_dep_audit_core(
                 None => base,
             }
         } else if !exit_ok {
-            scrub_local_paths(
-                &format!(
-                    "dependency audit (osv-scanner) did not run: \
-                     process exited with code {code}: {stderr}"
-                ),
-                scan_dir,
+            operator_only_failure(
+                repo,
+                &format!("osv-scanner exited with code {code}"),
+                &stderr,
             )
         } else {
             // Exit OK but empty stdout: osv-scanner printed nothing, which a completed scan
@@ -929,13 +996,21 @@ async fn run_dep_audit_core(
                 tool_failed: false,
                 repo: None,
                 tool: TOOL_NAME.to_string(),
-                message: scrub_local_paths(
-                    &format!("dependency audit (osv-scanner) could not parse output: {e}"),
-                    scan_dir,
+                message: operator_only_failure(
+                    repo,
+                    "osv-scanner printed a result that could not be read",
+                    &e.to_string(),
                 ),
             }),
         ),
     }
+}
+
+/// The note for an osv-scanner failure: fixed wording ([`DID_NOT_RUN_FIXED`]). What the tool or the
+/// system said goes to the operator log only, in full: it holds paths of this machine.
+fn operator_only_failure(repo: &str, what: &str, detail: &str) -> String {
+    tracing::warn!(repo = %repo, detail = %detail, "dependency audit did not run: {what}");
+    DID_NOT_RUN_FIXED.to_string()
 }
 
 /// The osv-scanner argument vector: JSON output, recursive discovery from `scan_dir`, the scan's
@@ -1184,6 +1259,9 @@ pub async fn run_dep_audit_listed(
 }
 
 // ─── tests (pure parser + severity mapping) ──────────────────────────────────
+
+#[cfg(test)]
+mod operator_path_tests;
 
 #[cfg(test)]
 mod tests {

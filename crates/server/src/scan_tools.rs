@@ -1692,8 +1692,10 @@ async fn run_capture_status_env(
 ///    truncated JSON.
 /// 3. **Parsed fine.** Not an error; this function is never called.
 ///
-/// `stderr` is truncated to [`STDERR_EVIDENCE_LIMIT`] bytes because this string
-/// lands in a client-visible coverage note, not a log file.
+/// `stderr` is truncated to [`STDERR_EVIDENCE_LIMIT`] bytes. The string is operator-facing: it
+/// goes to the operator's views and the ledger. It never reaches a client file, because the client
+/// form of a failed tool is fixed wording (`report_export::tool_coverage_disclosures`), which
+/// never reads the note's message.
 fn tool_output_error(
     tool: ScanTool,
     stdout: &str,

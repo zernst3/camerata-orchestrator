@@ -2374,7 +2374,7 @@ pub fn build_workbook_with_counts(
         .coverage_notes
         .iter()
         .filter(|n| n.tool == "osv-scanner")
-        .map(|n| n.message.clone())
+        .map(|n| crate::dep_audit::client_note_message(&n.message))
         .collect();
     let gaps = crate::report_export::coverage_gaps::coverage_gaps(report);
     let patterns_json = crate::report_export::patterns_across_services_json(

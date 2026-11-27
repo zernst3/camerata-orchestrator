@@ -116,6 +116,12 @@ pub struct ReportOptions {
     /// Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub internal: bool,
+    /// The folders on the operator's machine that hold a clone or a scan copy of the project's
+    /// repos. The release gate refuses a client package that names one of them, beside the home
+    /// directory, the state folders and the temp folder it works out for itself. Server-populated,
+    /// never client-supplied (`serde(skip)`); empty for a caller that knows none.
+    #[serde(skip)]
+    pub operator_roots: Vec<std::path::PathBuf>,
 }
 
 /// Env var that makes `camerata inspect` write the operator's triage log beside the export zip
@@ -1617,7 +1623,7 @@ pub fn build_report_json_with_counts(
         .coverage_notes
         .iter()
         .filter(|n| n.tool == "osv-scanner")
-        .map(|n| n.message.clone())
+        .map(|n| crate::dep_audit::client_note_message(&n.message))
         .collect();
     // M11: "clean" means checked and nothing found. A dependency audit that did not run (no
     // network, a timeout, an unreadable result) or that left manifests unaudited used to leave
