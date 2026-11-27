@@ -73,14 +73,47 @@ async fn a_python_repo_without_ruff_on_the_machine_gets_ruff_provisioned_and_the
 /// No scan tool resolves from `PATH`: with the process `PATH` EMPTY, every tool (ruff, eslint
 /// on the pinned Node.js, semgrep in the pinned CPython's venv, osv-scanner) is provisioned and
 /// runs, and each one was started with Camerata's child `PATH`, never the process's.
+///
+/// The empty `PATH` is the CHILD process's from its start: the test re-runs itself in a fresh
+/// copy of this test binary with `PATH=""`, so no other test in this process ever sees an empty
+/// `PATH` (a process-wide `PATH` change would break every concurrent test that runs `git`).
 #[cfg(unix)]
-#[tokio::test]
-#[serial_test::serial(process_env)]
-async fn with_an_empty_path_every_scan_tool_still_runs_from_the_tooling_folder() {
-    let _semgrep_on = camerata_test_env::EnvGuard::remove(DISABLE_SEMGREP_ENV_VAR);
-    let _dep_audit_on = camerata_test_env::EnvGuard::remove(crate::dep_audit::DISABLE_ENV_VAR);
-    let _empty_path = camerata_test_env::EnvGuard::set("PATH", "");
+#[test]
+fn with_an_empty_path_every_scan_tool_still_runs_from_the_tooling_folder() {
+    const CHILD: &str = "CAMERATA_EMPTY_PATH_CHILD";
+    const NAME: &str =
+        "scan_tools::provisioned_tools_tests::with_an_empty_path_every_scan_tool_still_runs_from_the_tooling_folder";
+    if std::env::var_os(CHILD).is_some() {
+        assert_eq!(
+            std::env::var_os("PATH").as_deref(),
+            Some(std::ffi::OsStr::new(""))
+        );
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(every_scan_tool_runs_from_the_tooling_folder());
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([NAME, "--exact", "--test-threads=1", "--nocapture"])
+        .env("PATH", "")
+        .env(CHILD, "1")
+        .env_remove(DISABLE_SEMGREP_ENV_VAR)
+        .env_remove(crate::dep_audit::DISABLE_ENV_VAR)
+        .output()
+        .expect("the child test starts");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "the empty-PATH run failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
 
+/// The body of the empty-`PATH` test, run in the child.
+#[cfg(unix)]
+async fn every_scan_tool_runs_from_the_tooling_folder() {
     let tools = FakeTools::new();
     let rules = vec![
         rule_with("PY-1", EnforcementKind::Mechanical, false, &["Ruff: S608"]),

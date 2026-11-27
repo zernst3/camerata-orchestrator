@@ -692,7 +692,7 @@ pub(crate) async fn ensure_eslint_with(
 /// Tests use [`NpmCommand::program`] with a fake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmCommand {
-    pub program: OsString,
+    pub launcher: OsString,
     /// Arguments before npm's own (npm's script for the pinned Node.js).
     pub prefix: Vec<OsString>,
     /// The `PATH` npm and everything it starts get. `None` only for a test fake.
@@ -703,14 +703,14 @@ impl NpmCommand {
     /// A single program that behaves as npm (a test fake).
     pub fn program(program: impl Into<OsString>) -> Self {
         Self {
-            program: program.into(),
+            launcher: program.into(),
             prefix: Vec::new(),
             path_env: None,
         }
     }
 
     fn command(&self) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(&self.program);
+        let mut cmd = tokio::process::Command::new(&self.launcher);
         cmd.args(&self.prefix).kill_on_drop(true);
         if let Some(path) = &self.path_env {
             cmd.env("PATH", path);

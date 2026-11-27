@@ -208,7 +208,7 @@ impl ToolEnv {
     /// neither npm nor anything it starts finds a `node` on the user's `PATH`.
     pub fn npm_command(&self, node: &NodeRuntime) -> crate::tool_provisioning::NpmCommand {
         crate::tool_provisioning::NpmCommand {
-            program: node.node.clone().into_os_string(),
+            launcher: node.node.clone().into_os_string(),
             prefix: vec![node.npm_cli.clone().into_os_string()],
             path_env: Some(self.child_path()),
         }
