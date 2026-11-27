@@ -31,6 +31,7 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 | 3a | The review screen: Tree, Escalations, Engine Check, Flat view, Settings |
 | 3b | The finder: agent or engine, and how to run Opus 5.5 as finder and group reviewer |
 | 3c | Running a scan: estimate, spend limit, live cost, approve and continue, run to completion |
+| 3d | Review a command line inspection in the app (`camerata run import`) |
 | 4 to 5a | The Rules view, repo paths, deleting a client's source |
 | 6 to 6b | Governed development, L3 code review, Design Canvas |
 | 7 to 10 | The rules that govern it, the assistant, updates, single-rule editing |
@@ -1605,6 +1606,34 @@ asynchronously). The **CLI** backend drives the operator's own Claude Code subsc
 the operator's own development only (a client engagement refuses it), it has no batch discount, and
 each call is its own subprocess. The estimate is priced for the backend in use. On the command line
 `--backend api` is the default and `--backend cli` is an explicit choice for internal runs.
+
+---
+
+## 3d. Review a command line inspection in the app
+
+The review screens open only inspections in the app's own store. An inspection run with
+`camerata inspect` saves its sealed report in its run folder (`runs/<run id>/report.json` in the
+state folder); `camerata run import` brings it into the app:
+
+```bash
+camerata run import --run <RUN-ID>
+```
+
+- **Close the app first.** The app reads its store when it opens, so an import made while it is
+  open shows only once the app is opened again.
+- **Which project.** The inspection goes into the one project whose repositories include every
+  repository of the run. When there is none, create the project in the app with those
+  repositories; when there are several, name one with `--project <PROJECT-ID>`.
+- **What it checks.** The run must be complete (finish it with `camerata inspect --resume <ID>`).
+  Its engine pin must name its build. The saved report must be the one that build made for this
+  run. The rule library this copy of Camerata loads must be the one the run was pinned to (the
+  review screens and every export read rules from the library loaded now). The report must
+  be there and readable. Each refusal says which of these failed, writes nothing and exits 1.
+- **What it does.** The report goes through the same steps an app inspection goes through before
+  it is stored (the reviewer's restores, the patterns across services and the secret sweep), then
+  opens on the review screens like an inspection run in the app.
+- **Nothing changes in the run folder.** Importing the same run again says it is already in the
+  app and changes nothing. A run goes into one project only.
 
 ---
 
@@ -3700,6 +3729,7 @@ glossary (`docs/CLIENT_PACKAGE.md`) defines the package columns.
 | Finish a scan that failed or was interrupted | **Run what remains** (§3c, §11a). |
 | Do a free pass first | Untick **AI architectural review** (§3c). |
 | Open the review screen | **Review** next to the kind tabs (§3a). |
+| Review an inspection run with `camerata inspect` | Close the app, run `camerata run import --run <ID>`, open the app (§3d). |
 | Decide a whole group at once | Tree > the node > **Confirm all** / **Ignore all** / **False positive all** / **Tech debt all** (§3a). |
 | Decide one row from the keyboard | `C`, `I`, `T`, `F` on the row (§19). |
 | Undo a decision | **Undo** in the bar (five seconds). After that, decide the row again, or move it back to Unresolved in the Flat view (§3, §3a). |
