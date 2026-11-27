@@ -557,6 +557,22 @@ pub(crate) fn missing_reply_error() -> anyhow::Error {
     )
 }
 
+/// Every stored reply under the request digest `key` in the run folder `dir`, oldest first,
+/// whatever became of it (a reply a stage turned down is still the model's reply). A reply that
+/// was cut off at the output limit is left out. Nothing is changed: this reads the folder and
+/// takes no part in the run's own bookkeeping.
+pub fn stored_reply_texts(dir: &Path, key: &str) -> Vec<String> {
+    let Some(file) = load_call_file(dir, key) else {
+        return Vec::new();
+    };
+    file.entries
+        .values()
+        .filter_map(|e| e.response.as_ref())
+        .filter(|r| !r.truncated)
+        .map(|r| r.text.clone())
+        .collect()
+}
+
 fn load_call_file(dir: &Path, key: &str) -> Option<CallFile> {
     read_json(&call_path(dir, key))
 }

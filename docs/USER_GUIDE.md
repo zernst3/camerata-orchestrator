@@ -2845,6 +2845,21 @@ commits.
 
 ---
 
+### Finishing a saved, incomplete run on a newer build (`--recheck-saved`)
+
+A whole rerun cannot finish a run when the newer build changes anything a model was asked (a stored reply is found by the digest of its exact request). `camerata inspect --recheck-saved <RUN-ID|latest>` does the smaller job: it reads the run's saved sealed report, ledger and stored replies, uses every saved result as saved, and runs only what the newer build changed.
+
+- The final checks run again on the rows as saved: the convention accounting, the pipeline integrity checks, the seal and the release gate. The integrity failures the first build stored are replaced by this build's result of the same checks.
+- The delta: each clone check part that failed because the judge's reply could not be read. Its request is rebuilt exactly as the inspection built it from the unchanged repository, its stored reply is read with the current reader, and no model is asked. A confirmed clone gets the rule's standard fix text at export.
+- Nothing else runs: no tool preview, dependency audit, finder, fix stage or group review.
+
+If a stored reply still cannot be read, the command refuses and names the part. With `--reask-failed-judge` (or `--reask-failed-judge=<COUNT>`, default 5) it lists each such part, then asks it once on the clone check model the run recorded, within `--max-cost-usd`. It refuses if the run is complete, the saved report or ledger is missing or unreadable, the repository is not the tree the run read, the rules or prompts differ, a part was judged in part, or (client run) the build has uncommitted changes. If the release gate refuses, no export is written. The run, the ledger and "How this was done" name both builds and what ran again.
+
+```
+camerata inspect --recheck-saved <RUN-ID> --repo <PATH> --export <ZIP>
+camerata inspect --recheck-saved <RUN-ID> --repo <PATH> --export <ZIP> --reask-failed-judge
+```
+
 ### Rerunning a saved run's deterministic checks (`--rerun-deterministic`)
 
 A resume refuses a different build of Camerata, which is right for model work but means a bug in a deterministic stage (the tool previews and their merges, the convention accounting, the ledger and integrity checks, the collapse, the export) cannot be fixed on a saved run without paying for a whole new inspection. `camerata inspect --rerun-deterministic <RUN-ID|latest>` runs those stages again on the build you are running, from the run's saved inputs, and asks no model.

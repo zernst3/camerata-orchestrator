@@ -51,9 +51,32 @@ use super::Finding;
 pub mod cache;
 pub mod findings;
 pub mod prompt;
+pub mod redo;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod partial_reason_tests {
+    use super::*;
+
+    #[test]
+    fn the_skip_reason_keeps_the_left_for_the_reviewer_suffix() {
+        let counts = JudgeCounts {
+            found: 5,
+            unjudged: 3,
+            held: 2,
+            ..JudgeCounts::default()
+        };
+        assert!(partial_skip_reason(&counts).ends_with("; 2 left for the reviewer"));
+        assert!(!partial_skip_reason(&JudgeCounts {
+            found: 5,
+            unjudged: 3,
+            ..JudgeCounts::default()
+        })
+        .contains("left for the reviewer"));
+    }
+}
 
 pub use cache::{cache_key, CachedVerdict, VerdictCache, MAX_CACHED_VERDICTS};
 use prompt::{batch_prompt, candidate_json, parse_verdicts, system_prompt, Verdict};
@@ -76,7 +99,7 @@ const REPAIR_NOTE: &str = "\n\nYour previous reply was refused: it was not one J
 
 /// The repair follow-up of `sent`: the same request with the refusal appended after the batch
 /// (the cache prefix before it is unchanged).
-fn repair_request(mut sent: LlmRequest) -> LlmRequest {
+pub(crate) fn repair_request(mut sent: LlmRequest) -> LlmRequest {
     sent.prompt.push_str(REPAIR_NOTE);
     sent
 }
@@ -219,6 +242,71 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// The one delimiter token of a judge run (every rule, every batch of one repo), drawn so that it
+/// occurs in none of the excerpts it will frame. Under a run's seed it is the same token every time
+/// for the same candidates, which is what lets a stored reply be found again by its request.
+pub(crate) fn judge_nonce(
+    req: &JudgeRequest<'_>,
+    with_model: bool,
+) -> crate::prompt_frame::FrameNonce {
+    if with_model {
+        let texts: Vec<String> = req
+            .set
+            .by_rule
+            .values()
+            .flatten()
+            .map(|c| candidate_json(&judge_input(c, req.files)))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        crate::prompt_frame::FrameNonce::generate_avoiding(&refs)
+    } else {
+        crate::prompt_frame::FrameNonce::generate()
+    }
+}
+
+/// One batch the judge asks about: the request exactly as it is sent, the candidate ids it asks
+/// about and how the batch is named in a failure record.
+pub(crate) struct JudgeBatch {
+    pub request: LlmRequest,
+    pub asked: Vec<String>,
+    pub which: String,
+}
+
+/// The request for batch number `batch_idx` (of `n_batches`) of `rule`'s pending candidates. THE
+/// one place a judge request is built: the scan asks with it, and the recheck of a saved run
+/// rebuilds the very same request from it to find the stored reply (see [`redo`]).
+pub(crate) fn batch_request(
+    req: &JudgeRequest<'_>,
+    nonce: &crate::prompt_frame::FrameNonce,
+    rule: CloneRule,
+    batch: &[&Candidate],
+    batch_idx: usize,
+    n_batches: usize,
+) -> JudgeBatch {
+    let system = crate::prompt_frame::with_untrusted_clause(system_prompt(rule), nonce);
+    let text = rule_text(rule, req.corpus);
+    let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
+    let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
+    // The judge always names its model (the transport refuses a request that names none).
+    let request = LlmRequest::new(prompt)
+        .with_system(system)
+        .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
+        .with_cache_prefix_len(prefix_len)
+        .with_model(req.judge_model.to_string());
+    let which = format!(
+        "candidate batch {} of {n_batches} ({} candidates, {} to {})",
+        batch_idx + 1,
+        batch.len(),
+        batch.first().map_or("", |c| c.id.as_str()),
+        batch.last().map_or("", |c| c.id.as_str()),
+    );
+    JudgeBatch {
+        request,
+        asked: batch.iter().map(|c| c.id.clone()).collect(),
+        which,
+    }
+}
+
 /// Judge every armed rule's candidates. `llm == None` means no model this scan: nothing is
 /// judged, nothing ships, and every armed rule with candidates gets a `not_assessed` row.
 pub async fn judge_clone_candidates(
@@ -237,19 +325,7 @@ pub async fn judge_clone_candidates(
     };
     // One delimiter token for the whole judge run (every rule, every batch), drawn so that it
     // occurs in none of the excerpts it will frame. The verdict cache key does not include it.
-    let nonce = if llm.is_some() {
-        let texts: Vec<String> = req
-            .set
-            .by_rule
-            .values()
-            .flatten()
-            .map(|c| candidate_json(&judge_input(c, req.files)))
-            .collect();
-        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        crate::prompt_frame::FrameNonce::generate_avoiding(&refs)
-    } else {
-        crate::prompt_frame::FrameNonce::generate()
-    };
+    let nonce = judge_nonce(&req, llm.is_some());
     for rule in CloneRule::ALL {
         let Some(candidates) = req.set.by_rule.get(&rule) else {
             continue; // not armed
@@ -287,48 +363,16 @@ pub async fn judge_clone_candidates(
         )
         .await;
 
-        // Findings, in rank order.
-        for candidate in candidates {
-            if let Some(verdict) = judged.get(&candidate.id) {
-                if verdict.word == rule.affirmative_word() {
-                    counts.confirmed += 1;
-                    outcome.findings.extend(findings::confirmed_findings(
-                        req.repo,
-                        candidate,
-                        &verdict.concept,
-                        req.files,
-                    ));
-                } else {
-                    counts.rejected += 1;
-                }
-            }
-        }
-        counts.judged = counts.confirmed + counts.rejected;
-        counts.unjudged = u32::try_from(candidates.len())
-            .unwrap_or(u32::MAX)
-            .saturating_sub(counts.judged);
-
-        // One rule, one surface. A candidate the model looked at and answered "unsure" about
-        // is a Queue row marked unsure, held until the reviewer decides it (only when other
-        // candidates were judged; a rule where nothing was settled is one not_assessed row).
-        // A candidate nobody judged (over the cap, a failed or unsent batch) has no verdict to
-        // show: it is a coverage gap the ledger discloses, never a held row. A rule gets its
-        // single `not_assessed` row only when it produced no Queue row at all.
-        if counts.judged > 0 {
-            for candidate in candidates {
-                if unsure_ids.contains(&candidate.id) && !judged.contains_key(&candidate.id) {
-                    counts.held += 1;
-                    outcome
-                        .findings
-                        .extend(findings::unsure_findings(req.repo, candidate, req.files));
-                }
-            }
-        }
-        if counts.confirmed == 0 && counts.held == 0 {
-            if let Some(row) = not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome) {
-                outcome.not_assessed.push(row);
-            }
-        }
+        settle_rule(
+            &req,
+            rule,
+            candidates,
+            &judged,
+            &unsure_ids,
+            &mut counts,
+            &mut outcome,
+            llm.is_some(),
+        );
         let call_failure = if llm.is_none() {
             Some("no model was available, so nothing was judged".to_string())
         } else {
@@ -352,6 +396,65 @@ pub async fn judge_clone_candidates(
     cache.trim(MAX_CACHED_VERDICTS);
     outcome.judge_model = (outcome.model_calls > 0).then(|| req.judge_model.to_string());
     outcome
+}
+
+/// Settle one rule's candidates from the verdicts the model gave: count them, make the rows of the
+/// confirmed ones, the held rows of the unsure ones and, when the rule has neither, its one
+/// `not_assessed` row. Shared by the scan and by the recheck of a saved run, so both join a
+/// verdict to the report the same way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settle_rule(
+    req: &JudgeRequest<'_>,
+    rule: CloneRule,
+    candidates: &[Candidate],
+    judged: &BTreeMap<String, Verdict>,
+    unsure_ids: &HashSet<String>,
+    counts: &mut JudgeCounts,
+    outcome: &mut JudgeOutcome,
+    with_model: bool,
+) {
+    // Findings, in rank order.
+    for candidate in candidates {
+        if let Some(verdict) = judged.get(&candidate.id) {
+            if verdict.word == rule.affirmative_word() {
+                counts.confirmed += 1;
+                outcome.findings.extend(findings::confirmed_findings(
+                    req.repo,
+                    candidate,
+                    &verdict.concept,
+                    req.files,
+                ));
+            } else {
+                counts.rejected += 1;
+            }
+        }
+    }
+    counts.judged = counts.confirmed + counts.rejected;
+    counts.unjudged = u32::try_from(candidates.len())
+        .unwrap_or(u32::MAX)
+        .saturating_sub(counts.judged);
+
+    // One rule, one surface. A candidate the model looked at and answered "unsure" about
+    // is a Queue row marked unsure, held until the reviewer decides it (only when other
+    // candidates were judged; a rule where nothing was settled is one not_assessed row).
+    // A candidate nobody judged (over the cap, a failed or unsent batch) has no verdict to
+    // show: it is a coverage gap the ledger discloses, never a held row. A rule gets its
+    // single `not_assessed` row only when it produced no Queue row at all.
+    if counts.judged > 0 {
+        for candidate in candidates {
+            if unsure_ids.contains(&candidate.id) && !judged.contains_key(&candidate.id) {
+                counts.held += 1;
+                outcome
+                    .findings
+                    .extend(findings::unsure_findings(req.repo, candidate, req.files));
+            }
+        }
+    }
+    if counts.confirmed == 0 && counts.held == 0 {
+        if let Some(row) = not_assessed_row(req, rule, counts, with_model, outcome) {
+            outcome.not_assessed.push(row);
+        }
+    }
 }
 
 /// Ask the model about one rule's uncached candidates, in batches. Returns the definite verdict
@@ -394,29 +497,17 @@ async fn judge_rule(
             _ => pending.push(candidate),
         }
     }
-    let system = crate::prompt_frame::with_untrusted_clause(system_prompt(rule), nonce);
-    let text = rule_text(rule, req.corpus);
     let mut first_failure: Option<String> = None;
     let mut stopped_by_limit = false;
     let mut attempts: Vec<AttemptRecord> = Vec::new();
     let n_batches = pending.chunks(BATCH_SIZE).count();
     'batches: for (batch_idx, batch) in pending.chunks(BATCH_SIZE).enumerate() {
-        let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
-        let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
-        // The judge always names its model (the transport refuses a request that names none).
-        let first_request = LlmRequest::new(prompt)
-            .with_system(system.clone())
-            .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
-            .with_cache_prefix_len(prefix_len)
-            .with_model(req.judge_model.to_string());
+        let JudgeBatch {
+            request: first_request,
+            which,
+            ..
+        } = batch_request(req, nonce, rule, batch, batch_idx, n_batches);
         let asked: HashSet<&str> = batch.iter().map(|c| c.id.as_str()).collect();
-        let which = format!(
-            "candidate batch {} of {n_batches} ({} candidates, {} to {})",
-            batch_idx + 1,
-            batch.len(),
-            batch.first().map_or("", |c| c.id.as_str()),
-            batch.last().map_or("", |c| c.id.as_str()),
-        );
         // A reply that is not a verdict object gets ONE repair follow-up in this run, counted
         // as an attempt, before the batch is given up on.
         let mut request = first_request;
@@ -802,6 +893,22 @@ fn finish_transcript(
     store.set_status(key, session, status);
 }
 
+/// The ledger's skip reason for a rule whose judgment left candidates undecided. One producer for
+/// the scan and for the recheck of a saved run.
+pub fn partial_skip_reason(counts: &JudgeCounts) -> String {
+    let held = if counts.held > 0 {
+        format!("; {} left for the reviewer", counts.held)
+    } else {
+        String::new()
+    };
+    format!(
+        "{FAILED_PASS_NAME} incomplete: {} of {} candidate sites were not assessed this scan \
+         (over the limit or no answer){held}",
+        counts.coverage_gaps(),
+        counts.found
+    )
+}
+
 /// Record every armed rule in the ledger, once per repo, under the architectural tier.
 ///
 /// A rule is `ran` only when every candidate the producer found got a definite verdict (a rule
@@ -820,17 +927,7 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutc
             Some(crate::scan_ledger::ADVISORY_UNAVAILABLE_NOTE.to_string())
         } else {
             ledger.note_advisory_partial_rule(repo, id);
-            let held = if counts.held > 0 {
-                format!("; {} left for the reviewer", counts.held)
-            } else {
-                String::new()
-            };
-            Some(format!(
-                "{FAILED_PASS_NAME} incomplete: {} of {} candidate sites were not assessed this \
-                 scan (over the limit or no answer){held}",
-                counts.coverage_gaps(),
-                counts.found
-            ))
+            Some(partial_skip_reason(counts))
         };
         let rows = outcome.findings.iter().filter(|f| f.rule_id == id).count();
         ledger.record_rule(

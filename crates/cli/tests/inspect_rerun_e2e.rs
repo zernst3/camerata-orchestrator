@@ -230,7 +230,9 @@ fn typst_available(test: &str) -> bool {
     camerata_test_env::typst_on_path_for(test)
 }
 
-fn stage_fixture(dest: &Path) {
+const DECISION: &str = "pub fn FUNC(order: &Order, user: &User) -> f64 {\n    let base = order.subtotal * order.quantity as f64;\n    if user.is_premium {\n        let discount = base * RATE;\n        return base - discount;\n    }\n    if base > 100.0 && order.coupon.is_some() {\n        return base - 10.0;\n    }\n    base + order.shipping\n}\n";
+
+fn stage_fixture_with(dest: &Path, clones: bool) {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/tests/fixtures/e2e_report_repo");
     fn copy(src: &Path, dest: &Path) {
@@ -246,6 +248,22 @@ fn stage_fixture(dest: &Path) {
         }
     }
     copy(&root, dest);
+    if clones {
+        std::fs::write(
+            dest.join("src/pricing.rs"),
+            DECISION
+                .replace("FUNC", "apply_discount")
+                .replace("RATE", "0.2"),
+        )
+        .unwrap();
+        std::fs::write(
+            dest.join("src/quote.rs"),
+            DECISION
+                .replace("FUNC", "quote_total")
+                .replace("RATE", "0.15"),
+        )
+        .unwrap();
+    }
     let g = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .current_dir(dest)
@@ -305,6 +323,7 @@ struct Saved {
     _guards: Vec<camerata_test_env::EnvGuard>,
     /// How many agent turns and model calls the first run made, for the "stored" check.
     first_run_agent_calls: usize,
+    ledger_path: PathBuf,
 }
 
 const BUILD_A: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
@@ -323,13 +342,17 @@ async fn saved_run_with_a_bookkeeping_defect() -> Saved {
 /// [`saved_run_with_a_bookkeeping_defect`], with the first run's fix replies accepted by the fix
 /// stage's checks when `accepted_fixes` is set.
 async fn saved_run_with(accepted_fixes: bool) -> Saved {
+    saved_run_full(accepted_fixes, false).await
+}
+
+async fn saved_run_full(accepted_fixes: bool, clones: bool) -> Saved {
     let state = tempfile::tempdir().unwrap();
     let guards = vec![
         camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path()),
         camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
     ];
     let repo = tempfile::tempdir().unwrap();
-    stage_fixture(repo.path());
+    stage_fixture_with(repo.path(), clones);
     let out = tempfile::tempdir().unwrap();
     let agent = Arc::new(Reviewer::new(vec![real_problem()]));
     let first_calls = agent.calls.clone();
@@ -381,6 +404,7 @@ async fn saved_run_with(accepted_fixes: bool) -> Saved {
         _state: state,
         _guards: guards,
         first_run_agent_calls: first_calls.load(Ordering::SeqCst),
+        ledger_path: outcome.ledger_path.clone(),
     }
 }
 
@@ -803,6 +827,248 @@ fn a_refused_rerun_records_where_the_tree_ended() {
         assert!(
             record.repos[0].tree_at_end.is_some(),
             "the end of the tree is recorded"
+        );
+    })
+}
+
+// ── `--recheck-saved`: finish the saved run from its sealed report ──────────────────────────────
+
+async fn recheck(
+    saved: &Saved,
+    export: &Path,
+) -> (
+    Result<camerata::inspect_cmd::InspectOutcome, InspectError>,
+    usize,
+) {
+    let llm = Scripted {
+        calls: AtomicUsize::new(0),
+        fixes: false,
+    };
+    let result = Box::pin(camerata::inspect_cmd::recheck_saved_inspect(
+        &saved.run_id,
+        &[saved.repo.path().to_path_buf()],
+        Some(export.to_path_buf()),
+        None,
+        Some(5),
+        true,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            resume: None,
+            llm: Some(&llm),
+            preflight_sink: &|_| {},
+        },
+    ))
+    .await;
+    (result, llm.calls.load(Ordering::SeqCst))
+}
+
+/// A saved run with a lost-row defect, rechecked on the fixed build: passes the gate with zero
+/// model calls even with the re-ask flag (nothing needs asking), writes the export, and the
+/// workbook and the ledger name both builds.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_recheck_of_a_saved_run_passes_the_gate_with_zero_calls_and_names_both_builds() {
+    on_a_big_stack(async {
+        if !typst_available("a_recheck_of_a_saved_run_passes_the_gate") {
+            return;
+        }
+        let saved = saved_run_with_a_bookkeeping_defect().await;
+        let export = saved.out.path().join("recheck.zip");
+        let (result, calls) = recheck(&saved, &export).await;
+        let outcome = result.expect("the recheck passes the gate");
+        assert_eq!(calls, 0, "no model call");
+        assert!(outcome.release_gate.starts_with("release gate: passed"));
+        assert!(
+            outcome.incomplete_reasons.is_empty(),
+            "{:?}",
+            outcome.incomplete_reasons
+        );
+        assert!(export.exists());
+        let ledger = ledger_of(&outcome);
+        let rerun = ledger.rerun().expect("the ledger names both builds");
+        assert_eq!(rerun.model_build.commit.as_deref(), Some(BUILD_A));
+        let zip = std::fs::read(&export).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let mut found = false;
+        for i in 0..archive.len() {
+            let mut f = archive.by_index(i).unwrap();
+            if f.name().unwrap_or_default().ends_with(".xlsx") {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut f, &mut bytes).unwrap();
+                let grid =
+                    camerata_server::release_gate::xlsx_sheet_grid(&bytes, "Start here").unwrap();
+                found = grid.iter().any(|r| {
+                    r.first().is_some_and(|c| c == "How this was done")
+                        && r.get(1).is_some_and(|c| c.contains(&BUILD_A[..12]))
+                });
+            }
+        }
+        assert!(found, "the workbook states both builds");
+    })
+}
+
+/// If the release gate refuses, the command stops with its refusal and writes no export.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_recheck_the_release_gate_refuses_writes_no_export() {
+    on_a_big_stack(async {
+        if !typst_available("a_recheck_the_release_gate_refuses") {
+            return;
+        }
+        let saved = saved_run_with_a_bookkeeping_defect().await;
+        // A path that carries a key reaches the package: the gate must stop it.
+        let key =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey)
+                .value;
+        let path = runs_dir()
+            .join(&saved.run_id)
+            .join(camerata_server::run_store::REPORT_FILE);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut v: Value = serde_json::from_str(&text).unwrap();
+        v["findings"][0]["path"] = json!(format!("src/{key}.rs"));
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let export = saved.out.path().join("blocked.zip");
+        let before = saved_files(&saved);
+        let (result, calls) = recheck(&saved, &export).await;
+        assert_eq!(
+            saved_files(&saved),
+            before,
+            "a refusal leaves the saved files byte-identical"
+        );
+        let err = result.expect_err("the gate refuses");
+        assert!(matches!(err, InspectError::ReleaseBlocked(_)), "{err}");
+        assert_eq!(calls, 0);
+        assert!(!export.exists(), "a blocked export leaves nothing on disk");
+    })
+}
+
+/// The bytes of the run's record, its saved report and its ledger.
+fn saved_files(saved: &Saved) -> Vec<Vec<u8>> {
+    let dir = runs_dir().join(&saved.run_id);
+    [
+        dir.join("run.json"),
+        dir.join(camerata_server::run_store::REPORT_FILE),
+        saved.ledger_path.clone(),
+    ]
+    .iter()
+    .map(|p| std::fs::read(p).unwrap())
+    .collect()
+}
+
+/// An export in a folder that does not exist is refused up front: nothing the run saved is changed.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_recheck_with_an_export_in_a_missing_folder_refuses_before_changing_anything() {
+    on_a_big_stack(async {
+        let saved = saved_run_with_a_bookkeeping_defect().await;
+        let before = saved_files(&saved);
+        let export = saved.out.path().join("no-such-folder").join("recheck.zip");
+        let (result, calls) = recheck(&saved, &export).await;
+        let err = result.expect_err("refused");
+        assert!(err.to_string().contains("folder"), "{err}");
+        assert_eq!(calls, 0);
+        assert_eq!(saved_files(&saved), before);
+    })
+}
+
+/// A saved run whose clone check failed on an unreadable reply and whose integrity check failed on
+/// the first build's defect: the recheck confirms the clone rows from the stored reply, makes no
+/// call even with the flag, and the package passes the release gate (the merged-rule fix check and
+/// the fix-parity checks included).
+#[test]
+#[serial_test::serial(process_env)]
+fn a_recheck_that_confirms_clone_rows_passes_the_release_gate_with_zero_calls() {
+    on_a_big_stack(async {
+        if !typst_available("a_recheck_that_confirms_clone_rows") {
+            return;
+        }
+        let saved = saved_run_full(false, true).await;
+        let record = read_record(&saved.run_id).unwrap();
+        // The first build could not read the judge's replies: it stored them and failed the part.
+        let report_path = runs_dir()
+            .join(&saved.run_id)
+            .join(camerata_server::run_store::REPORT_FILE);
+        let saved_report: Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert!(
+            saved_report["failed_passes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["pass"] == "clone-candidate judgment"),
+            "the first run's clone check failed: {:?}",
+            saved_report["failed_passes"]
+        );
+        // The stored replies are ones the current reader merges.
+        let repo_name = record.repos[0].name.clone();
+        let files = camerata_server::onboard::read_local_repo_files(
+            saved.repo.path(),
+            &camerata_server::onboard::scope::ScanScope::default().for_repo(&repo_name),
+        )
+        .unwrap()
+        .files;
+        let armed: std::collections::HashSet<&str> = camerata_checks::clone_rules::CloneRule::ALL
+            .iter()
+            .map(|r| r.id())
+            .collect();
+        let set = camerata_checks::clone_rules::candidates(&files, &armed);
+        let answers: Vec<(String, &str)> = set
+            .by_rule
+            .iter()
+            .flat_map(|(rule, list)| {
+                list.iter()
+                    .map(move |c| (c.id.clone(), rule.affirmative_word()))
+            })
+            .collect();
+        assert!(!answers.is_empty(), "the fixture holds a clone candidate");
+        let text = answers
+            .iter()
+            .map(|(id, word)| {
+                json!({"verdicts": [{"id": id, "verdict": word, "concept": "the discount"}]})
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for entry in std::fs::read_dir(runs_dir().join(&saved.run_id).join("calls")).unwrap() {
+            let path = entry.unwrap().path();
+            let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if v["owner"] == "clone_judge" {
+                for e in v["entries"].as_object_mut().unwrap().values_mut() {
+                    if e["response"].is_object() {
+                        e["response"]["text"] = json!(text);
+                    }
+                }
+                std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+            }
+        }
+        let export = saved.out.path().join("clones.zip");
+        let (result, calls) = recheck(&saved, &export).await;
+        let outcome = result.expect("the recheck passes the gate");
+        assert_eq!(
+            calls, 0,
+            "the stored reply settles it: no call even with the flag"
+        );
+        assert!(
+            outcome.release_gate.starts_with("release gate: passed"),
+            "{}",
+            outcome.release_gate
+        );
+        assert!(
+            outcome.incomplete_reasons.is_empty(),
+            "{:?}",
+            outcome.incomplete_reasons
+        );
+        assert!(export.exists());
+        let after: Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        let clone_rows = after["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["rule_id"] == "ARCH-SINGLE-SOURCE-LOGIC-1")
+            .count();
+        assert!(
+            clone_rows >= 2,
+            "the confirmed candidate's rows are in the report: {clone_rows}"
         );
     })
 }

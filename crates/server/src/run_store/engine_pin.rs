@@ -276,6 +276,44 @@ pub struct RerunRecord {
     pub deterministic_build: BuildId,
     /// When the rerun started (RFC 3339 UTC).
     pub at: String,
+    /// Set when this is a recheck of a saved, incomplete run (`camerata inspect --recheck-saved`):
+    /// what ran again on `deterministic_build`, and the clone check parts that were redone. `None`
+    /// for a rerun of every deterministic stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recheck: Option<RecheckDetail>,
+}
+
+/// How a clone check part that failed on the first build was redone by a recheck.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RedoHow {
+    /// Its stored model reply was read again, by the current reader. No call was made.
+    ReadStored,
+    /// Its stored reply could not be read, so it was asked once more, on the model the inspection
+    /// started with (the model is named here).
+    AskedAgain { model: String },
+}
+
+/// One clone check part a recheck redid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedonePart {
+    pub repo: String,
+    /// The clone rule the part was about.
+    pub rule: String,
+    /// How many candidate pairs the part judged.
+    #[serde(default)]
+    pub candidates: u32,
+    /// How many batches of candidates the part had.
+    pub batches: usize,
+    /// How many of them were asked again (the rest were read from their stored replies).
+    pub asked_again: usize,
+    pub how: RedoHow,
+}
+
+/// What a recheck ran again, in the order it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RecheckDetail {
+    /// The clone check parts redone; empty when the first build's only failure was a check.
+    pub clone_parts: Vec<RedonePart>,
 }
 
 impl RerunRecord {
@@ -284,6 +322,19 @@ impl RerunRecord {
             model_build: model_build.clone(),
             deterministic_build: deterministic_build.clone(),
             at: super::now(),
+            recheck: None,
+        }
+    }
+
+    /// A recheck of a saved, incomplete run (see [`RecheckDetail`]).
+    pub fn for_recheck(
+        model_build: &BuildId,
+        deterministic_build: &BuildId,
+        detail: RecheckDetail,
+    ) -> Self {
+        Self {
+            recheck: Some(detail),
+            ..Self::new(model_build, deterministic_build)
         }
     }
 
@@ -291,10 +342,13 @@ impl RerunRecord {
     /// no serial commas, American English.
     pub fn report_sentence(&self) -> String {
         let name = |b: &BuildId| b.short_commit().unwrap_or_else(|| "(unnamed)".to_string());
+        if let Some(detail) = &self.recheck {
+            return detail.sentence(&name(&self.model_build), &name(&self.deterministic_build));
+        }
         format!(
-            "The model work in this inspection ran on Camerata build {}. The deterministic checks \
-             were run again on Camerata build {}, using the stored model replies and with no new \
-             model calls.",
+            "The findings, fix text and reviews in this inspection come from Camerata build {}. The \
+             final consistency checks were run again on Camerata build {}, using those saved \
+             results unchanged and with no new model calls.",
             name(&self.model_build),
             name(&self.deterministic_build)
         )
@@ -332,4 +386,39 @@ pub fn client_start_refusal(client_engagement: bool, build: &BuildId) -> Option<
         );
     }
     None
+}
+
+impl RecheckDetail {
+    /// "How this was done" for a recheck: both builds, what ran again and what did not. Client
+    /// words: no dashes, no serial commas, American English.
+    pub fn sentence(&self, model_build: &str, checks_build: &str) -> String {
+        let mut out = format!(
+            "The findings, fix text and reviews in this inspection come from Camerata build \
+             {model_build}. The final consistency checks and the export were run again on \
+             Camerata build {checks_build}, using those saved results unchanged."
+        );
+        for part in &self.clone_parts {
+            let pairs = if part.candidates == 1 {
+                "1 candidate pair".to_string()
+            } else {
+                format!("{} candidate pairs", part.candidates)
+            };
+            let how = match &part.how {
+                RedoHow::ReadStored => "by reading the model's saved answer again".to_string(),
+                RedoHow::AskedAgain { model } => format!("by asking {model} once more"),
+            };
+            out.push_str(&format!(
+                " The duplicated code check for {pairs} in {} was completed on build \
+                 {checks_build}, {how}.",
+                part.repo
+            ));
+        }
+        if !self.clone_parts.is_empty() {
+            out.push_str(
+                " Any duplicated code it confirmed carries the rule's standard fix and is not included in \
+                 Patterns across services.",
+            );
+        }
+        out
+    }
 }

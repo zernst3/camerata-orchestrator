@@ -38,6 +38,7 @@
 
 pub mod engine_pin;
 pub mod journal;
+pub mod recheck;
 pub mod store_only;
 
 use std::path::{Path, PathBuf};
@@ -974,6 +975,15 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 // ── The store ────────────────────────────────────────────────────────────────────────────────
 
+/// The prompt seed a run record holds (hex), as bytes.
+pub(crate) fn decode_seed(hex: &str) -> [u8; crate::prompt_frame::NONCE_BYTES] {
+    let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
+    }
+    out
+}
+
 /// A run opened for work by this process.
 pub struct RunStore {
     dir: PathBuf,
@@ -989,6 +999,10 @@ pub struct RunStore {
     /// The rerun this process is making, kept off the run until it reaches its end
     /// ([`RunStore::commit_rerun`]): a rerun that is refused is not one the run went through.
     pending_rerun: Mutex<Option<engine_pin::RerunRecord>>,
+    /// The bytes of `run.json` as they were before this process opened the run, put back when the
+    /// store is dropped unless [`RunStore::keep_changes`] was called: a recheck that is refused
+    /// leaves the saved run as it found it.
+    restore_on_drop: Mutex<Option<Vec<u8>>>,
 }
 
 pub(crate) struct StoreState {
@@ -1138,6 +1152,7 @@ impl RunStore {
             session: Mutex::new(Some(session)),
             rerun_misses: None,
             pending_rerun: Mutex::new(None),
+            restore_on_drop: Mutex::new(None),
         });
         store.persist()?;
         Ok(store)
@@ -1186,6 +1201,7 @@ impl RunStore {
             session: Mutex::new(Some(session)),
             rerun_misses,
             pending_rerun: Mutex::new(None),
+            restore_on_drop: Mutex::new(None),
         });
         store.persist()?;
         Ok(store)
@@ -1219,6 +1235,41 @@ impl RunStore {
         self.lock_state().record.reruns.push(rerun.clone());
         let _ = self.persist();
         Some(rerun)
+    }
+
+    /// Put `bytes` (the run's `run.json` as it was before this process opened it) back when the
+    /// store is dropped, unless [`Self::keep_changes`] is called first.
+    pub fn restore_run_json_on_drop(&self, bytes: Vec<u8>) {
+        *self
+            .restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(bytes);
+    }
+
+    /// The work of this process on the run is to stay: nothing is put back when it is dropped.
+    pub fn keep_changes(&self) {
+        self.restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
+    /// The recheck of this saved run reached its end with the export written: put what ran again
+    /// on the run (see [`RunRecord::reruns`]) and its note. Called once, after the export.
+    pub fn commit_recheck(&self, rerun: engine_pin::RerunRecord) {
+        let redone = rerun.recheck.as_ref().map_or(0, |d| d.clone_parts.len());
+        let asked: usize = rerun
+            .recheck
+            .as_ref()
+            .map_or(0, |d| d.clone_parts.iter().map(|p| p.asked_again).sum());
+        self.add_note(&format!(
+            "Recheck of a saved run: the model work is build {}; the final checks and the export \
+             ran on build {}; {redone} clone check part(s) were redone, {asked} call(s) made.",
+            rerun.model_build.short_commit().unwrap_or_default(),
+            rerun.deterministic_build.short_commit().unwrap_or_default(),
+        ));
+        self.lock_state().record.reruns.push(rerun);
+        let _ = self.persist();
     }
 
     /// Where the run's stage checkpoints live: inside the run's own folder, so they go when the
@@ -1299,12 +1350,8 @@ impl RunStore {
 
     /// The secret the prompt tokens of this run are drawn from.
     pub fn nonce_seed(&self) -> [u8; crate::prompt_frame::NONCE_BYTES] {
-        let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
         let hex = self.lock_state().record.nonce_seed.clone();
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
-        }
-        out
+        decode_seed(&hex)
     }
 
     /// Record a note on the run (once: the same text is not added twice) and write the record.
@@ -1511,6 +1558,14 @@ impl Drop for RunStore {
     /// return) still records the end of its segment.
     fn drop(&mut self) {
         self.end_segment();
+        let saved = self
+            .restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(bytes) = saved {
+            let _ = write_atomic(&self.dir.join("run.json"), &bytes);
+        }
     }
 }
 
@@ -1824,38 +1879,7 @@ fn check_resume_as(check: &ResumeCheck<'_>, rerun: bool) -> Result<(), RunStoreE
         engine_pin::check_pin(record.pin.as_ref(), check.build, check.corpus_version)
             .map_err(RunStoreError::Refused)?;
     }
-    for saved in &record.repos {
-        let Some((_, now)) = check.trees.iter().find(|(name, _)| *name == saved.name) else {
-            return refuse(format!(
-                "repository {} was part of run {} but is not part of this one",
-                saved.name, record.run_id
-            ));
-        };
-        if now.commit != saved.commit {
-            return refuse(format!(
-                "repository {} is at commit {} now; run {} was made at commit {}. Check out \
-                 that commit to resume it, or start a new run",
-                saved.name,
-                now.commit.as_deref().map_or("(none)".to_string(), short),
-                record.run_id,
-                saved.commit.as_deref().map_or("(none)".to_string(), short),
-            ));
-        }
-        let unchanged = now.digest == saved.tree_at_start
-            || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
-        if !unchanged {
-            let which = if now.changed.is_empty() {
-                String::new()
-            } else {
-                format!(" (changed paths now: {})", named_changes(&now.changed))
-            };
-            return refuse(format!(
-                "repository {} has changes that were not there when run {} was made (an edited \
-                 or new file){which}; put the tree back as it was, or start a new run",
-                saved.name, record.run_id
-            ));
-        }
-    }
+    check_repo_trees(record, &check.trees)?;
     if record.models.scan_exclusions != check.models.scan_exclusions {
         return refuse(format!(
             "Excluded by agreement is not the list run {} was made with, and its stored replies \
@@ -1893,6 +1917,49 @@ fn check_resume_as(check: &ResumeCheck<'_>, rerun: bool) -> Result<(), RunStoreE
             "run {} is being worked on right now; wait for it to finish",
             record.run_id
         )));
+    }
+    Ok(())
+}
+
+/// Refuse when a repo folder is not as run `record` left it: another commit, or changes since the
+/// tree the run ended on. The one test of "the tree is unchanged" a resume, a rerun and a recheck
+/// share.
+pub fn check_repo_trees(
+    record: &RunRecord,
+    trees: &[(String, TreeState)],
+) -> Result<(), RunStoreError> {
+    let refuse = |why: String| Err(RunStoreError::Refused(why));
+    for saved in &record.repos {
+        let Some((_, now)) = trees.iter().find(|(name, _)| *name == saved.name) else {
+            return refuse(format!(
+                "repository {} was part of run {} but is not part of this one",
+                saved.name, record.run_id
+            ));
+        };
+        if now.commit != saved.commit {
+            return refuse(format!(
+                "repository {} is at commit {} now; run {} was made at commit {}. Check out \
+                 that commit to resume it, or start a new run",
+                saved.name,
+                now.commit.as_deref().map_or("(none)".to_string(), short),
+                record.run_id,
+                saved.commit.as_deref().map_or("(none)".to_string(), short),
+            ));
+        }
+        let unchanged = now.digest == saved.tree_at_start
+            || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
+        if !unchanged {
+            let which = if now.changed.is_empty() {
+                String::new()
+            } else {
+                format!(" (changed paths now: {})", named_changes(&now.changed))
+            };
+            return refuse(format!(
+                "repository {} has changes that were not there when run {} was made (an edited \
+                 or new file){which}; put the tree back as it was, or start a new run",
+                saved.name, record.run_id
+            ));
+        }
     }
     Ok(())
 }

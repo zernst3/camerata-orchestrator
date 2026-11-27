@@ -437,10 +437,16 @@ fn the_methodology_of_a_rerun_names_the_build_of_the_model_work_and_the_build_of
         "both builds are named: {note}"
     );
     assert!(
-        note.contains("model work in this inspection ran on"),
+        note.contains(
+            "The findings, fix text and reviews in this inspection come from Camerata build"
+        ),
         "{note}"
     );
-    assert!(note.contains("run again"), "{note}");
+    assert!(
+        note.contains("The final consistency checks were run again on Camerata build")
+            && note.contains("using those saved results unchanged and with no new model calls."),
+        "{note}"
+    );
     assert!(
         !note.contains('\u{2014}') && !note.contains('\u{2013}'),
         "no dashes: {note}"

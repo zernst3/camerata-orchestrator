@@ -2001,6 +2001,46 @@ impl ScanLedger {
         self.conventions = Some(block);
     }
 
+    /// Settle a clone-based rule's entry for `repo` after its clone check was redone on a saved
+    /// run (the recheck of an incomplete inspection): the rows the check emitted are added to the
+    /// entry's count, and when every candidate now has a verdict (`fully`) the rule is recorded
+    /// as having run, with the not-assessed disclosure taken off. Otherwise the entry keeps the
+    /// partial disclosure and `skip_reason` says what is left. Returns false when the ledger holds
+    /// no entry for the rule on that repo (nothing is changed then).
+    pub fn settle_clone_rule(
+        &mut self,
+        repo: &str,
+        rule_id: &str,
+        fully: bool,
+        skip_reason: Option<String>,
+        new_rows: usize,
+    ) -> bool {
+        let Some(entry) = self.rules.get_mut(&(rule_id.to_string(), repo.to_string())) else {
+            return false;
+        };
+        entry.findings_emitted += new_rows;
+        if fully {
+            entry.ran = true;
+            entry.skip_reason = None;
+            if entry
+                .coverage_note
+                .as_deref()
+                .is_some_and(|n| n == ADVISORY_PARTIAL_NOTE || n == ADVISORY_UNAVAILABLE_NOTE)
+            {
+                entry.coverage_note = None;
+            }
+        } else {
+            if !entry.ran {
+                entry.skip_reason = skip_reason;
+            }
+            entry.coverage_note = Some(ADVISORY_PARTIAL_NOTE.to_string());
+        }
+        self.advisory_partial_pending
+            .remove(&(repo.to_string(), rule_id.to_string()));
+        self.invalidate_merged();
+        true
+    }
+
     /// The convention accounting of the run.
     pub fn conventions(&self) -> Option<&ConventionsBlock> {
         self.conventions.as_ref()
@@ -2698,6 +2738,44 @@ pub fn record_addition_stage(
     ledger.record_stage(stage, rows_in, rows_out, acc);
 }
 
+/// The start of every pipeline integrity disclosure's pass name: the failed passes the final
+/// checks make, which a recheck of a saved run replaces with the current build's result of the
+/// same checks.
+pub const INTEGRITY_PASS_PREFIX: &str = "pipeline integrity (";
+
+/// The pass name of a pipeline integrity disclosure about `what` (a stage name, or `convention
+/// accounting`).
+pub fn integrity_pass_name(what: &str) -> String {
+    format!("{INTEGRITY_PASS_PREFIX}{what})")
+}
+
+/// The disclosure for finder rows the convention accounting lost (`lost`: rule id, path, line of
+/// each), or `None` when none was. One producer for the scan and for the recheck of a saved run, so
+/// the two can never word the same failure differently.
+pub fn convention_accounting_failure(
+    repo_label: &str,
+    lost: &[(String, String, usize)],
+) -> Option<crate::ai_audit::FailedPass> {
+    let first = lost.first()?;
+    Some(crate::ai_audit::FailedPass {
+        repo: repo_label.to_string(),
+        pass: integrity_pass_name("convention accounting"),
+        reason: format!(
+            "{} finder row(s) counted for rules with options are in neither the final rows nor \
+             the rows set aside (first: {} at {}:{})",
+            lost.len(),
+            first.0,
+            first.1,
+            first.2,
+        ),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    })
+}
+
 /// A runtime disclosure for one stage's integrity gap, or `None` when the stage reconciled
 /// cleanly. Rides the EXISTING `FailedPass` mechanism (`crate::ai_audit::FailedPass`) into
 /// the report's methodology/executive-summary disclosure list — never a refused export, never
@@ -2711,7 +2789,7 @@ pub fn stage_disclosure(
     }
     Some(crate::ai_audit::FailedPass {
         repo: repo_label.to_string(),
-        pass: format!("pipeline integrity ({})", stage.stage),
+        pass: integrity_pass_name(&stage.stage),
         reason: format!(
             "{} of {} row(s) entering this stage have no recorded disposition (rows_out={}, \
              merged={}, held={}, informational={}, deduped={})",

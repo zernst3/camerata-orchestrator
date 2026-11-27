@@ -183,7 +183,7 @@ pub fn scrub_concept(raw: &str) -> String {
 }
 
 /// The result of reading one response.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedBatch {
     /// A definite reading per asked-about id. An id answered twice with different words is
     /// recorded as `unsure`.
