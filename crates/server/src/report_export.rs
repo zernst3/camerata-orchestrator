@@ -2028,6 +2028,7 @@ pub fn build_report_json_with_counts(
         audited_refs,
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
+        model_stages: model_stages(report),
         model_backend: opts
             .model
             .as_ref()
@@ -2921,6 +2922,8 @@ pub(crate) mod fix_text;
 pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 
 pub mod decisions_file;
+pub mod model_stages;
+pub use model_stages::{model_stages, ModelStageJson, ModelStagesJson};
 pub mod overlay;
 pub mod prose_checks;
 pub mod row_facts;

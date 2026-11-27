@@ -396,3 +396,47 @@ async fn the_telemetry_records_the_fix_model_per_call_and_the_give_up_rate() {
         serde_json::from_str(&serde_json::to_string(&report.ledger).unwrap()).unwrap();
     assert_eq!(back.stage_telemetry().unwrap().fix_outcome, Some(outcome));
 }
+
+/// #584: the scan writes the client-facing record of which model each stage ran on, copied from
+/// the same calls the telemetry counts, and the client report reads the fix model from it.
+#[tokio::test]
+async fn the_scan_records_each_stage_s_model_for_the_client_report() {
+    let (calls, report) = fix_calls_for(Some("scan-model"), None, RunControls::default()).await;
+    let telemetry = report.ledger.stage_telemetry().expect("a model ran");
+    let recorded = report
+        .ledger
+        .model_stages()
+        .expect("the scan records its model stages");
+    assert_eq!(
+        recorded,
+        &camerata_server::stage_models::RecordedStageModels::from_telemetry(telemetry)
+    );
+    let fix = recorded
+        .stage(camerata_server::stage_telemetry::Stage::FixGeneration)
+        .expect("the fix stage is recorded");
+    assert_eq!(
+        fix.models.get(FIX_STAGE_HAIKU_MODEL).copied(),
+        Some(calls.len() as u64)
+    );
+    let listed = camerata_server::report_export::model_stages(&report);
+    let fix_line = listed
+        .stages
+        .iter()
+        .find(|s| s.stage == "fix_text")
+        .map(|s| s.line.clone());
+    // The scripted model never returns a fix, so every finding sent to it ends on the standard fix.
+    let fell_back = telemetry
+        .fix_outcome
+        .expect("the fix stage reported")
+        .gave_up;
+    let tail = match fell_back {
+        0 => String::new(),
+        1 => " 1 finding uses the rule's standard fix.".to_string(),
+        n => format!(" {n} findings use the rule's standard fix."),
+    };
+    assert_eq!(
+        fix_line,
+        Some(format!("Fix text: {FIX_STAGE_HAIKU_MODEL}, live.{tail}")),
+        "{listed:?}"
+    );
+}

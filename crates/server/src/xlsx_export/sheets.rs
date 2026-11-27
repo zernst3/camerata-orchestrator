@@ -1743,6 +1743,9 @@ pub(super) struct StartFacts<'a> {
     pub totals: &'a crate::report_export::ReportCounts,
     /// The one line that says what the rules checked came to.
     pub coverage_summary: String,
+    /// Every model stage of the run and its model: the same list the PDF data and
+    /// `json/inspection.json` carry ([`crate::report_export::model_stages()`]).
+    pub model_stages: &'a crate::report_export::ModelStagesJson,
     /// On an internal workbook: the rows flagged as possible false positives and how many of
     /// them are decided. `None` on a client workbook, which never mentions the flag.
     pub possible_false_positives: Option<(usize, usize)>,
@@ -2016,6 +2019,18 @@ pub(super) fn write_start_here(
         crate::report_export::generated_at_label(&report.provenance),
     )?;
     r += 1;
+    // #584: each model stage and the model it ran on, the PDF's list, one row a stage. The note
+    // (no model used, or an older run) sits beside the heading.
+    ws.write_text(r, 0, v::P_MODELS_BY_STAGE)?;
+    if let Some(note) = &facts.model_stages.note {
+        ws.write_text(r, 1, note)?;
+    }
+    r += 1;
+    for stage in &facts.model_stages.stages {
+        ws.write_text(r, 0, &stage.label)?;
+        ws.write_text(r, 1, &stage.detail)?;
+        r += 1;
+    }
     ws.write_text(r, 0, v::P_WHAT_WE_CHECKED)?;
     ws.write_text(r, 1, &facts.coverage_summary)?;
     r += 1;

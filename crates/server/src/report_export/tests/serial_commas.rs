@@ -225,8 +225,9 @@ fn authored_pdf_prose_has_no_second_person() {
 }
 
 /// Every source file whose string literals reach a client (the PDF, the workbook, the README).
-fn prose_sources() -> [(&'static str, &'static str, bool); 23] {
+fn prose_sources() -> [(&'static str, &'static str, bool); 24] {
     [
+        ("model_stages.rs", include_str!("../model_stages.rs"), false),
         ("scan.rs", include_str!("../../routes/scan.rs"), false),
         ("ownership.rs", include_str!("../../ownership.rs"), false),
         ("scan_tools.rs", include_str!("../../scan_tools.rs"), false),

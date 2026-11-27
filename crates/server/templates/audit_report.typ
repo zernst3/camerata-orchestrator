@@ -776,10 +776,19 @@
 
 #d.methodology.citation_note
 
-// The engine build, the Camerata version, the model backend, the rule library hash and the
-// calibration model are in manifest.json, not
-// here: a reader of this report has no use for them.
-Inspection model: #or_na(d.cover.audit_model).
+// The engine build, the Camerata version, the model backend and the rule library hash are in
+// manifest.json, not here: a reader of this report has no use for them.
+// #584: every model stage the run used and the model it ran on, from the run's own record
+// (`report_export::model_stages`). The workbook's Start here prints the same list.
+#if d.cover.model_stages.stages.len() > 0 [
+  Inspection models by stage:
+  #for stage in d.cover.model_stages.stages [
+    - #stage.line
+  ]
+]
+#if "note" in d.cover.model_stages [
+  #d.cover.model_stages.note
+]
 
 // The reconciling line is built from the counts object (`counts_prose::methodology_line`); it
 // says a human reviewed the report only when the review state is "reviewed".
