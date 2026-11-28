@@ -599,3 +599,28 @@ fn the_disable_variables_take_their_tools_out_of_the_tool_set() {
         vec![ScanTool::Ruff]
     );
 }
+
+/// The folder the tests that start the `camerata` binary hand it: every tool reads as installed
+/// under the REAL pins, so the binary, offline, finds them all ready.
+#[tokio::test]
+async fn seeded_fakes_read_as_installed_under_the_real_pins_and_offline_nothing_is_fetched() {
+    let dir = tempfile::tempdir().unwrap();
+    super::fixtures::seed_fakes_under_the_real_pins(dir.path()).await;
+    let env = ToolEnv::new(
+        dir.path(),
+        Platform::current().or(Some(Platform::LinuxX64)),
+        Arc::new(OfflineSource),
+    );
+    let required = needs(&[ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep], true);
+    let report = provision_tool_set(&env, &required, true)
+        .await
+        .expect("offline, everything is already there");
+    assert!(
+        report
+            .entries
+            .iter()
+            .all(|e| e.state == ComponentState::Ready),
+        "{}",
+        report.render()
+    );
+}

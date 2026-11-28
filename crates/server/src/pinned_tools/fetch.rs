@@ -174,7 +174,7 @@ pub const INSTALL_MARKER: &str = ".camerata-pin";
 
 /// The marker text for `pin`: name, version and checksum, so an install made from another pin
 /// (an older release, or another platform's file) never reads as this one.
-fn marker_text(artifact: &ArtifactPins, pin: &PlatformPin) -> String {
+pub(crate) fn marker_text(artifact: &ArtifactPins, pin: &PlatformPin) -> String {
     format!(
         "{} {} {} {}\n",
         artifact.name,

@@ -234,6 +234,15 @@ impl FakeTools {
         Self::with_archives(platform, &[])
     }
 
+    /// Fakes whose ruff reports nothing: every preview still RUNS (the ledger records it as run),
+    /// for a test such as the rehearsal whose expected findings must not change.
+    pub fn quiet() -> Self {
+        Self::with_tool_script(
+            Artifact::Ruff,
+            "#!/bin/sh\necho \"$PATH\" >> \"$0.runs\"\nif [ \"$1\" = \"--version\" ]; then echo \"ruff 0.17.5\"; exit 0; fi\necho '[]'\n",
+        )
+    }
+
     /// Fakes where osv-scanner is `script` (a test that needs it to report something).
     pub fn with_osv_script(script: &str) -> Self {
         Self::with_tool_script(Artifact::OsvScanner, script)
@@ -322,4 +331,59 @@ impl Default for FakeTools {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Seed `tooling` with fake tools that read as installed under the REAL pins, so a `camerata`
+/// binary started by a test with `CAMERATA_TOOLING_DIR=<tooling>` and `CAMERATA_OFFLINE=1`
+/// finds every tool ready and downloads nothing. Each downloaded artifact is written as its fake
+/// at the real pin's paths with the real pin's marker; eslint and semgrep are then installed by
+/// the fake Node.js and the fake CPython, exactly as the product installs them. Nothing is
+/// fetched (the source serves nothing).
+pub async fn seed_fakes_under_the_real_pins(tooling: &Path) {
+    let platform = Platform::current().unwrap_or(Platform::LinuxX64);
+    for artifact in pins::ALL_ARTIFACTS {
+        let real = pins::pins(artifact);
+        let pin = real
+            .for_platform(platform)
+            .expect("the real pins cover every platform");
+        let dir = super::fetch::install_dir(tooling, real);
+        let bytes = fake_archive(artifact, pin, real.kind);
+        std::fs::create_dir_all(&dir).expect("the install folder");
+        match real.kind {
+            ArchiveKind::TarGz => {
+                let gz = flate2::read::GzDecoder::new(bytes.as_slice());
+                let mut archive = tar::Archive::new(gz);
+                archive.set_preserve_permissions(true);
+                archive.unpack(&dir).expect("unpack the fake");
+            }
+            ArchiveKind::Binary => {
+                use std::os::unix::fs::PermissionsExt;
+                let entry = dir.join(pin.files[0]);
+                std::fs::write(&entry, &bytes).expect("write the fake");
+                std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755))
+                    .expect("make the fake executable");
+            }
+        }
+        std::fs::write(
+            dir.join(super::fetch::INSTALL_MARKER),
+            super::fetch::marker_text(real, pin),
+        )
+        .expect("the marker");
+    }
+    let source = Arc::new(FakeSource::default());
+    let env = ToolEnv::new(tooling, Some(platform), source.clone());
+    let all = super::RequiredTools {
+        scan_tools: [
+            crate::scan_tools::ScanTool::Ruff,
+            crate::scan_tools::ScanTool::Eslint,
+            crate::scan_tools::ScanTool::Semgrep,
+        ]
+        .into_iter()
+        .collect(),
+        dep_audit: true,
+    };
+    super::provision_tool_set(&env, &all, true)
+        .await
+        .unwrap_or_else(|refusal| panic!("seeding the fake tools: {refusal}"));
+    assert!(source.fetched().is_empty(), "seeding downloads nothing");
 }

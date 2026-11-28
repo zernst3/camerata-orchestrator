@@ -101,6 +101,9 @@ fn with_the_seam_a_client_inspection_sees_only_the_env_key() {
         .arg("--export")
         .arg(dir.path().join("out.zip"))
         .env(SEAM, "1")
+        // No test downloads (#587).
+        .env("CAMERATA_OFFLINE", "1")
+        .env("CAMERATA_TOOLING_DIR", dir.path().join("tooling"))
         .env_remove("ANTHROPIC_API_KEY")
         .env("CAMERATA_STATE_DIR", dir.path().join("state"))
         .output()

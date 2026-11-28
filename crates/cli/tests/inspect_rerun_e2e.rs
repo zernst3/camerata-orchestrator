@@ -1077,3 +1077,82 @@ fn a_recheck_that_confirms_clone_rows_passes_the_release_gate_with_zero_calls() 
         );
     })
 }
+
+/// The saved-run recheck runs no tool preview, so it never provisions or downloads a tool (#587):
+/// with a fixture source that fails every fetch handed in, an empty tooling folder named by
+/// `CAMERATA_TOOLING_DIR` and Camerata offline, nothing is fetched and nothing is installed,
+/// whatever the recheck's outcome.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_recheck_never_provisions_or_downloads_a_tool() {
+    on_a_big_stack(async {
+        if !typst_available("a_recheck_never_provisions_or_downloads_a_tool") {
+            return;
+        }
+        let saved = saved_run_with_a_bookkeeping_defect().await;
+        let empty = tempfile::tempdir().unwrap();
+        let _tooling = camerata_test_env::EnvGuard::set("CAMERATA_TOOLING_DIR", empty.path());
+        let _offline = camerata_test_env::EnvGuard::set("CAMERATA_OFFLINE", "1");
+        let fakes = camerata_server::pinned_tools::fixtures::FakeTools::new();
+        fakes
+            .source
+            .fail_everything("the recheck must not fetch (fixture)");
+        let llm = Scripted {
+            calls: AtomicUsize::new(0),
+            fixes: false,
+        };
+        let export = saved.out.path().join("recheck-tools.zip");
+        let _ = Box::pin(camerata::inspect_cmd::recheck_saved_inspect(
+            &saved.run_id,
+            &[saved.repo.path().to_path_buf()],
+            Some(export),
+            None,
+            None,
+            true,
+            &camerata_server::credentials::MemoryCredentialStore::new(),
+            Seams {
+                resume: None,
+                llm: Some(&llm),
+                preflight_sink: &|_| {},
+                tools: Some(&fakes.env),
+            },
+        ))
+        .await;
+        assert!(fakes.source.fetched().is_empty(), "nothing was fetched");
+        assert!(!fakes.tooling().exists(), "nothing was installed");
+        assert_eq!(
+            std::fs::read_dir(empty.path()).unwrap().count(),
+            0,
+            "the tooling folder stayed empty"
+        );
+    })
+}
+
+/// The same, structurally, on every machine (the behavioural test above needs Typst): the
+/// recheck's code names no provisioning or tool-running function.
+#[test]
+fn the_recheck_code_names_no_provisioning_or_tool_run() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let files = [
+        root.join("cli/src/inspect_cmd/recheck.rs"),
+        root.join("server/src/run_store/recheck.rs"),
+    ];
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for forbidden in [
+            "provision_run_tools",
+            "provision_tool_set",
+            "merge_scan_preview",
+            "run_scan_tools",
+            "run_dep_audit",
+            "pinned_tools",
+            "ensure_eslint_with",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{} names `{forbidden}`: the recheck must not run or provision a tool",
+                file.display()
+            );
+        }
+    }
+}

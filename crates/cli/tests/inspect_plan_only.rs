@@ -274,6 +274,9 @@ fn the_binary_exits_zero_with_figures_makes_no_connection_and_refuses_under_a_sm
         .env("CAMERATA_STATE_DIR", state.path())
         .env("CAMERATA_NO_KEYCHAIN", "1")
         .env("CAMERATA_DISABLE_DEP_AUDIT", "1")
+        // A plan never downloads; offline it could not even try (#587).
+        .env("CAMERATA_OFFLINE", "1")
+        .env("CAMERATA_TOOLING_DIR", state.path().join("tooling"))
         .env("ANTHROPIC_API_KEY", "dummy-key-not-a-real-credential")
         .env_remove("NO_PROXY")
         .env_remove("no_proxy");

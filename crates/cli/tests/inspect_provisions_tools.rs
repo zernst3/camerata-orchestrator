@@ -332,3 +332,61 @@ async fn plan_only_says_a_client_run_would_not_start_when_a_tool_cannot_be_provi
     .await;
     assert!(internal.is_ok(), "{internal:?}");
 }
+
+/// The real `camerata` binary, offline (`CAMERATA_OFFLINE=1`) and pointed at a tooling folder
+/// seeded with fake tools under the real pins (`CAMERATA_TOOLING_DIR`), lists every tool as ready:
+/// the setup every test that starts the binary uses, so none of them can download.
+#[test]
+fn the_binary_offline_over_a_seeded_tooling_folder_lists_every_tool_ready() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("api");
+    std::fs::create_dir_all(&repo).unwrap();
+    stage_python_repo(&repo);
+    let tooling = root.path().join("tooling");
+    {
+        let tooling = tooling.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(
+                camerata_server::pinned_tools::fixtures::seed_fakes_under_the_real_pins(&tooling),
+            );
+        })
+        .join()
+        .unwrap();
+    }
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_camerata"))
+        .args([
+            "inspect",
+            "--plan-only",
+            "--internal",
+            "--client",
+            "Acme Widgets",
+            "--repo-name",
+            "acme/api",
+            "--repo",
+        ])
+        .arg(&repo)
+        .arg("--export")
+        .arg(root.path().join("inspect.zip"))
+        .env("CAMERATA_STATE_DIR", root.path().join("state"))
+        .env("CAMERATA_NO_KEYCHAIN", "1")
+        .env("CAMERATA_OFFLINE", "1")
+        .env("CAMERATA_TOOLING_DIR", &tooling)
+        .env("ANTHROPIC_API_KEY", "dummy-key-not-a-real-credential")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("ruff 0.17.5 (for ruff): ready"), "{stdout}");
+    assert!(
+        stdout.contains("osv-scanner v1.9.2 (for osv-scanner): ready"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("tooling folder: {}", tooling.display())),
+        "{stdout}"
+    );
+}

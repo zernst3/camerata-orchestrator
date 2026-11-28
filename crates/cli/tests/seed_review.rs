@@ -13,6 +13,8 @@ fn camerata(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_camerata"))
         .current_dir(cwd)
         .env("CAMERATA_NO_KEYCHAIN", "1")
+        // No test downloads (#587).
+        .env("CAMERATA_OFFLINE", "1")
         .args(args)
         .output()
         .expect("the binary runs")

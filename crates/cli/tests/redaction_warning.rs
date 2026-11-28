@@ -17,6 +17,8 @@ fn run_in(cwd: &Path, env: Option<&str>) -> Output {
         .arg("release-gate")
         .arg(cwd.join("missing.zip"))
         .env(camerata_server::credentials::NO_KEYCHAIN_ENV, "1")
+        // No test downloads (#587).
+        .env(camerata_server::pinned_tools::OFFLINE_ENV, "1")
         .env_remove(VAR);
     if let Some(value) = env {
         cmd.env(VAR, value);
