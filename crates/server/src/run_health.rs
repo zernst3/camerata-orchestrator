@@ -137,6 +137,9 @@ pub struct RunHealth {
     trigger: Mutex<Option<OutageTrigger>>,
     /// How many model calls have succeeded in all, never reset ([`Self::successes`]).
     successes: std::sync::atomic::AtomicU64,
+    /// When a real model call last succeeded (wall clock, compared with the start of a call whose
+    /// network wait ran out: [`Self::note_failed_error`]).
+    last_success: Mutex<Option<std::time::Instant>>,
     clock: Clock,
 }
 
@@ -167,6 +170,7 @@ impl RunHealth {
             stopped: AtomicBool::new(false),
             trigger: Mutex::new(None),
             successes: std::sync::atomic::AtomicU64::new(0),
+            last_success: Mutex::new(None),
             clock,
         }
     }
@@ -190,7 +194,20 @@ impl RunHealth {
     /// A model call succeeded: the provider is reachable, so the streak starts over.
     pub fn note_success(&self) {
         *self.streak_lock() = Streak::default();
+        *self
+            .last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
         self.successes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Whether a real model call succeeded at or after `since` (a reply replayed from the run's
+    /// journal is never one: it is not counted here).
+    fn succeeded_since(&self, since: std::time::Instant) -> bool {
+        self.last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|at| at >= since)
     }
 
     /// How many model calls have succeeded so far. A call that waits out a rate limit reads it
@@ -246,7 +263,14 @@ impl RunHealth {
     /// span has been waited out already, many times over; any other error goes to
     /// [`Self::note_failure`] with its class.
     pub fn note_failed_error(&self, error: &anyhow::Error) {
-        if camerata_llm::network_wait::is_network_wait_exhausted(error) {
+        if let Some(tag) = camerata_llm::network_wait::network_wait_exhausted_of(error) {
+            // This record is the one source of truth for "did anything get through": a real call
+            // that succeeded since this one started means the network is up and only this
+            // request is failing, so it is one step of the usual streak.
+            if self.succeeded_since(tag.started) {
+                self.note_failure(FailureClass::Transport, &error.to_string());
+                return;
+            }
             self.trip(
                 FailureClass::Transport,
                 format!(

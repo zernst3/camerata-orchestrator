@@ -15,11 +15,13 @@
 //!   failure ends the run at once, so a waiting call must not send again after it.
 //! * A rate limit, a content failure and anything else come back unchanged: their own runners
 //!   pace or record them.
-//! * When the wait runs out and no call through this wait got an answer from the provider since
-//!   this call started, the error is tagged [`NetworkWaitExhausted`], and the run's outage stop
-//!   trips on it at once (the server's `RunHealth`). When another call did get an answer, the
-//!   network is up and this request alone is failing: the error comes back untagged and counts
-//!   toward the usual outage streak.
+//! * When the wait runs out, the error is tagged [`NetworkWaitExhausted`] with the instant the
+//!   call started. The run's health record (the server's `RunHealth`, the one count of real calls
+//!   that succeeded: a reply replayed from the run's journal is not one) decides: no real call
+//!   succeeded since that instant, so the network is down for the whole run and the outage stop
+//!   trips at once; one did, so this request alone is failing and it counts toward the usual
+//!   outage streak. This wait keeps no count of its own: a replay answers through it without the
+//!   network.
 //! * [`NetworkWait::stop`] ends every wait at its next step (an auth failure seen here, or an
 //!   operator stop), so a stopped run never sends again from a waiting call.
 //!
@@ -27,8 +29,8 @@
 //! virtual clock with `set_process_sleeper` and an hour of outage passes in milliseconds.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::failure::{classify_error, FailureClass};
 use crate::retry::{ProcessSleeper, Sleeper};
@@ -56,13 +58,16 @@ const _: () = {
     assert!(sum == NETWORK_WAIT_TOTAL.as_secs());
 };
 
-/// The tag on an error whose request waited [`NETWORK_WAIT_TOTAL`] for the network while no other
-/// call got an answer. The outage stop trips on it at once. It is anyhow context over the last
-/// transport error, so the typed failure inside (its class, its attempts) still reads through it.
+/// The tag on an error whose request waited [`NETWORK_WAIT_TOTAL`] for the network and still
+/// failed. The run's health record trips the outage stop on it unless a real call succeeded
+/// since [`Self::started`]. It is anyhow context over the last transport error, so the typed
+/// failure inside (its class, its attempts) still reads through it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkWaitExhausted {
     /// How long the request waited, in all.
     pub waited: Duration,
+    /// When the call started (its first send).
+    pub started: Instant,
 }
 
 impl std::fmt::Display for NetworkWaitExhausted {
@@ -77,15 +82,17 @@ impl std::fmt::Display for NetworkWaitExhausted {
 
 /// True when `e` carries the [`NetworkWaitExhausted`] tag anywhere in its chain.
 pub fn is_network_wait_exhausted(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<NetworkWaitExhausted>().is_some()
+    network_wait_exhausted_of(e).is_some()
+}
+
+/// The [`NetworkWaitExhausted`] tag in `e`'s chain, if any.
+pub fn network_wait_exhausted_of(e: &anyhow::Error) -> Option<&NetworkWaitExhausted> {
+    e.downcast_ref::<NetworkWaitExhausted>()
 }
 
 /// The run's shared wait: one per run, handed to every seam that sends a request.
 #[derive(Debug, Default)]
 pub struct NetworkWait {
-    /// How many sends got an answer from the provider (a reply, or any failure that is not a
-    /// transport failure: the provider was reached).
-    answers: AtomicU64,
     stopped: AtomicBool,
 }
 
@@ -105,11 +112,6 @@ impl NetworkWait {
         self.stopped.load(Ordering::SeqCst)
     }
 
-    /// How many sends through this wait got an answer from the provider.
-    pub fn answers(&self) -> u64 {
-        self.answers.load(Ordering::SeqCst)
-    }
-
     /// Run `attempt` (one send of the same request), waiting for the network as the module docs
     /// say. `may_retry` is asked after a transport failure, before any wait: `false` returns the
     /// error at once (a streamed reply that already delivered text, which a second send would
@@ -123,38 +125,28 @@ impl NetworkWait {
         F: FnMut() -> Fut + Send,
         Fut: Future<Output = anyhow::Result<T>> + Send,
     {
-        let answers_at_start = self.answers();
+        let started = Instant::now();
         let mut waited = Duration::ZERO;
         let mut step = 0usize;
         loop {
             let e = match attempt().await {
-                Ok(v) => {
-                    self.answers.fetch_add(1, Ordering::SeqCst);
-                    return Ok(v);
-                }
+                Ok(v) => return Ok(v),
                 Err(e) => e,
             };
             match classify_error(&e) {
                 FailureClass::Transport => {}
                 FailureClass::AuthOrBilling => {
-                    // The provider answered, and nothing a wait does fixes the key or the account.
-                    self.answers.fetch_add(1, Ordering::SeqCst);
+                    // Nothing a wait does fixes the key or the account.
                     self.stop();
                     return Err(e);
                 }
-                _ => {
-                    self.answers.fetch_add(1, Ordering::SeqCst);
-                    return Err(e);
-                }
+                _ => return Err(e),
             }
             if self.is_stopped() || !may_retry() {
                 return Err(e);
             }
             let Some(&delay) = NETWORK_WAIT_STEPS.get(step) else {
-                if self.answers() == answers_at_start {
-                    return Err(e.context(NetworkWaitExhausted { waited }));
-                }
-                return Err(e);
+                return Err(e.context(NetworkWaitExhausted { waited, started }));
             };
             step += 1;
             eprintln!(
@@ -178,6 +170,7 @@ impl NetworkWait {
 mod tests {
     use super::*;
     use crate::failure::LlmCallFailure;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
 
     /// A sleeper that records each wait and returns at once.
@@ -267,21 +260,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_answer_to_another_call_meanwhile_leaves_the_error_untagged() {
+    async fn an_exhausted_wait_is_tagged_with_when_the_call_started() {
+        // This wait keeps no count of answers (a replay answers through it without the network):
+        // every exhausted wait is tagged with its start, and the run's health record decides.
         let _g = SERIAL.lock().await;
-        let wait = Arc::new(NetworkWait::new());
-        let w = wait.clone();
-        let (out, _) = with_recorder(wait.run(
-            move || {
-                // Another call through the same wait gets an answer while this one waits.
-                w.answers.fetch_add(1, Ordering::SeqCst);
-                async { Err::<(), _>(transport()) }
-            },
-            &|| true,
-        ))
-        .await;
+        let wait = NetworkWait::new();
+        let before = Instant::now();
+        let (out, _) =
+            with_recorder(wait.run(|| async { Err::<(), _>(transport()) }, &|| true)).await;
+        let after = Instant::now();
         let e = out.unwrap_err();
-        assert!(!is_network_wait_exhausted(&e), "{e:#}");
+        let tag = network_wait_exhausted_of(&e).expect("an exhausted wait is tagged");
+        assert!(tag.started >= before && tag.started <= after, "{tag:?}");
+        assert_eq!(tag.waited, NETWORK_WAIT_TOTAL);
     }
 
     #[tokio::test]

@@ -403,3 +403,84 @@ async fn a_submit_refused_before_any_connection_waits_and_is_sent_again() {
     assert_eq!(waits.waits(), NETWORK_WAIT_STEPS[..2].to_vec());
     assert_eq!(control.live_batches(), vec![id]);
 }
+
+/// Answers a prompt that starts with "stored" at once (a reply the run's journal replays, which
+/// proves nothing about the network), and fails every other send in transport.
+#[derive(Default)]
+struct DownExceptReplays {
+    sends: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for DownExceptReplays {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        if req.prompt.starts_with("stored") {
+            return Ok(reply("{}"));
+        }
+        Err(transport())
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_replayed_reply_during_the_wait_does_not_keep_a_dead_network_running() {
+    // One source of truth (#582 review): only a real call that succeeded (the run's health
+    // record) proves the network is up. A reply the journal replays answers through the seam
+    // without the network, so it must not keep the run going while every real call fails.
+    let _waits = InstantWaits::install();
+    let llm = DownExceptReplays::default();
+    let seam = wrap(&llm, control());
+    let (failed, replayed) = tokio::join!(
+        seam.complete(LlmRequest::new("a question for the provider")),
+        async {
+            tokio::task::yield_now().await;
+            seam.complete(LlmRequest::new("stored reply")).await
+        }
+    );
+    replayed.expect("the replay answered");
+    let e = failed.expect_err("the network never came back");
+    let meter = UsageMeter::default();
+    meter.record_failed(Stage::Calibration, &e);
+    assert!(
+        meter.outage_stopped(),
+        "no real call succeeded, so the exhausted wait stops the run: {e:#}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn an_exhausted_wait_does_not_stop_a_run_whose_other_calls_succeeded_meanwhile() {
+    // One request with a persistent failure (a 5xx on that request alone) waits the whole wait,
+    // while other real calls of the run succeed: the network is up, the run goes on.
+    let _waits = InstantWaits::install();
+    let flaky = Flaky {
+        down: usize::MAX,
+        ..Flaky::default()
+    };
+    let meter = UsageMeter::default();
+    let seam = wrap(&flaky, control());
+    let (failed, ()) = tokio::join!(seam.complete(LlmRequest::new("q")), async {
+        tokio::task::yield_now().await;
+        // Another piece's real call got a reply from the provider.
+        meter.health().note_success();
+    });
+    let e = failed.expect_err("this request never got through");
+    meter.record_failed(Stage::Calibration, &e);
+    assert!(
+        !meter.outage_stopped(),
+        "a real call succeeded during the wait: the run goes on"
+    );
+}
