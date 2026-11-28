@@ -33,10 +33,8 @@ fn the_platform_is_chosen_from_the_os_and_architecture() {
         Platform::from_os_arch("macos", "aarch64"),
         Some(Platform::MacArm64)
     );
-    assert_eq!(
-        Platform::from_os_arch("macos", "x86_64"),
-        Some(Platform::MacX64)
-    );
+    // Intel Macs are not supported (see `there_are_no_intel_mac_pins`).
+    assert_eq!(Platform::from_os_arch("macos", "x86_64"), None);
     assert_eq!(
         Platform::from_os_arch("linux", "x86_64"),
         Some(Platform::LinuxX64)
@@ -50,20 +48,23 @@ fn the_platform_is_chosen_from_the_os_and_architecture() {
 }
 
 #[test]
-fn both_mac_architectures_pick_their_own_files() {
+fn the_only_mac_pin_is_apple_silicon_and_linux_pins_both_architectures() {
     for artifact in ALL_ARTIFACTS {
         let p = pins::pins(artifact);
-        let arm = p.for_platform(Platform::MacArm64).expect("arm64 pin");
-        let intel = p.for_platform(Platform::MacX64).expect("x86_64 pin");
-        assert_ne!(arm.url, intel.url, "{}", p.name);
-        assert_ne!(arm.sha256, intel.sha256, "{}", p.name);
-        let (arm_word, intel_word) = match artifact {
-            Artifact::Node => ("darwin-arm64", "darwin-x64"),
-            Artifact::OsvScanner => ("darwin_arm64", "darwin_amd64"),
-            _ => ("aarch64-apple-darwin", "x86_64-apple-darwin"),
+        let mac = p.for_platform(Platform::MacArm64).expect("arm64 pin");
+        let mac_word = match artifact {
+            Artifact::Node => "darwin-arm64",
+            Artifact::OsvScanner => "darwin_arm64",
+            _ => "aarch64-apple-darwin",
         };
-        assert!(arm.url.contains(arm_word), "{}", arm.url);
-        assert!(intel.url.contains(intel_word), "{}", intel.url);
+        assert!(mac.url.contains(mac_word), "{}", mac.url);
+        let x64 = p
+            .for_platform(Platform::LinuxX64)
+            .expect("linux x86_64 pin");
+        let arm = p
+            .for_platform(Platform::LinuxArm64)
+            .expect("linux arm64 pin");
+        assert_ne!(x64.sha256, arm.sha256, "{}", p.name);
     }
 }
 
@@ -140,23 +141,6 @@ fn the_semgrep_requirements_pin_every_package_by_hash() {
         );
     }
     assert!(packages > 10, "{packages}");
-}
-
-#[test]
-fn semgrep_cannot_be_provisioned_on_an_intel_mac() {
-    let tools = FakeTools::for_platform(Platform::MacX64);
-    let report = tool_set_report(&tools.env, &needs(&[ScanTool::Semgrep], false));
-    match state_of(&report, Component::SemgrepPackages) {
-        ComponentState::CannotProvision(why) => {
-            assert!(why.contains("macOS x86_64"), "{why}")
-        }
-        other => panic!("{other:?}"),
-    }
-    // Python itself is pinned for Intel Macs; only semgrep publishes no build.
-    assert_eq!(
-        state_of(&report, Component::Python),
-        ComponentState::WillInstall
-    );
 }
 
 #[test]
@@ -411,7 +395,7 @@ async fn a_tool_with_no_build_for_this_machine_refuses_a_client_run_only() {
     assert!(
         refusal
             .reason
-            .contains("Camerata provisions its tools on macOS and Linux"),
+            .contains("Camerata provisions its tools on Apple silicon Macs and on Linux"),
         "{}",
         refusal.reason
     );
@@ -623,4 +607,41 @@ async fn seeded_fakes_read_as_installed_under_the_real_pins_and_offline_nothing_
         "{}",
         report.render()
     );
+}
+
+// ── owner ruling: Intel Macs are not supported ───────────────────────────────────────────────
+
+#[test]
+fn an_intel_mac_is_refused_with_one_plain_line_and_every_other_machine_is_not() {
+    assert_eq!(
+        platform::machine_refusal("macos", "x86_64"),
+        Some(platform::INTEL_MAC_REFUSAL)
+    );
+    assert!(!platform::INTEL_MAC_REFUSAL.contains('\n'));
+    for (os, arch) in [
+        ("macos", "aarch64"),
+        ("linux", "x86_64"),
+        ("linux", "aarch64"),
+    ] {
+        assert_eq!(platform::machine_refusal(os, arch), None, "{os} {arch}");
+    }
+    let env = ToolEnv::for_machine(
+        "macos",
+        "x86_64",
+        "/home/acme/tooling",
+        Arc::new(OfflineSource),
+    );
+    assert_eq!(env.machine_refusal(), Some(platform::INTEL_MAC_REFUSAL));
+}
+
+#[test]
+fn there_are_no_intel_mac_pins() {
+    assert_eq!(Platform::from_os_arch("macos", "x86_64"), None);
+    for artifact in ALL_ARTIFACTS {
+        for pin in pins::pins(artifact).pins {
+            for intel in ["x86_64-apple-darwin", "darwin-x64", "darwin_amd64"] {
+                assert!(!pin.url.contains(intel), "{}", pin.url);
+            }
+        }
+    }
 }

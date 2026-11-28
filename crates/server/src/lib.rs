@@ -2652,6 +2652,14 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // Intel Macs are not supported (the owner's ruling): one plain line, before any model call.
+    if let Some(line) = tools.machine_refusal() {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.ai_error = Some(line.to_string());
+        r.message = Some(line.to_string());
+        return Json(r);
+    }
     if run_deterministic {
         let required = crate::pinned_tools::required_tool_set(
             &sources,
@@ -3467,6 +3475,12 @@ pub(crate) async fn start_audit_job(
                     return;
                 }
             };
+            // Intel Macs are not supported (the owner's ruling): fail the job in one plain line,
+            // before any model call.
+            if let Some(line) = tools.machine_refusal() {
+                body_jobs.fail(&body_jid, line.to_string());
+                return;
+            }
             if run_deterministic {
                 let required = crate::pinned_tools::required_tool_set(
                     &sources,

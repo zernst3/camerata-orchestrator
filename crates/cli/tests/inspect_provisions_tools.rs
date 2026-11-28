@@ -390,3 +390,54 @@ fn the_binary_offline_over_a_seeded_tooling_folder_lists_every_tool_ready() {
         "{stdout}"
     );
 }
+
+/// The owner's ruling: Intel Macs are not supported. On one, a run (client or internal) and a
+/// plan are refused with one plain line, before any model call and before anything is installed.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn an_intel_mac_is_refused_before_any_model_call_with_one_plain_line() {
+    let state = tempfile::tempdir().unwrap();
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+    let repo = tempfile::tempdir().unwrap();
+    stage_python_repo(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("inspect.zip");
+    let fakes = FakeTools::new();
+    let pins = fakes.env.clone();
+    let intel = ToolEnv::for_machine("macos", "x86_64", fakes.tooling(), fakes.source.clone())
+        .with_pins(move |a| pins.pins(a));
+    for client in [true, false] {
+        let llm = Scripted::new(&intel);
+        let result = run_inspect_pipeline_with(
+            args(repo.path(), &export, client),
+            true,
+            &camerata_server::credentials::MemoryCredentialStore::new(),
+            Seams {
+                resume: None,
+                llm: Some(&llm),
+                preflight_sink: &|_| {},
+                tools: Some(&intel),
+            },
+        )
+        .await;
+        let err = result.err().expect("refused").to_string();
+        assert_eq!(
+            err,
+            camerata_server::pinned_tools::platform::INTEL_MAC_REFUSAL,
+            "client={client}"
+        );
+        assert_eq!(
+            llm.calls.load(Ordering::SeqCst),
+            0,
+            "no model may be called"
+        );
+    }
+    let plan =
+        run_plan_only_with_tools(args(repo.path(), &export, false), true, &|_| {}, &intel).await;
+    assert_eq!(
+        plan.err().expect("a plan is refused too").to_string(),
+        camerata_server::pinned_tools::platform::INTEL_MAC_REFUSAL
+    );
+    assert!(fakes.source.fetched().is_empty(), "nothing was downloaded");
+    assert!(!fakes.tooling().exists(), "nothing was installed");
+}

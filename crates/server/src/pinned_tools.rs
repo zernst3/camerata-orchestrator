@@ -84,6 +84,8 @@ pub struct ToolEnv {
     /// them with pins over fake archives ([`ToolEnv::with_pins`]), so the checksum check runs on
     /// every test install exactly as it does in the product.
     pins: Arc<dyn Fn(Artifact) -> &'static pins::ArtifactPins + Send + Sync>,
+    /// Set by [`ToolEnv::for_machine`] for a machine Camerata does not run on.
+    machine_refusal: Option<&'static str>,
 }
 
 impl std::fmt::Debug for ToolEnv {
@@ -106,7 +108,27 @@ impl ToolEnv {
             platform,
             source,
             pins: Arc::new(pins::pins),
+            machine_refusal: None,
         }
+    }
+
+    /// The environment for a machine named by its OS and architecture (as Rust names them):
+    /// the product passes this machine's; a test passes another machine's.
+    pub fn for_machine(
+        os: &str,
+        arch: &str,
+        tooling: impl Into<PathBuf>,
+        source: Arc<dyn ArtifactSource>,
+    ) -> Self {
+        let mut env = Self::new(tooling, Platform::from_os_arch(os, arch), source);
+        env.machine_refusal = platform::machine_refusal(os, arch);
+        env
+    }
+
+    /// Why Camerata does not run on this machine at all ([`platform::INTEL_MAC_REFUSAL`]), when it
+    /// does not. Checked before any model call.
+    pub fn machine_refusal(&self) -> Option<&'static str> {
+        self.machine_refusal
     }
 
     /// This environment over other pins (tests: pins over fake archives).
@@ -134,7 +156,12 @@ impl ToolEnv {
         } else {
             Arc::new(OfficialReleaseSource::default())
         };
-        Ok(Self::new(tooling, Platform::current(), source))
+        Ok(Self::for_machine(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            tooling,
+            source,
+        ))
     }
 
     /// The platform, or the refusal for a machine Camerata does not provision for.

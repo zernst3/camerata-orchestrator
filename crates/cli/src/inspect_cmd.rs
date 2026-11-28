@@ -1024,6 +1024,10 @@ pub async fn provision_run_tools(
     client_engagement: bool,
     sink: &(dyn Fn(&str) + Sync),
 ) -> Result<camerata_server::pinned_tools::ToolSetReport, InspectError> {
+    // Intel Macs are not supported (the owner's ruling): one plain line, before anything else.
+    if let Some(line) = tools.machine_refusal() {
+        return Err(InspectError::Failed(line.to_string()));
+    }
     let required = camerata_server::pinned_tools::required_tool_set(
         sources,
         preview_rules,

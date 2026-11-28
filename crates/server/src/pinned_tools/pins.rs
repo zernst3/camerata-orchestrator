@@ -123,12 +123,6 @@ static RUFF: ArtifactPins = ArtifactPins {
             files: &["ruff-aarch64-apple-darwin/ruff"],
         },
         PlatformPin {
-            platform: Platform::MacX64,
-            url: "https://github.com/astral-sh/ruff/releases/download/0.17.5/ruff-x86_64-apple-darwin.tar.gz",
-            sha256: "892f70854ebcd70d873b1bee8358cfd3a1e3180388e3851e3fd3e4a1d5a4dfdd",
-            files: &["ruff-x86_64-apple-darwin/ruff"],
-        },
-        PlatformPin {
             platform: Platform::LinuxX64,
             url: "https://github.com/astral-sh/ruff/releases/download/0.17.5/ruff-x86_64-unknown-linux-gnu.tar.gz",
             sha256: "7d261fc981a784668e19e9fa6ad437bfd95b67f2dc263fc1eab87d54d72fcc90",
@@ -159,15 +153,6 @@ static NODE: ArtifactPins = ArtifactPins {
             files: &[
                 "node-v24.22.3-darwin-arm64/bin/node",
                 "node-v24.22.3-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js",
-            ],
-        },
-        PlatformPin {
-            platform: Platform::MacX64,
-            url: "https://nodejs.org/dist/v24.22.3/node-v24.22.3-darwin-x64.tar.gz",
-            sha256: "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7",
-            files: &[
-                "node-v24.22.3-darwin-x64/bin/node",
-                "node-v24.22.3-darwin-x64/lib/node_modules/npm/bin/npm-cli.js",
             ],
         },
         PlatformPin {
@@ -207,12 +192,6 @@ static PYTHON: ArtifactPins = ArtifactPins {
             files: &["python/bin/python3"],
         },
         PlatformPin {
-            platform: Platform::MacX64,
-            url: "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.12.16%2B20261110-x86_64-apple-darwin-install_only.tar.gz",
-            sha256: "83f2922437e6d546d0fcdb8c11f150a8e52787e8d9ea8651b1974e20908eb1bc",
-            files: &["python/bin/python3"],
-        },
-        PlatformPin {
             platform: Platform::LinuxX64,
             url: "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.12.16%2B20261110-x86_64-unknown-linux-gnu-install_only.tar.gz",
             sha256: "c2f87d4b4e8db3abddb0f116c6ccfc503d0cbdbb9ee8faacddad1b679ec12e99",
@@ -243,12 +222,6 @@ static OSV_SCANNER: ArtifactPins = ArtifactPins {
             files: &["osv-scanner"],
         },
         PlatformPin {
-            platform: Platform::MacX64,
-            url: "https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_darwin_amd64",
-            sha256: "487ab433b2c2a8c80b737c0bd428a80e6d2e211b4adf775a52a6964163fa3249",
-            files: &["osv-scanner"],
-        },
-        PlatformPin {
             platform: Platform::LinuxX64,
             url: "https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_amd64",
             sha256: "d6af4b67fa5de658598bd2d445efb99e90d1734b3146962418719c4350ecb74b",
@@ -269,10 +242,9 @@ static OSV_SCANNER: ArtifactPins = ArtifactPins {
 /// --exclude-newer 2026-11-13`, from `pypi.org/simple`).
 pub const SEMGREP_VERSION: &str = "1.185.0";
 
-/// The platforms semgrep publishes a wheel for at [`SEMGREP_VERSION`]. semgrep stopped
-/// publishing Intel macOS wheels after 1.99.0, so on an Intel Mac semgrep cannot be provisioned.
-pub const SEMGREP_PLATFORMS: [Platform; 3] =
-    [Platform::MacArm64, Platform::LinuxX64, Platform::LinuxArm64];
+/// The platforms semgrep publishes a wheel for at [`SEMGREP_VERSION`]: every supported one.
+/// (semgrep has published no Intel Mac wheel since 1.99.0; Intel Macs are not supported.)
+pub const SEMGREP_PLATFORMS: [Platform; 3] = Platform::ALL;
 
 /// The package index semgrep and its dependencies install from: PyPI, semgrep's official
 /// distribution channel.

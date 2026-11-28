@@ -142,6 +142,10 @@ async fn plan(
     has_api_key: bool,
     tools: &camerata_server::pinned_tools::ToolEnv,
 ) -> Result<(String, Result<(), InspectError>), InspectError> {
+    // Intel Macs are not supported (the owner's ruling): a plan says so in one line, as a run does.
+    if let Some(line) = tools.machine_refusal() {
+        return Err(InspectError::Failed(line.to_string()));
+    }
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
     let sources = args.resolve_sources()?;

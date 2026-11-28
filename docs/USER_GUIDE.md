@@ -422,8 +422,10 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      | semgrep | 1.185.0 | CPython 3.12.16 (python-build-standalone 20261110) | python-build-standalone releases on GitHub, then PyPI by hash |
      | osv-scanner | v1.9.2 | itself | github.com/google/osv-scanner releases |
 
-     Builds are pinned for macOS arm64 and macOS x86_64 (and Linux). semgrep publishes no build for Intel
-     Macs at this version, so on an Intel Mac semgrep reads "cannot be provisioned".
+     Builds are pinned for Apple silicon Macs (macOS arm64), the only Mac Camerata supports. **Intel Macs
+     are not supported:** an inspection or a plan on one is refused before any model call with one line,
+     "Intel Macs are not supported: Camerata runs on Apple silicon Macs." Linux builds are pinned too,
+     because Camerata's tests and CI run on Linux.
    - **When:** the moment an inspection is started. Camerata works out the tool set from the stacks it
      detects and the rules it selected (a Python repo needs ruff; a JavaScript or TypeScript repo needs
      eslint). It prints the list and installs what is missing; only then does it make its first model
