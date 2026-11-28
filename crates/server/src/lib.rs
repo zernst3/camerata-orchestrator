@@ -5458,6 +5458,8 @@ mod greenfield_lock_tests;
 mod model_input_chat_tests;
 
 #[cfg(test)]
+mod intel_refusal_tests;
+#[cfg(test)]
 mod site_key_paths_tests;
 
 #[cfg(test)]
