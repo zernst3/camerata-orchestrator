@@ -343,6 +343,13 @@ enum Command {
             requires = "recheck_saved"
         )]
         reask_failed_judge: Option<usize>,
+        /// With `--recheck-saved`: print what the recheck would do, then stop. Makes no model
+        /// call, reads no credential and writes nothing (no run, report, ledger or export). Prints
+        /// counts only: per failed clone check part the clone rows, candidates and other rows of
+        /// the rule ignored, the batches rebuilt, saved and failed, and whether it would read
+        /// again, ask again with the flag, or refuse.
+        #[arg(long = "dry-run", requires = "recheck_saved")]
+        dry_run: bool,
         /// Print what this run would take on, then stop: per repo the files, lines and bytes
         /// admitted and the files left out by reason; per piece its files, bytes, context and
         /// checklist bytes, first request size and turn limit; the pre-flight cost projection
@@ -725,8 +732,18 @@ async fn main() -> anyhow::Result<()> {
             rerun_deterministic,
             recheck_saved,
             reask_failed_judge,
+            dry_run,
             plan_only,
         } => {
+            if let (Some(run), true) = (&recheck_saved, dry_run) {
+                return match inspect_cmd::plan_saved_inspect(run, &repo, reask_failed_judge).await {
+                    Ok(text) => {
+                        print!("{text}");
+                        Ok(())
+                    }
+                    Err(e) => report_inspect_result(Err(e)),
+                };
+            }
             if let Some(run) = recheck_saved {
                 return report_inspect_result(
                     inspect_cmd::run_recheck_saved(
@@ -1628,8 +1645,10 @@ mod cli_parse_tests {
                 rerun_deterministic,
                 recheck_saved,
                 reask_failed_judge,
+                dry_run,
                 plan_only,
             } => {
+                assert!(!dry_run);
                 assert!(rerun_deterministic.is_none());
                 assert!(recheck_saved.is_none() && reask_failed_judge.is_none());
                 assert!(!plan_only, "a real run unless --plan-only is given");

@@ -1573,3 +1573,42 @@ fn a_part_with_one_unreadable_batch_is_finished_with_one_call_and_passes_the_gat
         );
     })
 }
+
+// ── `--recheck-saved --dry-run`: the read-only plan ─────────────────────────────────────────────
+
+/// The plan prints counts, asks no model, reads no credential and writes nothing: the run record,
+/// the saved report and the ledger stay byte for byte as they were, and no export appears.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_recheck_plan_is_read_only_and_prints_counts_only() {
+    on_a_big_stack(async {
+        if !typst_available("the_recheck_plan_is_read_only") {
+            return;
+        }
+        let _no_key = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let run = saved_run_three_batches().await;
+        let before = saved_bytes(&run.saved);
+        camerata_server::credentials::forbid_reads_for_tests(true);
+        let text = Box::pin(camerata::inspect_cmd::plan_saved_inspect(
+            &run.saved.run_id,
+            &[run.saved.repo.path().to_path_buf()],
+            Some(5),
+        ))
+        .await;
+        camerata_server::credentials::forbid_reads_for_tests(false);
+        let text = text.expect("the plan prints");
+        assert_eq!(saved_bytes(&run.saved), before, "nothing was written");
+        assert!(
+            text.contains("batches rebuilt: 3; with saved verdicts: 1; failed: 2"),
+            "{text}"
+        );
+        assert!(text.contains("ask 1 batch(es) once each"), "{text}");
+        assert!(
+            text.contains("finder or other row(s) of the same rule ignored"),
+            "{text}"
+        );
+        let repo = run.saved.repo.path().to_string_lossy().to_string();
+        assert!(!text.contains(&repo), "no paths: {text}");
+        assert!(!run.saved.out.path().join("plan.zip").exists());
+    })
+}

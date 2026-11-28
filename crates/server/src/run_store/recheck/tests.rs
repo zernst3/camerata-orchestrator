@@ -336,7 +336,14 @@ async fn saved_run(spec: Spec) -> Saved {
     }
     if spec.partly_judged {
         // A confirmed row of the rule: the first build judged part of it.
-        rows.push(finding(RULE.id(), "src/cart/total.ts", 1));
+        // A clone-tool row that names no candidate: it cannot be tied to a batch. (A row of the
+        // rule's id with no clone tool is a finder row and is never read.)
+        let mut row = finding(RULE.id(), "src/cart/total.ts", 1);
+        row.preview_tool = Some(crate::onboard::architectural::ARCH_PREVIEW_TOOL.to_string());
+        row.captures.insert("concept".to_string(), "x".to_string());
+        row.captures
+            .insert("family".to_string(), "no-such-family".to_string());
+        rows.push(row);
     }
     let mut report = report_of(&rows);
     report.conventions = records;
@@ -1705,4 +1712,260 @@ async fn a_batch_with_no_stored_call_is_never_asked() {
     assert_eq!(llm.calls(), 0, "nothing the scan never sent is asked");
     assert!(why.contains("cannot be reproduced"), "{why}");
     assert_eq!(saved_bytes(&run.saved), before);
+}
+
+// ── Finder rows that share the clone rule's id are never clone rows ─────────────────────────────
+
+/// Add `n` finder rows of the clone rule's id to the saved report: no clone tool, finder captures,
+/// no family (the real report's shape). With `borrow_family` the first one carries the family of a
+/// candidate of the unmerged batch anyway, which a finder row must never be read as.
+fn add_finder_rows(run: &ThreeBatches, n: usize, borrow_family: bool) -> Vec<serde_json::Value> {
+    let dir = crate::run_store::runs_dir().join(&run.saved.run_id);
+    let family = family_of(&run.batches[1][0]);
+    let mut added = Vec::new();
+    edit_saved_findings(&dir, |rows| {
+        let template = rows
+            .iter()
+            .find(|r| r["rule_id"] == RULE.id())
+            .unwrap()
+            .clone();
+        for i in 0..n {
+            let mut row = template.clone();
+            row["preview_tool"] = serde_json::Value::Null;
+            row["path"] = serde_json::json!(format!("src/finder{i}.ts"));
+            row["line"] = serde_json::json!(i + 1);
+            // The key the first build's seal gave it: the template's with this row's own path.
+            let key = template["site_key"].as_str().unwrap().to_string();
+            let mut parts: Vec<&str> = key.split('\0').collect();
+            let path = format!("src/finder{i}.ts");
+            parts[1] = &path;
+            row["site_key"] = serde_json::json!(parts.join("\0"));
+            row["captures"] = serde_json::json!({
+                "finder-piece": format!("piece-{i}"),
+                "stage1_verdict": "confirmed"
+            });
+            if borrow_family && i == 0 {
+                row["captures"]["family"] = serde_json::json!(family);
+            }
+            added.push(row.clone());
+            rows.push(row);
+        }
+    });
+    added
+}
+
+/// The saved report with 17 finder rows of the rule's id: the failed batch is asked once, the part
+/// resolves, the finder rows pass through byte for byte, and no candidate is merged twice.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn finder_rows_sharing_the_rule_id_pass_through_and_the_part_resolves() {
+    let run = three_batch_run(Third::Unreadable).await;
+    let finder = add_finder_rows(&run, 17, false);
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    let done = recheck(&run.saved, ReaskFlag::Allow { max_parts: 5 }, &llm)
+        .await
+        .expect("the part resolves");
+    assert_eq!(llm.calls(), 1);
+    // Every saved row that is not a clone row, the 17 finder rows and the others, is in the
+    // rechecked report whole: every field, serialized, after the settle and the re-seal.
+    let dir = crate::run_store::runs_dir().join(&run.saved.run_id);
+    let before_report = load_saved_report(&dir, &run.saved.ledger_file).unwrap();
+    let after_rows: Vec<serde_json::Value> = done
+        .report
+        .findings
+        .iter()
+        .map(|f| serde_json::to_value(f).unwrap())
+        .collect();
+    let mut kept = 0;
+    for row in before_report
+        .findings
+        .iter()
+        .filter(|f| !crate::onboard::clone_advisory::redo::is_clone_row(f))
+    {
+        kept += 1;
+        let was = serde_json::to_value(row).unwrap();
+        let same_place = after_rows.iter().find(|r| {
+            r["path"] == was["path"] && r["line"] == was["line"] && r["rule_id"] == was["rule_id"]
+        });
+        let differing: Vec<String> = same_place
+            .map(|now| {
+                was.as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(k, v)| now.get(k.as_str()) != Some(*v))
+                    .map(|(k, v)| format!("{k}: {v} -> {:?}", now.get(k.as_str())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            after_rows.contains(&was),
+            "a saved non-clone row changed or is gone: {} {}:{} {differing:?}",
+            row.rule_id,
+            row.path,
+            row.line
+        );
+    }
+    assert!(
+        kept >= 18,
+        "the finder rows and the other row were compared: {kept}"
+    );
+    let after: Vec<serde_json::Value> = done
+        .report
+        .findings
+        .iter()
+        .filter(|f| f.preview_tool.is_none() && f.captures.contains_key("finder-piece"))
+        .map(|f| serde_json::to_value(f).unwrap())
+        .collect();
+    assert_eq!(after.len(), 17, "every finder row is still there");
+    for (was, now) in finder.iter().zip(&after) {
+        assert_eq!(was["captures"], now["captures"]);
+        assert_eq!((&was["path"], &was["line"]), (&now["path"], &now["line"]));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for f in clone_rows(&done.report)
+        .into_iter()
+        .filter(|f| f.preview_tool.is_some())
+    {
+        let key = (f.captures.get("family").cloned(), f.path.clone(), f.line);
+        assert!(seen.insert(key.clone()), "a second row for {key:?}");
+    }
+}
+
+/// A finder row is never counted as a judged candidate and never blocks the tie, even one that
+/// carries a family capture of an unmerged batch's candidate.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_finder_row_never_blocks_the_tie_even_with_a_borrowed_family() {
+    let run = three_batch_run(Third::Readable).await;
+    add_finder_rows(&run, 3, true);
+    let llm = Counting::garbage();
+    let done = recheck(&run.saved, ReaskFlag::Off, &llm)
+        .await
+        .expect("finder rows do not block the tie");
+    assert_eq!(llm.calls(), 0);
+    assert!(done.report.incomplete_reasons().is_empty());
+}
+
+/// With finder rows present and an unreadable batch, no flag: the refusal names the batch, not a
+/// row that "names no candidate".
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn with_finder_rows_an_unreadable_batch_is_named_not_the_finder_rows() {
+    let run = three_batch_run(Third::Unreadable).await;
+    add_finder_rows(&run, 17, false);
+    let before = saved_bytes(&run.saved);
+    let llm = Counting::garbage();
+    let Err(RecheckError::Refused(why)) = recheck(&run.saved, ReaskFlag::Off, &llm).await else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains("batch 3 of 3"), "{why}");
+    assert!(!why.contains("names no candidate"), "{why}");
+    assert_eq!(llm.calls(), 0);
+    assert_eq!(saved_bytes(&run.saved), before);
+}
+
+// ── The dry-run is the real recheck's own checks, stopped before any call or write ──────────────
+
+async fn plan_text(saved: &Saved, reask: ReaskFlag) -> String {
+    let c = ctx(saved);
+    plan_saved_run(&inputs(saved, &c, reask, false))
+        .await
+        .expect("a plan is always printed")
+}
+
+/// The refusal the real recheck makes, and the plan that must say the same.
+async fn assert_plan_says_what_the_real_run_refuses(saved: &Saved, reask: ReaskFlag) {
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    let why = match recheck(saved, reask, &llm).await {
+        Err(RecheckError::Refused(why)) | Err(RecheckError::AlreadyComplete(why)) => why,
+        Ok(_) => panic!("the real recheck was expected to refuse"),
+    };
+    assert_eq!(llm.calls(), 0, "the real run refused before any call");
+    let before = saved_bytes(saved);
+    let plan = plan_text(saved, reask).await;
+    assert!(
+        plan.contains(&format!("the recheck would refuse: {why}")),
+        "plan: {plan}\nreal: {why}"
+    );
+    assert_eq!(saved_bytes(saved), before, "the plan wrote nothing");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plan_reports_a_changed_tree_as_the_real_run_refuses_it() {
+    let saved = saved_run(NORMAL).await;
+    std::fs::write(
+        saved.repo.path().join("src/new.ts"),
+        "export const x = 1;\n",
+    )
+    .unwrap();
+    assert_plan_says_what_the_real_run_refuses(&saved, ReaskFlag::Off).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plan_reports_a_complete_run_as_the_real_run_refuses_it() {
+    let saved = saved_run(NORMAL).await;
+    let path = crate::run_store::runs_dir()
+        .join(&saved.run_id)
+        .join("run.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    v["status"] = serde_json::json!("complete");
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_plan_says_what_the_real_run_refuses(&saved, ReaskFlag::Off).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plan_reports_an_unreproducible_layout_as_the_real_run_refuses_it() {
+    let run = three_batch_run(Third::Shifted).await;
+    assert_plan_says_what_the_real_run_refuses(&run.saved, ReaskFlag::Allow { max_parts: 9 }).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plan_reports_an_exceeded_cap_as_the_real_run_refuses_it() {
+    let saved = saved_run(UNREADABLE).await;
+    assert_plan_says_what_the_real_run_refuses(&saved, ReaskFlag::Allow { max_parts: 0 }).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plan_reports_a_missing_judge_model_as_the_real_run_refuses_it() {
+    let saved = saved_run(NORMAL).await;
+    let path = crate::run_store::runs_dir()
+        .join(&saved.run_id)
+        .join("run.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    v["pin"]["clone_judge_model"] = serde_json::json!("");
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_plan_says_what_the_real_run_refuses(&saved, ReaskFlag::Off).await;
+}
+
+/// The plan's counts are what the real run then does on the same fixture: one batch asked, two
+/// failed of three, one with saved verdicts; and a place where a fresh clone row would land on a
+/// saved row is counted.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plans_counts_equal_what_the_real_run_then_does() {
+    let run = three_batch_run(Third::Unreadable).await;
+    add_finder_rows(&run, 2, false);
+    let before = saved_bytes(&run.saved);
+    let plan = plan_text(&run.saved, ReaskFlag::Allow { max_parts: 5 }).await;
+    assert_eq!(saved_bytes(&run.saved), before, "the plan wrote nothing");
+    assert!(
+        plan.contains("batches rebuilt: 3; with saved verdicts: 1; failed: 2"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("2 finder or other row(s) of the same rule ignored"),
+        "{plan}"
+    );
+    assert!(plan.contains("ask 1 batch(es) once each"), "{plan}");
+    assert!(plan.contains("saved rows stay as they are"), "{plan}");
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    recheck(&run.saved, ReaskFlag::Allow { max_parts: 5 }, &llm)
+        .await
+        .expect("the real run does what the plan said");
+    assert_eq!(llm.calls(), 1, "exactly the one batch the plan said");
 }

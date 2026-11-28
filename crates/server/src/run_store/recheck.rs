@@ -262,7 +262,7 @@ fn saved_rows_of<'a>(
     report
         .findings
         .iter()
-        .filter(move |f| f.repo == repo && f.rule_id == rule.id())
+        .filter(move |f| f.repo == repo && f.rule_id == rule.id() && redo::is_clone_row(f))
 }
 
 /// One clone check part to redo, planned from the run's data.
@@ -316,13 +316,37 @@ fn render_asks(asks: &[(&RulePlan, &PlannedBatch)], model: &str) -> String {
     out
 }
 
-/// Finish an incomplete saved run on this build; see the module doc. `llm` is used only for the
-/// parts [`ReaskFlag::Allow`] lets be asked again, once each, after `announce` has listed them.
-pub async fn recheck_saved_run(
+/// What the checks of a recheck settle before anything is asked or written.
+struct Prepared {
+    record: super::RunRecord,
+    saved_pin: EnginePin,
+    run_dir: PathBuf,
+    report: ScanReport,
+    parts: Vec<PartPlan>,
+    judge_model: String,
+}
+
+/// The refusal for a batch whose stored reply the journal would hand back as its own.
+fn replay_refusal(plan: &RulePlan, batch: &PlannedBatch) -> String {
+    format!(
+        "the stored reply for the clone check of rule {} in {} ({}) names no verdict for the \
+         candidates asked about, and asking again would return the same stored reply. No export \
+         was written.",
+        plan.rule.id(),
+        plan.repo,
+        batch.describe()
+    )
+}
+
+/// Every check and refusal of the recheck, in order, up to the point where it would make a model
+/// call or write a file. The real recheck and the dry-run both go through here, so the dry-run
+/// reports exactly the refusals the real run would. `llm_available` is whether a model would be
+/// handed to the asks; `announce` is told what would be asked.
+async fn prepare(
     inputs: &RecheckInputs<'_>,
-    llm: Option<&dyn LlmPort>,
-    announce: &mut (dyn FnMut(&str) + Send),
-) -> Result<Rechecked, RecheckError> {
+    llm_available: bool,
+    mut announce: Option<&mut (dyn FnMut(&str) + Send)>,
+) -> Result<Prepared, RecheckError> {
     let run_id = inputs.run_id.as_str();
     let record = read_record(run_id).map_err(|e| RecheckError::Refused(e.to_string()))?;
     if record.origin == RunOrigin::Cockpit {
@@ -351,7 +375,7 @@ pub async fn recheck_saved_run(
         return refused("this run did not record the build it started on");
     };
     let run_dir = runs_dir().join(run_id);
-    let mut report = load_saved_report(&run_dir, inputs.ledger_file)?;
+    let report = load_saved_report(&run_dir, inputs.ledger_file)?;
     if report.incomplete_reasons().is_empty() {
         return Err(RecheckError::AlreadyComplete(format!(
             "the saved report of run {run_id} has nothing left unfinished, so there is nothing \
@@ -457,14 +481,16 @@ pub async fn recheck_saved_run(
                 discarded: report
                     .discarded
                     .iter()
-                    .filter(|f| f.repo == fp.repo && f.rule_id == rule.id())
+                    .filter(|f| {
+                        f.repo == fp.repo && f.rule_id == rule.id() && redo::is_clone_row(f)
+                    })
                     .collect(),
                 folded: report
                     .findings
                     .iter()
                     .filter(|f| f.repo == fp.repo)
                     .flat_map(|f| &f.flagged_by)
-                    .filter(|b| b.rule_id == rule.id())
+                    .filter(|b| b.rule_id == rule.id() && redo::is_clone_source(b.tool.as_deref()))
                     .map(|b| (b.path.as_str(), b.line))
                     .collect(),
             };
@@ -524,15 +550,52 @@ pub async fn recheck_saved_run(
                 unread.len()
             ));
         }
-        if llm.is_none() {
+        if !llm_available {
             return refused(
                 "no model is available to ask the clone check parts again. Nothing was sent and \
                  no export was written.",
             );
         }
+        // A stored reply the journal would hand back as its own is the one that was read and
+        // held no verdict: asking would return it again and be no call at all.
+        if let Some((plan, batch)) = unread
+            .iter()
+            .find(|(_, b)| super::journal::stored_would_replay(&run_dir, b.request()))
+        {
+            return refused(replay_refusal(plan, batch));
+        }
         check_spend(inputs, &run_dir, &unread)?;
-        announce(&render_asks(&unread, &judge_model));
+        if let Some(say) = announce.as_mut() {
+            say(&render_asks(&unread, &judge_model));
+        }
     }
+    drop(unread);
+    Ok(Prepared {
+        record,
+        saved_pin,
+        run_dir,
+        report,
+        parts,
+        judge_model,
+    })
+}
+
+/// Finish an incomplete saved run on this build; see the module doc. `llm` is used only for the
+/// parts [`ReaskFlag::Allow`] lets be asked again, once each, after `announce` has listed them.
+pub async fn recheck_saved_run(
+    inputs: &RecheckInputs<'_>,
+    llm: Option<&dyn LlmPort>,
+    announce: &mut (dyn FnMut(&str) + Send),
+) -> Result<Rechecked, RecheckError> {
+    let run_id = inputs.run_id.as_str();
+    let Prepared {
+        record,
+        saved_pin,
+        run_dir,
+        mut report,
+        parts,
+        judge_model,
+    } = prepare(inputs, llm.is_some(), Some(announce)).await?;
 
     // From here the run is opened (its lock held) and every way out finishes it.
     let run_json_before = std::fs::read(run_dir.join("run.json"))
@@ -565,18 +628,7 @@ pub async fn recheck_saved_run(
                 // A stored reply the journal would hand back as its own is the one that was read
                 // and held no verdict: asking would return it again and be no call at all.
                 if model.replays(batch.request()) {
-                    return Err(abandon(
-                        &store,
-                        &report,
-                        format!(
-                            "the stored reply for the clone check of rule {} in {} ({}) names no \
-                             verdict for the candidates asked about, and asking again would \
-                             return the same stored reply. No export was written.",
-                            part.plan.rule.id(),
-                            part.plan.repo,
-                            batch.describe()
-                        ),
-                    ));
+                    return Err(abandon(&store, &report, replay_refusal(&part.plan, batch)));
                 }
                 let asked_call = crate::prompt_frame::with_seed(
                     Some(decode_seed(&record.nonce_seed)),
@@ -639,6 +691,7 @@ pub async fn recheck_saved_run(
             report.findings.retain(|f| {
                 !(f.repo == repo
                     && f.rule_id == rule.id()
+                    && redo::is_clone_row(f)
                     && matches!(f.kind, Some(FindingKind::NotAssessed(_))))
             });
             before - report.findings.len()
@@ -704,6 +757,94 @@ pub async fn recheck_saved_run(
         record: record_of_rerun,
         lines,
     })
+}
+
+/// `camerata inspect --recheck-saved <RUN> --dry-run`: what the recheck would do, from the saved
+/// run alone. It runs the SAME checks as the real recheck ([`prepare`]) and stops where the real
+/// one would make a call or write a file, so a refusal here is the refusal the real run makes.
+/// Read-only: it opens no run, writes nothing, asks no model and needs no credential. The text
+/// holds counts and repo names only: no paths and no finding text.
+pub async fn plan_saved_run(inputs: &RecheckInputs<'_>) -> Result<String, RecheckError> {
+    let mut out =
+        String::from("recheck plan (read-only: no call, no credential, nothing written)\n");
+    let may_ask = matches!(inputs.reask, ReaskFlag::Allow { .. });
+    let prepared = match prepare(inputs, may_ask, None).await {
+        Ok(p) => p,
+        Err(RecheckError::AlreadyComplete(why)) | Err(RecheckError::Refused(why)) => {
+            out.push_str(&format!("the recheck would refuse: {why}\n"));
+            return Ok(out);
+        }
+    };
+    let Prepared {
+        report,
+        parts,
+        run_dir: _,
+        ..
+    } = prepared;
+    if parts.is_empty() {
+        out.push_str("no failed clone check part: only the final checks would run again\n");
+    }
+    for part in &parts {
+        let plan = &part.plan;
+        let same_rule: Vec<&crate::onboard::Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.repo == plan.repo && f.rule_id == plan.rule.id())
+            .collect();
+        let clone_rows = same_rule.iter().filter(|f| redo::is_clone_row(f)).count();
+        let families: HashSet<&String> = same_rule
+            .iter()
+            .filter(|f| redo::is_clone_row(f))
+            .filter_map(|f| f.captures.get("family"))
+            .collect();
+        out.push_str(&format!(
+            "clone check, rule {}, repo {}: {clone_rows} clone row(s), {} distinct candidate(s), {} \
+             finder or other row(s) of the same rule ignored\n",
+            plan.rule.id(),
+            plan.repo,
+            families.len(),
+            same_rule.len() - clone_rows
+        ));
+        let merged = plan.batches.iter().filter(|b| b.merged).count();
+        let failed: Vec<String> = plan
+            .batches
+            .iter()
+            .filter(|b| !b.merged)
+            .map(|b| b.asked_count().to_string())
+            .collect();
+        let unread = plan.unread().count();
+        out.push_str(&format!(
+            "  batches rebuilt: {}; with saved verdicts: {merged}; failed: {} (candidates per \
+             failed batch: {})\n",
+            plan.batches.len(),
+            failed.len(),
+            failed.join(", ")
+        ));
+        let sites = plan.fresh_sites();
+        let saved_places: HashSet<(&str, usize)> = report
+            .findings
+            .iter()
+            .filter(|f| f.repo == plan.repo)
+            .map(|f| (f.path.as_str(), f.line))
+            .collect();
+        let overlap = sites
+            .iter()
+            .filter(|(path, line)| saved_places.contains(&(*path, *line)))
+            .count();
+        out.push_str(&format!(
+            "  fresh clone rows would be made at up to {} place(s); {overlap} of them at the same \
+             path and line as a saved row (saved rows stay as they are)\n",
+            sites.len()
+        ));
+        out.push_str(&if unread == 0 {
+            "  the recheck would: read again, every failed batch reads from its stored reply, no \
+             call\n"
+                .to_string()
+        } else {
+            format!("  the recheck would: ask {unread} batch(es) once each (the rest read again)\n")
+        });
+    }
+    Ok(out)
 }
 
 /// The scan's own deterministic steps after the clone judge, applied to the rows the redone part

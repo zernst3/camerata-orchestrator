@@ -58,6 +58,11 @@ impl PlannedBatch {
         }
     }
 
+    /// How many candidates the batch asks about.
+    pub fn asked_count(&self) -> usize {
+        self.batch.asked.len()
+    }
+
     /// The request, for the spend check and the listing of what would be asked.
     pub fn request(&self) -> &crate::llm::LlmRequest {
         &self.batch.request
@@ -85,6 +90,31 @@ impl RulePlan {
         self.batches
             .iter()
             .filter(|b| b.read.is_none() && !b.merged)
+    }
+
+    /// The `(path, line)` of every place a fresh clone row could be made: each site of each
+    /// candidate of a batch the first build did not merge (for a batch that reads, only the
+    /// candidates judged confirmed or unsure; for one still to be asked, all of them).
+    pub fn fresh_sites(&self) -> Vec<(&str, usize)> {
+        let mut out = Vec::new();
+        for batch in self.batches.iter().filter(|b| !b.merged) {
+            for id in &batch.batch.asked {
+                if let Some(read) = &batch.read {
+                    let shows = read.verdicts.get(id).is_some_and(|v| {
+                        v.word == self.rule.affirmative_word() || v.word == "unsure"
+                    });
+                    if !shows {
+                        continue;
+                    }
+                }
+                for c in self.candidates.iter().filter(|c| c.id == *id) {
+                    for site in &c.facts.sites {
+                        out.push((site.path.as_str(), site.start_line as usize));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The batches no stored call exists for, which this command never asks.
@@ -213,6 +243,24 @@ pub struct RedoInput<'a> {
     pub corpus: Option<&'a camerata_rules::RuleSet>,
     /// The run folder whose stored replies are read.
     pub run_dir: &'a Path,
+}
+
+/// THE predicate: whether `f` is a row the clone check wrote, as `clone_advisory::findings` writes
+/// it. A confirmed or unsure candidate row carries the clone tool and its candidate's `family`; the
+/// rule's not-assessed row carries the clone tool too. A finder row (or any other row) that shares
+/// the rule's id has neither, and the recheck never reads, counts, replaces or changes it.
+pub fn is_clone_row(f: &crate::onboard::Finding) -> bool {
+    f.preview_tool.as_deref() == Some(crate::onboard::architectural::ARCH_PREVIEW_TOOL)
+        && (f.captures.contains_key("family")
+            || matches!(
+                f.kind,
+                Some(camerata_api_types::audit::FindingKind::NotAssessed(_))
+            ))
+}
+
+/// Whether a source the collapse folded into another row came from a clone row.
+pub fn is_clone_source(tool: Option<&str>) -> bool {
+    tool == Some(crate::onboard::architectural::ARCH_PREVIEW_TOOL)
 }
 
 /// The family id a candidate's rows carry: its id without the rule's prefix.

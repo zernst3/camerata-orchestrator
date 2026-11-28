@@ -41,7 +41,9 @@ use std::sync::Arc;
 pub mod finder;
 pub mod plan_only;
 pub mod recheck;
-pub use recheck::{recheck_saved_inspect, run_recheck_saved, run_recheck_saved_with_store};
+pub use recheck::{
+    plan_saved_inspect, recheck_saved_inspect, run_recheck_saved, run_recheck_saved_with_store,
+};
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};

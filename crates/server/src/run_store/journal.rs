@@ -693,6 +693,15 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
 /// position among this attempt's asks, the same test of a stored reply, with nothing recorded.
 /// A spend limit asks this before admitting a call, because a replay costs nothing and refusing
 /// it would drop a reply the run already paid for.
+/// Whether a fresh journal over the run folder `dir` would answer `req` from a stored reply, so
+/// sending it would be no call: what [`JournalLlm::replays`] says for the first occurrence of the
+/// request, read from the folder alone.
+pub(crate) fn stored_would_replay(dir: &Path, req: &LlmRequest) -> bool {
+    let req = camerata_llm::model_input::guarded(req);
+    load_call_file(dir, &request_key(&req))
+        .is_some_and(|file| !replayable_slots(&file, false).is_empty())
+}
+
 fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
     let req = camerata_llm::model_input::guarded(req);
     let key = request_key(&req);

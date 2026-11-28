@@ -129,19 +129,25 @@ fn failed(e: RecheckError) -> InspectError {
     }
 }
 
-/// [`run_recheck_saved`] with its credential store and seams explicit. A model handed in through
-/// `seams.llm` is the only model the recheck may ask, and only for a clone check part the flag
-/// allows.
-#[allow(clippy::too_many_arguments)]
-pub async fn recheck_saved_inspect(
+/// What a recheck derives from the saved run and the checkout, the way the inspection did.
+struct Derived {
+    run_id: String,
+    args: InspectArgs,
+    controls: camerata_server::cost_cap::RunControls,
+    sources: Vec<(String, PathBuf)>,
+    selected: Vec<camerata_server::onboard::SelectedRule>,
+    corpus: Option<camerata_rules::RuleSet>,
+    pin: camerata_server::run_store::engine_pin::EnginePin,
+    ledger_file: PathBuf,
+}
+
+/// Read the saved run and derive its inputs. Reads only: no model, no credential.
+async fn derive(
     run: &str,
     repos: &[PathBuf],
     export: Option<PathBuf>,
     max_cost_usd: Option<f64>,
-    reask: Option<usize>,
-    creds: &dyn camerata_server::credentials::CredentialStore,
-    seams: Seams<'_>,
-) -> Result<InspectOutcome, InspectError> {
+) -> Result<Derived, InspectError> {
     let project_key = match repos {
         [] => None,
         [one] => Some(camerata_server::scan_cache::state_dir::repo_state_key(one)),
@@ -170,20 +176,6 @@ pub async fn recheck_saved_inspect(
     if max_cost_usd.is_some() {
         args.max_cost_usd = max_cost_usd;
     }
-    // The export is written last, to a folder that must be there: refused before anything is read
-    // or changed.
-    let export_dir = args
-        .export
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    if !export_dir.is_dir() {
-        return Err(InspectError::Failed(format!(
-            "the folder for the export ({}) does not exist; make it first. Nothing was read or \
-             changed.",
-            export_dir.display()
-        )));
-    }
     let mut controls = args.run_controls()?;
     let sources = args.resolve_sources()?;
     let names: Vec<String> = sources.iter().map(|(n, _)| n.clone()).collect();
@@ -201,6 +193,84 @@ pub async fn recheck_saved_inspect(
         camerata_server::split_scannable_rules(selected.clone()).await;
     let pin = rs::engine_pin::EnginePin::for_run(corpus.as_ref(), &controls);
     let (_manifest, ledger_file) = args.state_paths();
+    Ok(Derived {
+        run_id,
+        args,
+        controls,
+        sources,
+        selected,
+        corpus,
+        pin,
+        ledger_file,
+    })
+}
+
+/// `--recheck-saved <RUN> --dry-run`: what the recheck would do. Makes no call, reads no
+/// credential and writes nothing; prints counts only.
+pub async fn plan_saved_inspect(
+    run: &str,
+    repos: &[PathBuf],
+    reask: Option<usize>,
+) -> Result<String, InspectError> {
+    let d = derive(run, repos, None, None).await?;
+    let inputs = RecheckInputs {
+        run_id: d.run_id.clone(),
+        sources: &d.sources,
+        selected: &d.selected,
+        corpus: d.corpus.as_ref(),
+        controls: &d.controls,
+        pin: d.pin,
+        client_engagement: d.args.client_engagement,
+        ledger_file: &d.ledger_file,
+        reask: match reask {
+            Some(max_parts) => ReaskFlag::Allow { max_parts },
+            None => ReaskFlag::Off,
+        },
+    };
+    camerata_server::run_store::recheck::plan_saved_run(&inputs)
+        .await
+        .map_err(failed)
+}
+
+/// [`run_recheck_saved`] with its credential store and seams explicit. A model handed in through
+/// `seams.llm` is the only model the recheck may ask, and only for a clone check part the flag
+/// allows.
+#[allow(clippy::too_many_arguments)]
+pub async fn recheck_saved_inspect(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+    reask: Option<usize>,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    let d = derive(run, repos, export, max_cost_usd).await?;
+    // The export is written last, to a folder that must be there: refused before anything is read
+    // or changed.
+    let export_dir = d
+        .args
+        .export
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if !export_dir.is_dir() {
+        return Err(InspectError::Failed(format!(
+            "the folder for the export ({}) does not exist; make it first. Nothing was read or \
+             changed.",
+            export_dir.display()
+        )));
+    }
+    let Derived {
+        run_id,
+        args,
+        controls,
+        sources,
+        selected,
+        corpus,
+        pin,
+        ledger_file,
+    } = d;
 
     // A model is handed to the recheck only when the flag could use one, and even then it is built
     // (and the credential read) by its first call, which the recheck makes only once a failed
