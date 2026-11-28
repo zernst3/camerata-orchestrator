@@ -645,3 +645,107 @@ fn there_are_no_intel_mac_pins() {
         }
     }
 }
+
+// ── review round 1: transport and install hygiene ─────────────────────────────────────────────
+
+/// Every download is HTTPS, redirects included: a plain-http URL is refused before a connection
+/// is made. Shown against a local server, so nothing leaves the machine.
+#[tokio::test]
+async fn the_download_client_refuses_plain_http_even_to_a_local_server() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = served.clone();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if let Ok((mut conn, _)) = listener.accept() {
+                use std::io::Write;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+    let client = fetch::download_client(None).unwrap();
+    let result = client
+        .get(format!("http://127.0.0.1:{port}/acme.tar.gz"))
+        .send()
+        .await;
+    server.join().unwrap();
+    assert!(result.is_err(), "a plain-http request was sent: {result:?}");
+    assert!(
+        !served.load(std::sync::atomic::Ordering::SeqCst),
+        "the local server was reached"
+    );
+}
+
+#[test]
+fn a_download_over_the_size_cap_is_refused() {
+    let mut buf = Vec::new();
+    assert!(fetch::take_chunk(&mut buf, b"12345", 10).is_ok());
+    assert!(fetch::take_chunk(&mut buf, b"67890", 10).is_ok());
+    let err = fetch::take_chunk(&mut buf, b"!", 10).expect_err("over the cap");
+    assert!(err.contains("10 bytes"), "{err}");
+    assert!(fetch::MAX_DOWNLOAD_BYTES >= 128 * 1024 * 1024);
+}
+
+#[test]
+fn the_aside_folder_keeps_the_whole_install_name() {
+    let dir = std::path::Path::new("/home/acme/tooling/pinned/ruff-0.17.5");
+    let aside = fetch::aside_path(dir);
+    assert_eq!(aside.parent(), dir.parent());
+    let name = aside.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(".ruff-0.17.5.old-"), "{name}");
+}
+
+#[tokio::test]
+async fn a_stale_staging_folder_is_swept_before_an_install() {
+    let tools = FakeTools::new();
+    let root = fetch::pinned_root(tools.tooling());
+    let stale = root.join(".staging-ruff-0.17.5-dead");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("half"), "an interrupted install").unwrap();
+    let other = root.join(".staging-node-v24.22.3-dead");
+    std::fs::create_dir_all(&other).unwrap();
+    tools.env.ensure_ruff().await.unwrap();
+    assert!(
+        !stale.exists(),
+        "the dead install's staging folder is removed"
+    );
+    assert!(
+        other.exists(),
+        "another tool's staging folder is left to its own install"
+    );
+}
+
+/// Two installs of the same artifact at once (two scans, two processes): one downloads, the
+/// other waits on the lock, re-probes and uses that install.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_installs_of_one_artifact_download_once_and_both_get_it() {
+    let tools = FakeTools::new();
+    tools
+        .source
+        .delay_every_fetch(std::time::Duration::from_millis(300));
+    let (a, b) = tokio::join!(
+        {
+            let env = tools.env.clone();
+            tokio::spawn(async move { env.ensure_ruff().await })
+        },
+        {
+            let env = tools.env.clone();
+            tokio::spawn(async move { env.ensure_ruff().await })
+        },
+    );
+    let (a, b) = (a.unwrap().expect("first"), b.unwrap().expect("second"));
+    assert_eq!(a, b);
+    assert_eq!(
+        tools.source.fetched().len(),
+        1,
+        "{:?}",
+        tools.source.fetched()
+    );
+    assert!(tools.env.is_installed(Artifact::Ruff));
+}

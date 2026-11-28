@@ -24,6 +24,7 @@ pub struct FakeSource {
     served: Mutex<HashMap<String, Vec<u8>>>,
     fetched: Mutex<Vec<String>>,
     fail_all: Mutex<Option<String>>,
+    delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakeSource {
@@ -38,6 +39,11 @@ impl FakeSource {
     /// Make every later fetch fail with `why` (a network outage).
     pub fn fail_everything(&self, why: &str) {
         *self.fail_all.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.to_string());
+    }
+
+    /// Make every later fetch take `delay` (a slow network).
+    pub fn delay_every_fetch(&self, delay: std::time::Duration) {
+        *self.delay.lock().unwrap_or_else(|e| e.into_inner()) = Some(delay);
     }
 
     /// Every URL fetched so far, in order.
@@ -56,6 +62,10 @@ impl ArtifactSource for FakeSource {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(url.to_string());
+        let delay = *self.delay.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some(why) = self
             .fail_all
             .lock()

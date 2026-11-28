@@ -108,23 +108,8 @@ impl ArtifactSource for OfficialReleaseSource {
                  fixture source"
             ));
         }
-        // Both timeouts are bounds, not estimates: the largest artifact (Node) is about 50 MB,
-        // and a stalled transfer must end in a disclosed refusal rather than a hung inspection.
-        let mut builder = reqwest::Client::builder()
-            .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(15 * 60));
-        if let Some(pem) = &self.extra_roots_pem {
-            let roots = reqwest::Certificate::from_pem_bundle(pem)
-                .map_err(|e| format!("could not read the extra root certificates: {e}"))?;
-            for root in roots {
-                builder = builder.add_root_certificate(root);
-            }
-        }
-        let client = builder
-            .build()
-            .map_err(|e| format!("could not build the HTTP client: {e}"))?;
-        let resp = client
+        let client = download_client(self.extra_roots_pem.as_deref())?;
+        let mut resp = client
             .get(url)
             .send()
             .await
@@ -135,10 +120,85 @@ impl ArtifactSource for OfficialReleaseSource {
                 resp.status().as_u16()
             ));
         }
-        resp.bytes()
+        if resp
+            .content_length()
+            .is_some_and(|n| n > MAX_DOWNLOAD_BYTES as u64)
+        {
+            return Err(format!(
+                "download of {url} is larger than the {MAX_DOWNLOAD_BYTES} bytes Camerata accepts"
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map(|b| b.to_vec())
-            .map_err(|e| format!("download of {url} was cut off: {e}"))
+            .map_err(|e| format!("download of {url} was cut off: {e}"))?
+        {
+            take_chunk(&mut bytes, &chunk, MAX_DOWNLOAD_BYTES)
+                .map_err(|e| format!("download of {url}: {e}"))?;
+        }
+        Ok(bytes)
+    }
+}
+
+/// The largest file Camerata downloads: a bound well above the largest pin (Node.js, about
+/// 50 MB), so a wrong or hostile response cannot fill the disk.
+pub(crate) const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
+
+/// The HTTP client every download uses: HTTPS only, redirects included (a release host redirects
+/// to its CDN; a redirect to plain http is refused), at most five redirects, and both timeouts as
+/// bounds (the largest pin is about 50 MB; a stalled transfer ends in a refusal, never a hang).
+pub(crate) fn download_client(extra_roots_pem: Option<&[u8]>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(15 * 60));
+    if let Some(pem) = extra_roots_pem {
+        let roots = reqwest::Certificate::from_pem_bundle(pem)
+            .map_err(|e| format!("could not read the extra root certificates: {e}"))?;
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
+    }
+    builder
+        .build()
+        .map_err(|e| format!("could not build the HTTP client: {e}"))
+}
+
+/// Append one received chunk to `buf`, refusing once the total would pass `cap`.
+pub(crate) fn take_chunk(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) -> Result<(), String> {
+    if buf.len() + chunk.len() > cap {
+        return Err(format!(
+            "the download is larger than the {cap} bytes Camerata accepts; it was stopped"
+        ));
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Where an older install of the same folder is moved while the new one is published: a hidden
+/// sibling that keeps the whole install name (a version's dots are not an extension).
+pub(crate) fn aside_path(dir: &Path) -> PathBuf {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    dir.with_file_name(format!(".{name}.old-{:x}", std::process::id()))
+}
+
+/// Remove every staging folder an earlier, interrupted install of `artifact` left. Called under the
+/// artifact's lock, so no live install owns one; another artifact's folders are left alone.
+async fn sweep_stale_staging(root: &Path, artifact: &ArtifactPins) {
+    let prefix = format!(".staging-{}-", artifact.install_dir_name());
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
     }
 }
 
@@ -263,6 +323,8 @@ pub async fn ensure_artifact(
 
     let root = pinned_root(tooling);
     tokio::fs::create_dir_all(&root).await?;
+    // We hold the lock, so a staging folder still here belongs to a dead install.
+    sweep_stale_staging(&root, artifact).await;
     let staging = root.join(format!(
         ".staging-{}-{:x}",
         artifact.install_dir_name(),
@@ -356,7 +418,7 @@ async fn mark_executable(_path: &Path) -> std::io::Result<()> {
 /// Move the finished staging folder to `dir`. A stale `dir` (an install from a different pin of
 /// the same version folder, or a broken one) is moved aside first and removed after.
 async fn publish(staging: &Path, dir: &Path) -> Result<(), ProvisionError> {
-    let aside = dir.with_extension(format!("old-{:x}", std::process::id()));
+    let aside = aside_path(dir);
     let had_old = tokio::fs::symlink_metadata(dir).await.is_ok();
     if had_old {
         tokio::fs::rename(dir, &aside).await?;
