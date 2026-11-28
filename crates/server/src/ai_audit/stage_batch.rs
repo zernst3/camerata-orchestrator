@@ -1642,15 +1642,22 @@ fn projected_input_usd<Id>(ctx: &StageCtx<'_>, sub: &[Work<Id>]) -> Option<f64> 
     Some(total)
 }
 
-/// Clear the submission intent: the submit ended (its id is saved, or it failed or was cancelled
-/// and nothing was accepted).
-fn clear_submit_intent(ctx: &StageCtx<'_>) {
+/// Clear the submission intent `nonce`: the submit ended (its id is saved, or it failed or was
+/// cancelled and nothing was accepted). Any other intent on file stays: one whose submit may
+/// have been accepted with its reply lost is kept for the resume to disclose.
+fn clear_submit_intent(ctx: &StageCtx<'_>, nonce: &str) {
     if let Some(cp) = ctx.checkpoint {
-        if let Err(e) = cp.save_intents(&[]) {
+        let mut intents = cp.intents();
+        intents.retain(|i| i.nonce != nonce);
+        if let Err(e) = cp.save_intents(&intents) {
             checkpoint_trouble(ctx, "submit intent", &e);
         }
     }
 }
+
+/// The stand-in for the id of a batch whose submit may have been accepted while its reply was
+/// lost: the items it holds are not sent again (see [`FailedItem::live_batch`]).
+pub(crate) const UNCONFIRMED_BATCH: &str = "(id never returned: the submit's reply was lost)";
 
 /// Resume, between the halves: a submission intent no saved batch carries the nonce of is a
 /// batch that may have been accepted by the provider while its id was never saved (the process
@@ -1669,10 +1676,10 @@ fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
     for intent in intents.iter().filter(|i| !saved.contains(&i.nonce)) {
         let note = format!(
             "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the \
-             earlier process stopped after asking the provider to accept it and before saving \
-             its id, so it cannot be polled or cancelled from here, and what it was charged, \
-             if anything, is not in this ledger. Check the Anthropic console. The items of it \
-             that have no result were submitted again.",
+             earlier process stopped, or the provider's reply was lost, after asking the provider \
+             to accept it and before its id was saved, so it cannot be polled or cancelled from \
+             here, and what it was charged, if anything, is not in this ledger. Check the \
+             Anthropic console. The items of it that have no result were submitted again.",
             intent.items.len(),
             stage.label()
         );
@@ -2644,7 +2651,11 @@ where
                     .map(|(cid, w)| (cid.clone(), w.id.to_string()))
                     .collect(),
             };
-            if let Err(e) = cp.save_intents(&[intent]) {
+            // Added to what is on file: an intent kept from an earlier submit of this stage whose
+            // reply was lost must survive this one.
+            let mut intents = cp.intents();
+            intents.push(intent);
+            if let Err(e) = cp.save_intents(&intents) {
                 checkpoint_trouble(ctx, "submit intent", &e);
             }
         }
@@ -2696,13 +2707,54 @@ where
         let batch_id = match submitted {
             Ok(id) => id,
             Err(e) if e.is::<JobCancelled>() => {
-                clear_submit_intent(ctx);
+                clear_submit_intent(ctx, &nonce);
                 book.cancelled = true;
                 break;
             }
+            Err(e)
+                if classify_pass_error(&e) == FailureClass::Transport
+                    && !camerata_llm::failure::never_reached_provider(&e) =>
+            {
+                // The request may have reached the provider and been accepted, with only the
+                // reply lost (a time-out after sending, a dropped connection, a 5xx): the batch
+                // may be running and billed. Sending the items again could bill them twice, so
+                // they are held, never sent again here, and the intent stays on file with their
+                // custom ids: a resume discloses the possibly orphaned batch.
+                let why = disclosable_error(&format!("{e:#}"));
+                let note = format!(
+                    "A batch of {} item(s) of the {} stage may have been accepted by the provider \
+                     although its reply was lost ({why}); its items were not sent again, since a \
+                     second submission could bill them twice. Check the Anthropic console. \
+                     Custom ids: {}.",
+                    sub.len(),
+                    stage.label(),
+                    sub_cids.join(", ")
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                let reason = format!(
+                    "the batch submission may have been accepted by the provider although its \
+                     reply was lost ({why}); it was not sent again, so it cannot be billed twice"
+                );
+                let attempts = failure::attempts_of(&e);
+                for w in sub {
+                    book.note_attempts(&w.id, attempts.clone());
+                    book.fail(
+                        &w.id,
+                        FailureClass::Transport,
+                        &reason,
+                        Some(UNCONFIRMED_BATCH.to_string()),
+                    );
+                    report_progress(ctx, stage, book);
+                }
+                continue;
+            }
             Err(e) => {
-                // Nothing was accepted, so nothing can be running: safe to send again.
-                clear_submit_intent(ctx);
+                // Nothing was accepted (the request provably never reached the provider, or the
+                // provider refused it), so nothing can be running: safe to send again.
+                clear_submit_intent(ctx, &nonce);
                 let class = classify_pass_error(&e);
                 let attempts = failure::attempts_of(&e);
                 let reason = format!(
@@ -2746,7 +2798,7 @@ where
                 })
                 .collect(),
             settled: false,
-            nonce: Some(nonce),
+            nonce: Some(nonce.clone()),
         };
         let mut records = ctx
             .checkpoint
@@ -2756,7 +2808,7 @@ where
         if let Some(cp) = ctx.checkpoint {
             match cp.save_batches(&records) {
                 // The id is on file: the intent has done its job.
-                Ok(()) => clear_submit_intent(ctx),
+                Ok(()) => clear_submit_intent(ctx, &nonce),
                 Err(e) => checkpoint_trouble(ctx, "batch list", &e),
             }
         }

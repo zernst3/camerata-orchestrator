@@ -587,7 +587,38 @@ pub(crate) async fn submit_round(
                 );
                 let error = disclosable_error(&format!("{:#}", failure.error));
                 let item = match &failure.batch_id {
-                    // Nothing was accepted, so nothing can be running: safe to send again.
+                    // The request may have reached the provider and been accepted with only the
+                    // reply lost (a time-out after sending, a dropped connection, a 5xx): the
+                    // batch may be running and billed. It is NOT sent again, which could bill the
+                    // same items twice outside the cap's sight.
+                    None if classify_pass_error(&failure.error) == FailureClass::Transport
+                        && !camerata_llm::failure::never_reached_provider(&failure.error) =>
+                    {
+                        if let Some(m) = ctx.meter {
+                            m.record_note(format!(
+                                "a batch of {} item(s) may have been accepted by the provider \
+                                 although its reply was lost ({error}); it was NOT sent again, \
+                                 since a second submission could bill the same items twice. \
+                                 Check the Anthropic console. Custom ids: {}.",
+                                sub.len(),
+                                sub.iter()
+                                    .map(|w| w.custom_id.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                        ItemFailure {
+                            reason: format!(
+                                "the batch submission may have been accepted by the provider \
+                                 although its reply was lost ({error}); it was not sent again, \
+                                 so it cannot be billed twice"
+                            ),
+                            resubmittable: false,
+                            second_tryable: false,
+                        }
+                    }
+                    // Nothing was accepted (the request provably never reached the provider, or
+                    // the provider refused it), so nothing can be running: safe to send again.
                     None => ItemFailure {
                         reason: format!("batch submission failed ({error})"),
                         resubmittable: true,

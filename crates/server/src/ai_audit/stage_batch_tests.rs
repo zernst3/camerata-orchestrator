@@ -347,6 +347,9 @@ struct Api {
     realtime_calls_at_submit: Mutex<Vec<usize>>,
     /// Batch rows report a read of the cached prefix.
     rows_read_cache: bool,
+    /// The submission with this index is accepted (the provider holds the batch) and its reply is
+    /// lost: the caller gets a time-out after sending.
+    lose_reply_of: Option<usize>,
 }
 
 impl Api {
@@ -369,7 +372,14 @@ impl Api {
             kill_after_accepting: false,
             realtime_calls_at_submit: Mutex::new(Vec::new()),
             rows_read_cache: false,
+            lose_reply_of: None,
         }
+    }
+
+    /// The `n`th submission is accepted and its reply lost on the way back.
+    fn losing_the_reply_of(mut self, n: usize) -> Self {
+        self.lose_reply_of = Some(n);
+        self
     }
 
     /// Every batch row reports reading the shared prefix from the cache.
@@ -506,6 +516,17 @@ impl BatchApi for Api {
         drop(batches);
         if self.kill_after_accepting {
             panic!("simulated kill: the process died after the provider accepted batch {id}");
+        }
+        if self.lose_reply_of == Some(call) {
+            let mut f = LlmCallFailure::new(
+                FailureClass::Transport,
+                "Anthropic API request failed after 3 retries: operation timed out",
+            );
+            f.attempts = vec![camerata_llm::failure::AttemptRecord {
+                message: "operation timed out".to_string(),
+                ..Default::default()
+            }];
+            return Err(anyhow::Error::new(f));
         }
         Ok(id)
     }
@@ -3380,4 +3401,91 @@ async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_while_the_ru
         assert!(out.failed.is_empty(), "{word}: {:?}", out.failed);
         assert_eq!(api.submit_calls.load(Ordering::SeqCst), 2, "{word}");
     }
+}
+
+/// A submit the provider accepted whose reply was lost (a time-out after sending) may be running
+/// and billed: the items are never sent again in this process, in a batch or in real time. They
+/// are held (no second try), and the submit's intent stays on file with their custom ids, so a
+/// resume reports the possibly orphaned batch. Exactly one batch reaches the provider.
+#[tokio::test(start_paused = true)]
+async fn a_submit_whose_reply_is_lost_after_acceptance_leaves_exactly_one_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let api = Api::new().losing_the_reply_of(0);
+    let mut stage = Scripted::new(&["a1", "a2"]);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(
+        api.batches.lock().unwrap().len(),
+        1,
+        "a second batch was submitted for items the provider may already be running"
+    );
+    assert_eq!(
+        api.realtime.call_count(),
+        0,
+        "the items were sent again in real time"
+    );
+    assert_eq!(out.failed.len(), 2);
+    for f in &out.failed {
+        assert!(f.live_batch.is_some(), "held, never second-tried: {f:?}");
+        assert!(f.reason.contains("may have been accepted"), "{f:?}");
+    }
+    let intents = cp.intents();
+    assert_eq!(intents.len(), 1, "the intent stays on file for the resume");
+    assert_eq!(intents[0].items.len(), 2, "with every custom id");
+}
+
+/// The scan passes' batch path: a submit whose reply was lost after acceptance is never resubmitted
+/// nor second-tried (exactly one batch at the provider). A submit refused before any connection
+/// was made is safe to send again and still is.
+#[tokio::test(start_paused = true)]
+async fn a_scan_sub_batch_whose_reply_is_lost_after_acceptance_is_never_resubmitted() {
+    let work: Vec<BatchWork> = (0..2)
+        .map(|i| BatchWork {
+            custom_id: format!("c{i}-b0"),
+            ci: i,
+            bi: 0,
+            req: request(prompt_for(&format!("w{i}"))),
+        })
+        .collect();
+    let refs: Vec<&BatchWork> = work.iter().collect();
+    let chunks: Vec<&[(String, String)]> = Vec::new();
+    let batches: Vec<&[(String, String)]> = Vec::new();
+    let meter = UsageMeter::default();
+    let api = Api::new().losing_the_reply_of(0);
+    let ctx = RoundContext {
+        api: &api,
+        repo: "acme/widgets",
+        label: "pass",
+        model: MODEL,
+        n_c: 0,
+        n_b: 0,
+        chunks: &chunks,
+        batches: &batches,
+        job: None,
+        meter: Some(&meter),
+        per_item_usd: None,
+        max_body_bytes: 192_000_000,
+        fatal_errors: false,
+    };
+    let out = submit_round(&ctx, &refs).await.unwrap();
+    assert_eq!(out.results.len(), 2);
+    for (cid, r) in &out.results {
+        let failure = r.as_ref().expect_err("no reply came back");
+        assert!(
+            !failure.resubmittable && !failure.second_tryable,
+            "{cid}: a submit that may have been accepted would be sent again: {}",
+            failure.reason
+        );
+    }
+    assert!(
+        meter
+            .notes()
+            .iter()
+            .any(|n| n.contains("may have been accepted") && n.contains("c0-b0")),
+        "the possibly running batch is noted with its custom ids: {:?}",
+        meter.notes()
+    );
+    assert_eq!(api.batches.lock().unwrap().len(), 1);
 }
