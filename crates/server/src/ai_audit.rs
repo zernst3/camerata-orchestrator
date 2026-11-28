@@ -359,7 +359,7 @@ mod run_completion_tests;
 mod second_try_tests;
 
 #[cfg(test)]
-mod rejection_reason_tests;
+pub(crate) mod rejection_reason_tests;
 
 #[cfg(test)]
 mod injection_tests;

@@ -38,6 +38,8 @@
 
 pub mod engine_pin;
 pub mod journal;
+pub mod recheck;
+pub mod store_only;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -479,6 +481,11 @@ pub struct RunRecord {
     /// for a run saved before it was recorded, which cannot be resumed.
     #[serde(default)]
     pub pin: Option<engine_pin::EnginePin>,
+    /// Each time the run's deterministic stages were rerun on another build with no model calls
+    /// (#588), oldest first: the build that made the model work and the build that ran the
+    /// checks. The pin above never changes, so a normal resume on another build stays refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reruns: Vec<engine_pin::RerunRecord>,
     /// Names the project (the repos together) so the cleanup and `latest` can find its runs.
     pub project_key: String,
     pub repos: Vec<RepoRecord>,
@@ -968,6 +975,15 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 // ── The store ────────────────────────────────────────────────────────────────────────────────
 
+/// The prompt seed a run record holds (hex), as bytes.
+pub(crate) fn decode_seed(hex: &str) -> [u8; crate::prompt_frame::NONCE_BYTES] {
+    let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
+    }
+    out
+}
+
 /// A run opened for work by this process.
 pub struct RunStore {
     dir: PathBuf,
@@ -976,6 +992,17 @@ pub struct RunStore {
     _lock: RunLock,
     /// The open segment of this process's work on the run; taken when the segment is closed.
     session: Mutex<Option<Session>>,
+    /// Set when the run is opened for a rerun of its deterministic stages (#588): the list the
+    /// journal and the agent finder's twin record every reply the store did not hold in. `None`
+    /// for every other run.
+    rerun_misses: Option<store_only::StoreOnlyMisses>,
+    /// The rerun this process is making, kept off the run until it reaches its end
+    /// ([`RunStore::commit_rerun`]): a rerun that is refused is not one the run went through.
+    pending_rerun: Mutex<Option<engine_pin::RerunRecord>>,
+    /// The bytes of `run.json` as they were before this process opened the run, put back when the
+    /// store is dropped unless [`RunStore::keep_changes`] was called: a recheck that is refused
+    /// leaves the saved run as it found it.
+    restore_on_drop: Mutex<Option<Vec<u8>>>,
 }
 
 pub(crate) struct StoreState {
@@ -1096,6 +1123,7 @@ impl RunStore {
             attempt: 1,
             engine_version: engine_version(),
             pin: Some(new.pin),
+            reruns: Vec::new(),
             project_key: new.project_key,
             repos,
             rules_fingerprint: new.ai_scan_key.directives_fingerprint.clone(),
@@ -1122,6 +1150,9 @@ impl RunStore {
             }),
             _lock: lock,
             session: Mutex::new(Some(session)),
+            rerun_misses: None,
+            pending_rerun: Mutex::new(None),
+            restore_on_drop: Mutex::new(None),
         });
         store.persist()?;
         Ok(store)
@@ -1131,6 +1162,22 @@ impl RunStore {
     /// process holds it), starts the next attempt and marks the run running. The caller has
     /// already decided the resume is allowed ([`check_resume`]).
     pub fn open(run_id: &str) -> Result<Arc<Self>, RunStoreError> {
+        Self::open_with(run_id, None)
+    }
+
+    /// [`Self::open`] for a rerun of the run's deterministic stages (#588): the store answers
+    /// every model request from what it holds and records each one it cannot in `misses`.
+    fn open_for_rerun_with(
+        run_id: &str,
+        misses: store_only::StoreOnlyMisses,
+    ) -> Result<Arc<Self>, RunStoreError> {
+        Self::open_with(run_id, Some(misses))
+    }
+
+    fn open_with(
+        run_id: &str,
+        rerun_misses: Option<store_only::StoreOnlyMisses>,
+    ) -> Result<Arc<Self>, RunStoreError> {
         let dir = runs_dir().join(run_id);
         let mut record = load_record(&dir)?;
         let lock = RunLock::acquire(&dir)?;
@@ -1152,6 +1199,9 @@ impl RunStore {
             }),
             _lock: lock,
             session: Mutex::new(Some(session)),
+            rerun_misses,
+            pending_rerun: Mutex::new(None),
+            restore_on_drop: Mutex::new(None),
         });
         store.persist()?;
         Ok(store)
@@ -1159,6 +1209,67 @@ impl RunStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The list of replies a rerun needed and the store did not hold; `Some` only for a run
+    /// opened by [`open_for_rerun`].
+    pub fn rerun_misses(&self) -> Option<&store_only::StoreOnlyMisses> {
+        self.rerun_misses.as_ref()
+    }
+
+    /// The rerun this process is making has reached its end with every reply served from the
+    /// store: put it on the run (see [`RunRecord::reruns`]) and its note, and return it for the
+    /// ledger. `None` when this process is not making a rerun, or already committed it.
+    pub fn commit_rerun(&self) -> Option<engine_pin::RerunRecord> {
+        let rerun = self
+            .pending_rerun
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        self.add_note(&format!(
+            "Rerun of the deterministic stages: the model work is build {} and the checks ran on \
+             build {}, with no model calls.",
+            rerun.model_build.short_commit().unwrap_or_default(),
+            rerun.deterministic_build.short_commit().unwrap_or_default()
+        ));
+        self.lock_state().record.reruns.push(rerun.clone());
+        let _ = self.persist();
+        Some(rerun)
+    }
+
+    /// Put `bytes` (the run's `run.json` as it was before this process opened it) back when the
+    /// store is dropped, unless [`Self::keep_changes`] is called first.
+    pub fn restore_run_json_on_drop(&self, bytes: Vec<u8>) {
+        *self
+            .restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(bytes);
+    }
+
+    /// The work of this process on the run is to stay: nothing is put back when it is dropped.
+    pub fn keep_changes(&self) {
+        self.restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
+    /// The recheck of this saved run reached its end with the export written: put what ran again
+    /// on the run (see [`RunRecord::reruns`]) and its note. Called once, after the export.
+    pub fn commit_recheck(&self, rerun: engine_pin::RerunRecord) {
+        let redone = rerun.recheck.as_ref().map_or(0, |d| d.clone_parts.len());
+        let asked: usize = rerun
+            .recheck
+            .as_ref()
+            .map_or(0, |d| d.clone_parts.iter().map(|p| p.asked_again).sum());
+        self.add_note(&format!(
+            "Recheck of a saved run: the model work is build {}; the final checks and the export \
+             ran on build {}; {redone} clone check part(s) were redone, {asked} call(s) made.",
+            rerun.model_build.short_commit().unwrap_or_default(),
+            rerun.deterministic_build.short_commit().unwrap_or_default(),
+        ));
+        self.lock_state().record.reruns.push(rerun);
+        let _ = self.persist();
     }
 
     /// Where the run's stage checkpoints live: inside the run's own folder, so they go when the
@@ -1239,12 +1350,8 @@ impl RunStore {
 
     /// The secret the prompt tokens of this run are drawn from.
     pub fn nonce_seed(&self) -> [u8; crate::prompt_frame::NONCE_BYTES] {
-        let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
         let hex = self.lock_state().record.nonce_seed.clone();
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
-        }
-        out
+        decode_seed(&hex)
     }
 
     /// Record a note on the run (once: the same text is not added twice) and write the record.
@@ -1451,6 +1558,14 @@ impl Drop for RunStore {
     /// return) still records the end of its segment.
     fn drop(&mut self) {
         self.end_segment();
+        let saved = self
+            .restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(bytes) = saved {
+            let _ = write_atomic(&self.dir.join("run.json"), &bytes);
+        }
     }
 }
 
@@ -1478,6 +1593,10 @@ pub struct FinishFailure {
     pub class: String,
     pub files: Vec<String>,
     pub scope_note: bool,
+    /// The stage records each rejected reply itself, at the point of rejection
+    /// ([`journal::reject_reply`]), so the blanket set-aside of a failed part must not touch its
+    /// other replies: the ones that parsed stay good and replay on a resume.
+    pub per_reply_rejections: bool,
 }
 
 /// One pass that did not run.
@@ -1729,6 +1848,17 @@ pub struct ResumeCheck<'a> {
 /// Decide whether `check.record` may be resumed. The refusal is a plain sentence naming what
 /// differs, never a code. A complete run says so ([`RunStoreError::AlreadyComplete`]).
 pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
+    check_resume_as(check, false)
+}
+
+/// [`check_resume`] for a rerun of the deterministic stages on another build (#588): the build
+/// may differ, everything else a stored reply depends on may not (the repo folders, the models,
+/// the rules the scan asks about, the questions asked, the rule library).
+pub fn check_rerun(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
+    check_resume_as(check, true)
+}
+
+fn check_resume_as(check: &ResumeCheck<'_>, rerun: bool) -> Result<(), RunStoreError> {
     let record = check.record;
     if record.status == RunStatus::Complete {
         return Err(RunStoreError::AlreadyComplete(format!(
@@ -1738,40 +1868,18 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
         )));
     }
     let refuse = |why: String| Err(RunStoreError::Refused(why));
-    engine_pin::check_pin(record.pin.as_ref(), check.build, check.corpus_version)
+    if rerun {
+        engine_pin::check_pin_for_rerun(
+            record.pin.as_ref(),
+            check.build,
+            check.corpus_version.unwrap_or_default(),
+        )
         .map_err(RunStoreError::Refused)?;
-    for saved in &record.repos {
-        let Some((_, now)) = check.trees.iter().find(|(name, _)| *name == saved.name) else {
-            return refuse(format!(
-                "repository {} was part of run {} but is not part of this one",
-                saved.name, record.run_id
-            ));
-        };
-        if now.commit != saved.commit {
-            return refuse(format!(
-                "repository {} is at commit {} now; run {} was made at commit {}. Check out \
-                 that commit to resume it, or start a new run",
-                saved.name,
-                now.commit.as_deref().map_or("(none)".to_string(), short),
-                record.run_id,
-                saved.commit.as_deref().map_or("(none)".to_string(), short),
-            ));
-        }
-        let unchanged = now.digest == saved.tree_at_start
-            || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
-        if !unchanged {
-            let which = if now.changed.is_empty() {
-                String::new()
-            } else {
-                format!(" (changed paths now: {})", named_changes(&now.changed))
-            };
-            return refuse(format!(
-                "repository {} has changes that were not there when run {} was made (an edited \
-                 or new file){which}; put the tree back as it was, or start a new run",
-                saved.name, record.run_id
-            ));
-        }
+    } else {
+        engine_pin::check_pin(record.pin.as_ref(), check.build, check.corpus_version)
+            .map_err(RunStoreError::Refused)?;
     }
+    check_repo_trees(record, &check.trees)?;
     if record.models.scan_exclusions != check.models.scan_exclusions {
         return refuse(format!(
             "Excluded by agreement is not the list run {} was made with, and its stored replies \
@@ -1809,6 +1917,49 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
             "run {} is being worked on right now; wait for it to finish",
             record.run_id
         )));
+    }
+    Ok(())
+}
+
+/// Refuse when a repo folder is not as run `record` left it: another commit, or changes since the
+/// tree the run ended on. The one test of "the tree is unchanged" a resume, a rerun and a recheck
+/// share.
+pub fn check_repo_trees(
+    record: &RunRecord,
+    trees: &[(String, TreeState)],
+) -> Result<(), RunStoreError> {
+    let refuse = |why: String| Err(RunStoreError::Refused(why));
+    for saved in &record.repos {
+        let Some((_, now)) = trees.iter().find(|(name, _)| *name == saved.name) else {
+            return refuse(format!(
+                "repository {} was part of run {} but is not part of this one",
+                saved.name, record.run_id
+            ));
+        };
+        if now.commit != saved.commit {
+            return refuse(format!(
+                "repository {} is at commit {} now; run {} was made at commit {}. Check out \
+                 that commit to resume it, or start a new run",
+                saved.name,
+                now.commit.as_deref().map_or("(none)".to_string(), short),
+                record.run_id,
+                saved.commit.as_deref().map_or("(none)".to_string(), short),
+            ));
+        }
+        let unchanged = now.digest == saved.tree_at_start
+            || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
+        if !unchanged {
+            let which = if now.changed.is_empty() {
+                String::new()
+            } else {
+                format!(" (changed paths now: {})", named_changes(&now.changed))
+            };
+            return refuse(format!(
+                "repository {} has changes that were not there when run {} was made (an edited \
+                 or new file){which}; put the tree back as it was, or start a new run",
+                saved.name, record.run_id
+            ));
+        }
     }
     Ok(())
 }
@@ -1902,6 +2053,64 @@ pub fn open_for_resume(
     Ok((store, estimate.render()))
 }
 
+/// Open the saved run `run_id` to rerun its deterministic stages on this build with no model calls
+/// (#588): the tool previews and their merges, the convention accounting, the ledger and integrity
+/// checks, the collapse and the export run again from the run's saved inputs, and every model
+/// reply comes from the run's store. THE one implementation of the rerun's entry: the command
+/// line's `--rerun-deterministic` comes through it (an app route will too).
+///
+/// Refuses, in plain words, anything a stored reply depends on that differs now (see
+/// [`check_rerun`]) and a client inspection on a build that cannot be named exactly. A normal
+/// resume on another build stays refused ([`open_for_resume`]); the run's pin is not changed, only
+/// the rerun is added to its record. Returns the opened store (its [`RunStore::rerun_misses`] is
+/// set) and the text to show before any work starts.
+pub fn open_for_rerun(
+    run_id: &str,
+    sources: &[(String, PathBuf)],
+    ai_scan_key: &AiScanKey,
+    models: &ModelsRecord,
+    pin: &engine_pin::EnginePin,
+    client_engagement: bool,
+) -> Result<(Arc<RunStore>, String), RunStoreError> {
+    let record = read_record(run_id)?;
+    if let Some(why) = engine_pin::client_start_refusal(client_engagement, &pin.build) {
+        return Err(RunStoreError::Refused(why));
+    }
+    let trees = sources
+        .iter()
+        .map(|(name, dir)| (name.clone(), tree_state(dir)))
+        .collect();
+    check_rerun(&ResumeCheck {
+        record: &record,
+        ai_scan_key,
+        models,
+        trees,
+        build: &pin.build,
+        corpus_version: Some(&pin.corpus_version),
+    })?;
+    let Some(saved) = record.pin.as_ref() else {
+        return Err(RunStoreError::Refused(
+            "this run did not record the build it started on".to_string(),
+        ));
+    };
+    let model_build = saved.build.clone();
+    let store = RunStore::open_for_rerun_with(run_id, store_only::StoreOnlyMisses::new())?;
+    let rerun = engine_pin::RerunRecord::new(&model_build, &pin.build);
+    *store
+        .pending_rerun
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(rerun);
+    let text = format!(
+        "Rerun: the deterministic stages run again on build {} from the stored replies of \
+         build {}. No model is asked; a reply the run does not hold refuses the whole rerun.\n  \
+         {} model call(s) stored and not sent again\n",
+        pin.build.short_commit().unwrap_or_default(),
+        model_build.short_commit().unwrap_or_default(),
+        estimate_resume(run_id).map_or(0, |e| e.calls_stored),
+    );
+    Ok((store, text))
+}
+
 /// What the cockpit shows before a resume is confirmed: what remains, what it should cost, and
 /// the reason the resume is not possible when it is not.
 #[derive(Debug, Clone, Serialize)]
@@ -1968,22 +2177,26 @@ pub fn note_report(store: &RunStore, report: &mut crate::onboard::ScanReport) {
     report.message = Some(parts.join(" · "));
 }
 
+/// The store's view of a failed part. A stage whose replies are each recorded as rejected at the
+/// point of rejection (today the clone judge) says so here, so the set-aside of a failed part
+/// leaves its good replies alone.
+pub(crate) fn finish_failure_of(f: &crate::ai_audit::FailedPass) -> FinishFailure {
+    FinishFailure {
+        repo: f.repo.clone(),
+        pass: f.pass.clone(),
+        class: f.class.as_str().to_string(),
+        files: f.files.clone(),
+        scope_note: f.scope_note,
+        per_reply_rejections: f.pass == crate::onboard::clone_advisory::FAILED_PASS_NAME,
+    }
+}
+
 /// The end of an attempt, from the finished report: tells the store which parts failed and
 /// whether the run is complete. Shared by the command line and the cockpit's scan job.
 pub fn finish_run(store: &RunStore, report: &crate::onboard::ScanReport, export_written: bool) {
     let reasons = report.incomplete_reasons();
     store.finish(&FinishOutcome {
-        failures: report
-            .failed_passes
-            .iter()
-            .map(|f| FinishFailure {
-                repo: f.repo.clone(),
-                pass: f.pass.clone(),
-                class: f.class.as_str().to_string(),
-                files: f.files.clone(),
-                scope_note: f.scope_note,
-            })
-            .collect(),
+        failures: report.failed_passes.iter().map(finish_failure_of).collect(),
         not_run: Vec::new(),
         scan_reached_end: true,
         export_written,

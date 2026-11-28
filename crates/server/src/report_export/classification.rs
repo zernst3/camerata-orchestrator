@@ -294,7 +294,7 @@ pub(crate) fn matrix_bucket(
 /// say, for the one case none of them cover — a row that earns an action bucket
 /// (do_now/do_next/plan) on severity/effort/disposition alone, survives every other gate, but
 /// has no fix to put in front of the client. Delegates entirely to
-/// [`is_action_row_missing_a_fix`] — see that function's doc comment for the exact scope (in
+/// [`is_action_row_missing_a_fix_with`]; see that function's doc comment for the exact scope (in
 /// particular, why an UNRECOGNIZED rule id is deliberately exempt). Shipping a recognized-but-
 /// unauthored rule's row as an action item with a blank Fix block is worse than silence — it
 /// reads as "we checked, here is what to do" when there is nothing to do yet. It is NOT dropped
@@ -306,6 +306,7 @@ pub(crate) fn matrix_bucket(
 /// mirroring `gate_uncited`'s identical pattern a few lines up in `build_report_json`).
 /// `"accepted"` is deliberately EXEMPT: an auditor who already accepted the risk is not
 /// expecting a fix at all, so a missing one there is not a gap this check needs to catch.
+#[cfg(test)]
 pub(crate) fn effective_bucket(
     finding: &Finding,
     disposition: Disposition,
@@ -313,6 +314,28 @@ pub(crate) fn effective_bucket(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen_option: Option<&str>,
+) -> &'static str {
+    effective_bucket_with(
+        finding,
+        disposition,
+        severity,
+        corpus,
+        test_file_count,
+        chosen_option,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// [`effective_bucket`] reading the project's chosen options of every rule (the rules merged into
+/// the row included), as the export surfaces do.
+pub(crate) fn effective_bucket_with(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> &'static str {
     if is_held_for_review(finding, disposition) {
         return "held";
@@ -328,13 +351,14 @@ pub(crate) fn effective_bucket(
         return "informational";
     }
     let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
-    if is_action_row_missing_a_fix(
+    if is_action_row_missing_a_fix_with(
         finding,
         disposition,
         severity,
         corpus,
         test_file_count,
         chosen_option,
+        chosen_options,
     ) {
         return "held";
     }
@@ -377,13 +401,14 @@ pub(crate) fn effective_bucket(
 /// hasn't run in a given synchronous test, is UNCHANGED by this gate — exactly as it was before
 /// C5-8 — because `resolve_fix` was never going to find a rule-level remediation for an invented
 /// id regardless of this feature.
-pub(crate) fn is_action_row_missing_a_fix(
+pub(crate) fn is_action_row_missing_a_fix_with(
     finding: &Finding,
     disposition: Disposition,
     severity: &str,
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> bool {
     if is_held_for_review(finding, disposition) || is_uncited_ai_finding(finding, corpus) {
         return false;
@@ -395,7 +420,7 @@ pub(crate) fn is_action_row_missing_a_fix(
     if !matches!(bucket, "do_now" | "do_next" | "plan") {
         return false;
     }
-    if has_any_fix(finding, corpus, chosen_option) {
+    if has_any_fix_with(finding, corpus, chosen_option, chosen_options) {
         return false;
     }
     // Neither fix half exists. Only count that as the C5-8 gap when the rule is one the
@@ -416,7 +441,7 @@ pub(crate) fn is_action_row_missing_a_fix(
 /// authored `effort` band — which means a recognized rule's row almost never reaches this
 /// gate in practice going forward: if it has a fix to show, [`resolve_effort`] can virtually
 /// always find a number to go with it. This function exists as the SAME kind of belt-and-
-/// suspenders runtime safety net [`is_action_row_missing_a_fix`] is for its own invariant
+/// suspenders runtime safety net [`is_action_row_missing_a_fix_with`] is for its own invariant
 /// (a corpus-authoring gap slipping past the build-time test some other way, a non-default
 /// resolved option, a corpus that failed to load at render time) — not an expected steady
 /// state. The fifth-consecutive-run alarm C6-B4 exists to close is exactly this: an

@@ -64,11 +64,12 @@ pub(crate) fn unfold_ruled_out(
     ruled_out: &dyn Fn(&Finding) -> bool,
 ) -> usize {
     // Most reports have no ruled-out row that carries anything: build nothing for them.
-    if !report
-        .findings
-        .iter()
-        .any(|f| (!f.also_locations.is_empty() || !f.also_matches.is_empty()) && ruled_out(f))
-    {
+    if !report.findings.iter().any(|f| {
+        (!f.also_locations.is_empty()
+            || !f.also_matches.is_empty()
+            || f.flagged_by.iter().any(|b| b.tool.is_none()))
+            && ruled_out(f)
+    }) {
         return 0;
     }
     let mut keys: HashSet<String> = HashSet::new();
@@ -77,7 +78,8 @@ pub(crate) fn unfold_ruled_out(
         let rule = f.rule_id.to_ascii_uppercase();
         keys.insert(finding_key(f));
         placed.insert((f.repo.clone(), f.path.clone(), f.line, rule));
-        for b in &f.flagged_by {
+        // A ruled-out row's folded sources are carried below, so they do not stand for a place.
+        for b in f.flagged_by.iter().filter(|_| !ruled_out(f)) {
             placed.insert((
                 f.repo.clone(),
                 b.path.clone(),
@@ -107,6 +109,30 @@ pub(crate) fn unfold_ruled_out(
                 headline: l.headline,
                 severity: l.severity,
                 consequence: l.consequence,
+            });
+        }
+        // A row the collapse folded into the host under a rule of its own is a place the ruling
+        // does not cover. A source from an external tool stays: the host's own rule covers it.
+        let (folded, stay): (Vec<_>, Vec<_>) = std::mem::take(&mut host.flagged_by)
+            .into_iter()
+            .partition(|b| b.tool.is_none() && is_other_rules_place(host, &host.repo, &b.rule_id));
+        host.flagged_by = stay;
+        for b in folded {
+            // The host's snippet is evidence for the host's own place only.
+            let snippet = if b.path == host.path && b.line == host.line {
+                host.snippet.clone()
+            } else {
+                String::new()
+            };
+            carried.push(Carried {
+                repo: host.repo.clone(),
+                path: b.path,
+                line: b.line,
+                rule_id: b.rule_id,
+                snippet,
+                headline: String::new(),
+                severity: String::new(),
+                consequence: false,
             });
         }
         for rule in std::mem::take(&mut host.also_matches) {

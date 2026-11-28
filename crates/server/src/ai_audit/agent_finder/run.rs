@@ -1303,6 +1303,25 @@ tokio::task_local! {
     static AGENT_OVERRIDE: std::sync::Arc<dyn PieceAgent>;
 }
 
+tokio::task_local! {
+    /// Set for a rerun of a saved run's deterministic stages (#588): the run's list of model
+    /// replies it needed and did not hold. While it is set no agent is ever built or asked.
+    static STORE_ONLY: crate::run_store::store_only::StoreOnlyMisses;
+}
+
+/// Run `fut` as a rerun's finder when `misses` is set: every piece is answered from the run's
+/// stored lines or is a miss, whatever agent the run would have built or a test handed in.
+/// Carried with the future like the finder's setup: never global.
+pub async fn with_optional_store_only<F: std::future::Future>(
+    misses: Option<crate::run_store::store_only::StoreOnlyMisses>,
+    fut: F,
+) -> F::Output {
+    match misses {
+        Some(m) => STORE_ONLY.scope(m, fut).await,
+        None => fut.await,
+    }
+}
+
 /// Run `fut` with `agent` standing in for the run's piece agent. The one test seam of the finder,
 /// carried with the future the way the run's checkpoint folder is
 /// ([`crate::checkpoint::with_run_checkpoints`]): never global, so two runs in one process cannot
@@ -1567,6 +1586,30 @@ pub(crate) async fn find_repo_for_run_with(
     };
     let empty = camerata_rules::RuleSet::default();
     let corpus = corpus.unwrap_or(&empty);
+    // A rerun of the deterministic stages never asks a model (#588): whatever agent would have
+    // been built or handed in, the pieces are answered from the run's stored lines or they are a
+    // miss. Decided before anything else, so no seam below can reach a real or scripted agent.
+    // A rerun that lost its store-only twin refuses; it never falls through to a real agent.
+    if STORE_ONLY.try_with(|_| ()).is_err() && crate::checkpoint::in_rerun_scope() {
+        anyhow::bail!(
+            "this is a rerun of the deterministic stages and no store-only finder is in place, \
+             so no agent is built and nothing was sent"
+        );
+    }
+    if let Ok(misses) = STORE_ONLY.try_with(Clone::clone) {
+        let agent = crate::run_store::store_only::StoreOnlyAgent::new(misses.clone());
+        return find_repo(
+            &agent,
+            repo,
+            files,
+            selected,
+            corpus,
+            controls,
+            &options,
+            meter.map(|m| &**m),
+        )
+        .await;
+    }
     if let Ok(agent) = AGENT_OVERRIDE.try_with(std::sync::Arc::clone) {
         return find_repo(
             &*agent,

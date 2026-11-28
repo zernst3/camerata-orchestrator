@@ -40,6 +40,8 @@ use std::sync::Arc;
 
 pub mod finder;
 pub mod plan_only;
+pub mod recheck;
+pub use recheck::{recheck_saved_inspect, run_recheck_saved};
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
@@ -1004,8 +1006,36 @@ pub async fn run_inspect_pipeline_with(
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
 ) -> Result<InspectOutcome, InspectError> {
+    // Boxed: the pipeline is one very large future, and callers (a test thread, the command line)
+    // hold this one on a small stack. The box keeps theirs a pointer.
+    Box::pin(run_inspect_pipeline_as(
+        args,
+        has_api_key,
+        creds,
+        seams,
+        false,
+    ))
+    .await
+}
+
+/// The one pipeline, as a new run or a resume (`rerun` false) or as a rerun of a saved run's
+/// deterministic stages on this build (`rerun` true, #588). A rerun is a resume whose model seam
+/// has no client behind it: every stage runs again from the saved inputs, every model reply comes
+/// from the run's store, and a reply the store does not hold refuses the whole rerun.
+async fn run_inspect_pipeline_as(
+    args: InspectArgs,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+    rerun: bool,
+) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
+    // A rerun makes no model call, so no spend gate may stop a stage of it: the run's limit is
+    // cleared for the rerun (and the stored spend is not counted against nothing).
+    if rerun {
+        controls.max_cost_usd = None;
+    }
 
     // The `(name, folder)` sources: one per `--repo`, named by `--repo-name` (a lone repo with
     // no name keeps its folder's name). The name tags every finding and provenance entry, the
@@ -1064,7 +1094,8 @@ pub async fn run_inspect_pipeline_with(
         camerata_server::split_scannable_rules(selected.clone()).await;
 
     // ── Backend resolution + the process-local usage ledger ────────────────────────────
-    let backend_resolution = resolve_backend(args.backend, has_api_key);
+    // A rerun asks no model, so it needs no key: the backend resolves as the run's own did.
+    let backend_resolution = resolve_backend(args.backend, has_api_key || rerun);
     // The mode: forced by `--batch` / `--realtime`, else the run's default (rank 2: a Message
     // Batch on the API backend). The CLI backend cannot batch; that is said once, here, before
     // any model call.
@@ -1129,6 +1160,22 @@ pub async fn run_inspect_pipeline_with(
     let engine_pin =
         camerata_server::run_store::engine_pin::EnginePin::for_run(corpus.as_ref(), &controls);
     let resumed: Option<(Arc<camerata_server::run_store::RunStore>, String)> = match &seams.resume {
+        Some(run_id) if rerun => Some(
+            camerata_server::run_store::open_for_rerun(
+                run_id,
+                &sources,
+                &ai_scan_key,
+                &models_record,
+                &engine_pin,
+                args.client_engagement,
+            )
+            .map_err(|e| match e {
+                camerata_server::run_store::RunStoreError::AlreadyComplete(m) => {
+                    InspectError::AlreadyComplete(m)
+                }
+                other => InspectError::Failed(other.to_string()),
+            })?,
+        ),
         Some(run_id) => Some(open_for_resume(
             run_id,
             &sources,
@@ -1138,12 +1185,16 @@ pub async fn run_inspect_pipeline_with(
         )?),
         None => None,
     };
+    // The replies a rerun needed and the run did not hold; every model seam below records here.
+    let rerun_misses = resumed
+        .as_ref()
+        .and_then(|(store, _)| store.rerun_misses().cloned());
     // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
     // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
     // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
     let mut group_review_notice: Option<String> = None;
     if let Some((store, _)) = &resumed {
-        controls.stored_spend_usd = store.stored_usd();
+        controls.stored_spend_usd = if rerun { 0.0 } else { store.stored_usd() };
         // The group reviewer stays on the model the run started with, whatever the default is now.
         let notice = store
             .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
@@ -1223,7 +1274,7 @@ pub async fn run_inspect_pipeline_with(
         // failed calls. A scripted model (tests) launches no program, so nothing to check.
         if let Some(why) = cli_version_refusal(
             matches!(backend_resolution, BackendResolution::Cli),
-            seams.llm.is_some(),
+            seams.llm.is_some() || rerun,
             &models,
             camerata_server::claude_version::check_run_models,
         ) {
@@ -1440,22 +1491,32 @@ pub async fn run_inspect_pipeline_with(
             camerata_server::llm::Backend::Cli
         }
     };
-    let real = match seams.llm {
-        Some(_) => None,
-        None => Some(
+    // A rerun has no model client at all: the seam is the store-only provider, whatever a test
+    // handed in, so no call can reach a real or scripted model.
+    let store_only_seam = rerun_misses.clone().map(|misses| {
+        camerata_server::run_store::store_only::seam(
+            misses,
+            matches!(backend_resolution, BackendResolution::Api),
+        )
+    });
+    let real = match (seams.llm, &store_only_seam) {
+        (Some(_), _) | (_, Some(_)) => None,
+        (None, None) => Some(
             camerata_server::onboard::build_llm(creds, llm_backend, Some(ledger.clone()))
                 .with_session_sink(sessions.clone()),
         ),
     };
-    let base: &dyn camerata_server::llm::LlmPort = match (seams.llm, real.as_ref()) {
-        (Some(llm), _) => llm,
-        (None, Some(real)) => real,
-        (None, None) => {
-            return Err(InspectError::Failed(
-                "no model client could be built for this run".to_string(),
-            ))
-        }
-    };
+    let base: &dyn camerata_server::llm::LlmPort =
+        match (&store_only_seam, seams.llm, real.as_ref()) {
+            (Some(seam), _, _) => seam,
+            (None, Some(llm), _) => llm,
+            (None, None, Some(real)) => real,
+            (None, None, None) => {
+                return Err(InspectError::Failed(
+                    "no model client could be built for this run".to_string(),
+                ))
+            }
+        };
     let journaled = store
         .as_ref()
         .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
@@ -1466,48 +1527,59 @@ pub async fn run_inspect_pipeline_with(
     // The agent finder's setup: one value, built once here and carried into the audit. The run
     // builds the agent from it on its own shared meter. A test that already stands an agent in
     // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
-    let finder_setup = camerata_server::ai_audit::agent_finder::run::finder_setup_for_run(
-        &controls,
-        ai_review_blocked,
-        llm_backend,
-        creds,
-        store.as_ref().map(|s| s.dir()),
-        args.client_engagement,
-    )
-    .map_err(InspectError::Failed)?;
+    // A rerun builds no agent (and needs no key): the finder answers from its stored pieces.
+    let finder_setup = if rerun {
+        None
+    } else {
+        camerata_server::ai_audit::agent_finder::run::finder_setup_for_run(
+            &controls,
+            ai_review_blocked,
+            llm_backend,
+            creds,
+            store.as_ref().map(|s| s.dir()),
+            args.client_engagement,
+        )
+        .map_err(InspectError::Failed)?
+    };
     let no_chosen_options: HashMap<String, String> = HashMap::new();
     let (mut report, manifest) = {
-        let audit = Box::pin(camerata_server::checkpoint::with_run_checkpoints(
-            store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(
-                token_seed,
-                camerata_server::onboard::audit_repos_with_llm_controlled(
-                    model_seam,
-                    &sources,
-                    &selected,
-                    Vec::new(),
-                    model,
-                    calibration_model,
-                    mode,
-                    false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
-                    None,  // feedback: no live transcript sink headlessly
-                    None,  // job: no job store headlessly (this call blocks until done)
-                    incremental_prior.as_ref(),
-                    false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
-                    true,  // soc2_enabled: irrelevant with `deep` off
-                    true,  // run_ai_review
-                    true,  // run_deterministic
-                    backend_resolution,
-                    corpus.as_ref(),
-                    &no_chosen_options,
-                    controls.clone(),
+        let audit = Box::pin(camerata_server::checkpoint::with_rerun_scope(
+            rerun,
+            camerata_server::checkpoint::with_run_checkpoints(
+                store.as_ref().map(|s| s.checkpoint_dir()),
+                camerata_server::prompt_frame::with_seed(
+                    token_seed,
+                    camerata_server::onboard::audit_repos_with_llm_controlled(
+                        model_seam,
+                        &sources,
+                        &selected,
+                        Vec::new(),
+                        model,
+                        calibration_model,
+                        mode,
+                        false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+                        None,  // feedback: no live transcript sink headlessly
+                        None,  // job: no job store headlessly (this call blocks until done)
+                        incremental_prior.as_ref(),
+                        false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+                        true,  // soc2_enabled: irrelevant with `deep` off
+                        true,  // run_ai_review
+                        true,  // run_deterministic
+                        backend_resolution,
+                        corpus.as_ref(),
+                        &no_chosen_options,
+                        controls.clone(),
+                    ),
                 ),
             ),
         ));
         let (mut report, manifest) =
-            camerata_server::ai_audit::agent_finder::run::with_optional_finder_setup(
-                finder_setup,
-                audit,
+            camerata_server::ai_audit::agent_finder::run::with_optional_store_only(
+                rerun_misses.clone(),
+                camerata_server::ai_audit::agent_finder::run::with_optional_finder_setup(
+                    finder_setup,
+                    audit,
+                ),
             )
             .await;
         if seams.llm.is_none() {
@@ -1601,37 +1673,45 @@ pub async fn run_inspect_pipeline_with(
             .iter()
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
-        camerata_server::checkpoint::with_run_checkpoints(
-            store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(token_seed, async {
-                camerata_server::ai_audit::group_review::review_scan_report(
-                    &mut report,
-                    model_seam,
-                    &controls,
-                    &rules,
-                    llm_backend == camerata_server::llm::Backend::Cli,
-                    batch,
-                    None,
-                    None,
-                    corpus.as_ref(),
-                )
-                .await;
-                // The possible-duplicate check reads the Fix ids the group reviewer just
-                // made; a failure of it is a note, never a failed part.
-                camerata_server::possible_duplicate::check::check_possible_duplicates(
-                    &mut report,
-                    model_seam,
-                    &controls,
-                    llm_backend == camerata_server::llm::Backend::Cli,
-                    batch,
-                    None,
-                    None,
-                )
-                .await;
-            }),
+        camerata_server::checkpoint::with_rerun_scope(
+            rerun,
+            camerata_server::checkpoint::with_run_checkpoints(
+                store.as_ref().map(|s| s.checkpoint_dir()),
+                camerata_server::prompt_frame::with_seed(token_seed, async {
+                    camerata_server::ai_audit::group_review::review_scan_report(
+                        &mut report,
+                        model_seam,
+                        &controls,
+                        &rules,
+                        llm_backend == camerata_server::llm::Backend::Cli,
+                        batch,
+                        None,
+                        None,
+                        corpus.as_ref(),
+                    )
+                    .await;
+                    // The possible-duplicate check reads the Fix ids the group reviewer just
+                    // made; a failure of it is a note, never a failed part.
+                    camerata_server::possible_duplicate::check::check_possible_duplicates(
+                        &mut report,
+                        model_seam,
+                        &controls,
+                        llm_backend == camerata_server::llm::Backend::Cli,
+                        batch,
+                        None,
+                        None,
+                    )
+                    .await;
+                }),
+            ),
         )
         .await;
     }
+    // The group reviewer and the duplicate check were the last model stages. A rerun that needed
+    // a reply the run does not hold is refused here as a whole, naming every missing reply of
+    // every model stage (the stages above ran on, answered by the store alone, so the list is
+    // complete), before anything is sealed, saved or exported.
+    refuse_rerun_with_misses(&store)?;
     // The tool causes are decided after the group reviewer, which re-sorts the rows of a rule.
     camerata_server::settle_tool_causes(&mut report, corpus.as_ref());
 
@@ -1674,6 +1754,11 @@ pub async fn run_inspect_pipeline_with(
             &model_record,
             args.client_tooling(),
         ));
+    // A rerun names both builds in the ledger: the model work and the deterministic checks.
+    // Only a rerun that got here (every reply served from the store) is recorded.
+    if let Some(rerun) = store.as_ref().and_then(|s| s.commit_rerun()) {
+        report.ledger.record_rerun(rerun);
+    }
     save_ledger(&ledger_file, &report.ledger);
     // The operator's failure report, next to the ledger (never in the export): every failed part
     // with every attempt's status, provider error, request id and waits.
@@ -1869,6 +1954,28 @@ pub async fn run_inspect_pipeline_with(
     })
 }
 
+/// Refuse a rerun (#588) that needed a model reply its saved run does not hold, naming every
+/// one. Nothing is exported and nothing was sent. A run that is not a rerun has no list.
+fn refuse_rerun_with_misses(
+    store: &Option<Arc<camerata_server::run_store::RunStore>>,
+) -> Result<(), InspectError> {
+    let refusal = store
+        .as_ref()
+        .and_then(|s| s.rerun_misses())
+        .and_then(camerata_server::run_store::store_only::StoreOnlyMisses::refusal);
+    match refusal {
+        Some(text) => {
+            // The tools of the stages above may have left files in the checkout: record where
+            // the tree ended, as any run does, so the next attempt is not refused on them.
+            if let Some(s) = store {
+                s.record_tree_end();
+            }
+            Err(InspectError::Failed(text))
+        }
+        None => Ok(()),
+    }
+}
+
 /// Open the saved run `run_id` to resume it (the one implementation lives in
 /// [`camerata_server::run_store::open_for_resume`]; the cockpit's button uses it too).
 fn open_for_resume(
@@ -2013,6 +2120,77 @@ pub async fn resume_inspect(
             ..seams
         },
     )
+    .await
+}
+
+/// Production entry point for `camerata inspect --rerun-deterministic <RUN>` (#588): rerun the
+/// deterministic stages of a saved run on this build with no model calls. No key is read and none
+/// is needed. Everything a stored reply depends on must be unchanged; a reply the run does not
+/// hold refuses the whole rerun. The shared work is in
+/// [`camerata_server::run_store::open_for_rerun`].
+pub async fn run_rerun_deterministic(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+) -> Result<InspectOutcome, InspectError> {
+    rerun_deterministic_inspect(
+        run,
+        repos,
+        export,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            resume: None,
+            llm: None,
+            preflight_sink: &|text| print!("{text}"),
+        },
+    )
+    .await
+}
+
+/// [`run_rerun_deterministic`] with its credential store and seams explicit. A model handed in
+/// through `seams.llm` is never called: a rerun's model seam is the store-only provider.
+pub async fn rerun_deterministic_inspect(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    use camerata_server::run_store as rs;
+    let project_key = match repos {
+        [] => None,
+        [one] => Some(camerata_server::scan_cache::state_dir::repo_state_key(one)),
+        many => Some(camerata_server::scan_cache::state_dir::project_state_key(
+            many,
+        )),
+    };
+    let run_id = rs::resolve_run(run, project_key.as_deref(), rs::RunOrigin::Cli)
+        .map_err(|e| InspectError::Failed(e.to_string()))?;
+    let record = rs::read_record(&run_id).map_err(|e| InspectError::Failed(e.to_string()))?;
+    if record.origin == rs::RunOrigin::Cockpit {
+        return Err(InspectError::Failed(format!(
+            "run {run_id} was started from the cockpit; `camerata inspect --rerun-deterministic` \
+             reruns runs started from the command line"
+        )));
+    }
+    let mut args: InspectArgs = serde_json::from_value(record.args.clone()).map_err(|e| {
+        InspectError::Failed(format!(
+            "run {run_id} did not save the arguments it was started with ({e}); start a new run"
+        ))
+    })?;
+    if let Some(export) = export {
+        args.export = export;
+    }
+    Box::pin(run_inspect_pipeline_as(
+        args,
+        true,
+        creds,
+        Seams {
+            resume: Some(run_id),
+            ..seams
+        },
+        true,
+    ))
     .await
 }
 

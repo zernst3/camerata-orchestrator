@@ -2034,6 +2034,14 @@ pub(super) fn write_start_here(
     ws.write_text(r, 0, v::P_WHAT_WE_CHECKED)?;
     ws.write_text(r, 1, &facts.coverage_summary)?;
     r += 1;
+    // An inspection finished by a rerun or recheck on another build names both builds and what
+    // ran again: the same sentence "How this was done" carries in the PDF.
+    if let Some(rerun) = report.ledger.rerun() {
+        ws.write_text(r, 0, v::P_HOW_THIS_WAS_DONE)?;
+        ws.write_text_with_format(r, 1, rerun.report_sentence(), &wrap)?;
+        ws.set_row_height(r, 80)?;
+        r += 1;
+    }
     // What a person read and the review budget: the PDF's words, so a blank Reviewed in person
     // cell is explained.
     ws.write_text(r, 0, v::H_REVIEWED_IN_PERSON)?;

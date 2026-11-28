@@ -937,6 +937,12 @@ pub(super) fn fix_failures(
     if let Some(leak) = fix_leaks_methodology(text) {
         out.push(FixFailure::MethodologyLeak(leak));
     }
+    #[cfg(any(test, feature = "test-support"))]
+    if crate::test_defects::rejecting_fix_replies() {
+        out.push(FixFailure::MethodologyLeak(
+            "injected stricter check".to_string(),
+        ));
+    }
     out
 }
 

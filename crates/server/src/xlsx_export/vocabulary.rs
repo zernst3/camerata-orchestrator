@@ -485,6 +485,8 @@ pub const P_GENERATED: &str = "Generated";
 /// "How this was done" prints the same heading.
 pub const P_MODELS_BY_STAGE: &str = "Inspection models by stage";
 pub const P_WHAT_WE_CHECKED: &str = "What we checked";
+/// Set only on an inspection finished by a recheck of its saved run: which build did what.
+pub const P_HOW_THIS_WAS_DONE: &str = "How this was done";
 /// The internal Start here line's label for the possible duplicate count.
 pub const P_POSSIBLE_DUPLICATES: &str = "Possible duplicates";
 /// The internal Start here line's label for the possible false positive count.

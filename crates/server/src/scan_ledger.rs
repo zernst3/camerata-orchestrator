@@ -632,6 +632,11 @@ pub struct ScanLedger {
     /// existed, or by a caller that does not record one.
     #[serde(default)]
     engagement: Option<crate::client_lock::EngagementRecord>,
+    /// Set when this ledger came from a rerun of a saved run's deterministic stages on another
+    /// build (#588): the build that made the model work and the build that ran the checks. The
+    /// report's "How this was done" names both. `None` for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rerun: Option<crate::run_store::engine_pin::RerunRecord>,
     /// The dependency files (manifests and lockfiles) the dependency audit was given, per repo,
     /// with those inside a bundled-code folder marked vendored. Disclosed in the dependency
     /// section of every export. `serde(default)` so an older ledger still loads.
@@ -996,9 +1001,15 @@ impl ConventionsBlock {
             .iter()
             .chain(discarded)
             .map(|f| f.site_key.as_str())
+            .chain(
+                rows.iter()
+                    .flat_map(|f| f.flagged_by.iter().map(|s| s.site_key.as_str())),
+            )
             .filter(|k| !k.is_empty())
             .collect();
         let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        // Only a FINAL row's `flagged_by` accounts for a folded row (the owner's ruling).
+        let is_final = |f: &crate::onboard::Finding| rows.iter().any(|r| std::ptr::eq(r, f));
         let place = |repo: &str, path: &str, line: usize, rule: &str| {
             let path = path.trim_start_matches("./");
             rows.iter().chain(discarded).any(|f| {
@@ -1012,6 +1023,15 @@ impl ConventionsBlock {
                             && l.line == line
                             && same(&l.rule_id, rule)
                     })
+                    // A row the collapse folded into another stays on the survivor's
+                    // `flagged_by` at its own place, under its own rule id: merged, not lost.
+                    || (f.repo == repo
+                        && is_final(f)
+                        && f.flagged_by.iter().any(|s| {
+                            s.path.trim_start_matches("./") == path
+                                && s.line == line
+                                && same(&s.rule_id, rule)
+                        }))
             })
         };
         let mut lost = Vec::new();
@@ -1852,6 +1872,16 @@ impl ScanLedger {
         self.engagement = Some(record);
     }
 
+    /// Record that this ledger came from a rerun of the deterministic stages (#588). Overwrites.
+    pub fn record_rerun(&mut self, rerun: crate::run_store::engine_pin::RerunRecord) {
+        self.rerun = Some(rerun);
+    }
+
+    /// The rerun this ledger came from, when it did.
+    pub fn rerun(&self) -> Option<&crate::run_store::engine_pin::RerunRecord> {
+        self.rerun.as_ref()
+    }
+
     /// Add what one repository held: waiver comments and baseline entries that were not honoured.
     pub fn add_client_suppressions(&mut self, found: usize) {
         self.client_suppressions_found += found;
@@ -1987,6 +2017,46 @@ impl ScanLedger {
     /// Record the convention accounting, replacing an earlier one.
     pub fn record_conventions(&mut self, block: ConventionsBlock) {
         self.conventions = Some(block);
+    }
+
+    /// Settle a clone-based rule's entry for `repo` after its clone check was redone on a saved
+    /// run (the recheck of an incomplete inspection): the rows the check emitted are added to the
+    /// entry's count, and when every candidate now has a verdict (`fully`) the rule is recorded
+    /// as having run, with the not-assessed disclosure taken off. Otherwise the entry keeps the
+    /// partial disclosure and `skip_reason` says what is left. Returns false when the ledger holds
+    /// no entry for the rule on that repo (nothing is changed then).
+    pub fn settle_clone_rule(
+        &mut self,
+        repo: &str,
+        rule_id: &str,
+        fully: bool,
+        skip_reason: Option<String>,
+        new_rows: usize,
+    ) -> bool {
+        let Some(entry) = self.rules.get_mut(&(rule_id.to_string(), repo.to_string())) else {
+            return false;
+        };
+        entry.findings_emitted += new_rows;
+        if fully {
+            entry.ran = true;
+            entry.skip_reason = None;
+            if entry
+                .coverage_note
+                .as_deref()
+                .is_some_and(|n| n == ADVISORY_PARTIAL_NOTE || n == ADVISORY_UNAVAILABLE_NOTE)
+            {
+                entry.coverage_note = None;
+            }
+        } else {
+            if !entry.ran {
+                entry.skip_reason = skip_reason;
+            }
+            entry.coverage_note = Some(ADVISORY_PARTIAL_NOTE.to_string());
+        }
+        self.advisory_partial_pending
+            .remove(&(repo.to_string(), rule_id.to_string()));
+        self.invalidate_merged();
+        true
     }
 
     /// The convention accounting of the run.
@@ -2686,6 +2756,44 @@ pub fn record_addition_stage(
     ledger.record_stage(stage, rows_in, rows_out, acc);
 }
 
+/// The start of every pipeline integrity disclosure's pass name: the failed passes the final
+/// checks make, which a recheck of a saved run replaces with the current build's result of the
+/// same checks.
+pub const INTEGRITY_PASS_PREFIX: &str = "pipeline integrity (";
+
+/// The pass name of a pipeline integrity disclosure about `what` (a stage name, or `convention
+/// accounting`).
+pub fn integrity_pass_name(what: &str) -> String {
+    format!("{INTEGRITY_PASS_PREFIX}{what})")
+}
+
+/// The disclosure for finder rows the convention accounting lost (`lost`: rule id, path, line of
+/// each), or `None` when none was. One producer for the scan and for the recheck of a saved run, so
+/// the two can never word the same failure differently.
+pub fn convention_accounting_failure(
+    repo_label: &str,
+    lost: &[(String, String, usize)],
+) -> Option<crate::ai_audit::FailedPass> {
+    let first = lost.first()?;
+    Some(crate::ai_audit::FailedPass {
+        repo: repo_label.to_string(),
+        pass: integrity_pass_name("convention accounting"),
+        reason: format!(
+            "{} finder row(s) counted for rules with options are in neither the final rows nor \
+             the rows set aside (first: {} at {}:{})",
+            lost.len(),
+            first.0,
+            first.1,
+            first.2,
+        ),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    })
+}
+
 /// A runtime disclosure for one stage's integrity gap, or `None` when the stage reconciled
 /// cleanly. Rides the EXISTING `FailedPass` mechanism (`crate::ai_audit::FailedPass`) into
 /// the report's methodology/executive-summary disclosure list — never a refused export, never
@@ -2699,7 +2807,7 @@ pub fn stage_disclosure(
     }
     Some(crate::ai_audit::FailedPass {
         repo: repo_label.to_string(),
-        pass: format!("pipeline integrity ({})", stage.stage),
+        pass: integrity_pass_name(&stage.stage),
         reason: format!(
             "{} of {} row(s) entering this stage have no recorded disposition (rows_out={}, \
              merged={}, held={}, informational={}, deduped={})",
