@@ -184,6 +184,7 @@ async fn run(
             resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| {},
+            tools: None,
         },
     )
     .await

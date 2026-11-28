@@ -311,6 +311,7 @@ async fn run_agent(
                 resume: None,
                 llm: Some(&llm),
                 preflight_sink: &|_| {},
+                tools: None,
             },
         ),
     ))
@@ -534,6 +535,7 @@ fn the_run_builds_its_own_agent_from_the_setup_with_the_key_and_the_meter() {
                 resume: None,
                 llm: Some(&llm),
                 preflight_sink: &|_| {},
+                tools: None,
             },
         ))
         .await;
@@ -648,6 +650,7 @@ fn settings_that_cannot_go_together_are_refused_before_the_agent_or_the_model_is
                     resume: None,
                     llm: Some(&llm),
                     preflight_sink: &|_| {},
+                    tools: None,
                 },
             ),
         ))
@@ -699,6 +702,7 @@ fn the_agent_finder_prints_its_own_estimate_never_the_engines() {
                     resume: None,
                     llm: Some(&llm),
                     preflight_sink: &|text| seen.lock().unwrap().push_str(text),
+                    tools: None,
                 },
             ),
         ))

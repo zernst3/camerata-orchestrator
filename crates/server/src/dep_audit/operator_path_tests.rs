@@ -5,8 +5,6 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use camerata_test_env::EnvGuard;
-
 use super::*;
 use crate::onboard::scope::RepoScope;
 
@@ -58,14 +56,8 @@ async fn an_osv_failure_stores_fixed_wording_and_logs_the_stderr_for_the_operato
     let osv = bin.join("osv-scanner");
     std::fs::write(&osv, FAILING_OSV).unwrap();
     std::fs::set_permissions(&osv, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _path = EnvGuard::set(
-        "PATH",
-        format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    );
+    // The fake is handed over by its path, as the pinned osv-scanner is (#587).
+    let _ = &tooling;
 
     let log = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()
@@ -78,7 +70,8 @@ async fn an_osv_failure_stores_fixed_wording_and_logs_the_stderr_for_the_operato
         "acme/web",
         &scan_dir,
         &scan_dir,
-        &tooling,
+        &osv,
+        std::ffi::OsStr::new("/usr/bin:/bin"),
         &RepoScope::none(),
     )
     .await;

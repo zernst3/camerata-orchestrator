@@ -150,6 +150,21 @@ struct World {
     state: PathBuf,
     repo: PathBuf,
     log: PathBuf,
+    /// A tooling folder seeded with fake tools under the real pins (#587): with
+    /// `CAMERATA_OFFLINE=1` the binary finds every tool ready and downloads nothing.
+    tooling: PathBuf,
+}
+
+/// Seed `tooling` with the fake tools, on a runtime of its own (callers may be inside one).
+fn seed_tooling(tooling: &Path) {
+    let tooling = tooling.to_path_buf();
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new().unwrap().block_on(
+            camerata_server::pinned_tools::fixtures::seed_fakes_under_the_real_pins(&tooling),
+        );
+    })
+    .join()
+    .unwrap();
 }
 
 fn world(root: &tempfile::TempDir, name: &str) -> World {
@@ -157,6 +172,8 @@ fn world(root: &tempfile::TempDir, name: &str) -> World {
     let bin_dir = base.join("bin");
     let state = base.join("state");
     let repo = base.join("repo");
+    let tooling = base.join("tooling");
+    seed_tooling(&tooling);
     for d in [&bin_dir, &state, &repo] {
         std::fs::create_dir_all(d).unwrap();
     }
@@ -172,11 +189,12 @@ fn world(root: &tempfile::TempDir, name: &str) -> World {
         bin_dir,
         state,
         repo,
+        tooling,
     }
 }
 
 fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camerata"));
+    let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
     cmd.args([
         "inspect",
         "--internal",
@@ -208,6 +226,8 @@ fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> C
         .env("CAMERATA_STATE_DIR", &w.state)
         .env(NO_KEYCHAIN, "1")
         .env("CAMERATA_DISABLE_DEP_AUDIT", "1")
+        .env("CAMERATA_OFFLINE", "1")
+        .env("CAMERATA_TOOLING_DIR", &w.tooling)
         .env("FAKE_LOG", &w.log)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -218,7 +238,7 @@ fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> C
 }
 
 fn resume_cmd(w: &World, export: &Path, envs: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camerata"));
+    let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
     cmd.args(["inspect", "--resume", "latest", "--export"])
         .arg(export);
     let path = format!(
@@ -230,6 +250,8 @@ fn resume_cmd(w: &World, export: &Path, envs: &[(&str, &str)]) -> Command {
         .env("CAMERATA_STATE_DIR", &w.state)
         .env(NO_KEYCHAIN, "1")
         .env("CAMERATA_DISABLE_DEP_AUDIT", "1")
+        .env("CAMERATA_OFFLINE", "1")
+        .env("CAMERATA_TOOLING_DIR", &w.tooling)
         .env("FAKE_LOG", &w.log)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

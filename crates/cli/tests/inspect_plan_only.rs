@@ -258,7 +258,7 @@ fn the_binary_exits_zero_with_figures_makes_no_connection_and_refuses_under_a_sm
     let before = snapshot(state.path());
     let repo_before = snapshot(&repo);
     let run = |extra: &[&str]| {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_camerata"));
+        let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
         cmd.args([
             "inspect",
             "--plan-only",
@@ -274,6 +274,9 @@ fn the_binary_exits_zero_with_figures_makes_no_connection_and_refuses_under_a_sm
         .env("CAMERATA_STATE_DIR", state.path())
         .env("CAMERATA_NO_KEYCHAIN", "1")
         .env("CAMERATA_DISABLE_DEP_AUDIT", "1")
+        // A plan never downloads; offline it could not even try (#587).
+        .env("CAMERATA_OFFLINE", "1")
+        .env("CAMERATA_TOOLING_DIR", state.path().join("tooling"))
         .env("ANTHROPIC_API_KEY", "dummy-key-not-a-real-credential")
         .env_remove("NO_PROXY")
         .env_remove("no_proxy");
@@ -552,6 +555,7 @@ async fn real_run(repo: &Path, cap: Option<f64>) -> (Vec<String>, Vec<PieceSeen>
                 resume: None,
                 llm: Some(&Quiet),
                 preflight_sink: &|t| printed.lock().unwrap().push(t.to_string()),
+                tools: None,
             },
         ),
     ))

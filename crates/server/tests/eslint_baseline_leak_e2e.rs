@@ -111,8 +111,10 @@ async fn a_scan_that_selects_only_the_hooks_rules_reports_no_baseline_eslint_row
         None,
         camerata_server::client_lock::ClientTooling::INTERNAL,
         &camerata_server::onboard::scope::ScanScope::none(),
+        &camerata_server::pinned_tools::ToolEnv::product().expect("a data folder"),
     )
-    .await;
+    .await
+    .expect("no provisioning stop");
 
     let eslint_rows: Vec<&onboard::Finding> = report
         .findings

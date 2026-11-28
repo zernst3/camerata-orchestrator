@@ -170,6 +170,8 @@ fn render_gallery(tag: &str) -> PathBuf {
     }
     std::fs::create_dir_all(&dir).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_camerata-ui"))
+        // No test downloads (#587): every Camerata binary a test starts runs offline.
+        .env("CAMERATA_OFFLINE", "1")
         .arg("gallery")
         .arg(&dir)
         .env("CAMERATA_NO_KEYCHAIN", "1")

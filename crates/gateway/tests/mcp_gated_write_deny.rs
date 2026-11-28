@@ -97,6 +97,8 @@ fn mcp_transport_denies_a_forbidden_gated_write_with_no_file_created() {
     // inside the 10s initialize window below and failed this test with a timeout. With stdin
     // closed the server sees end of input and exits; it is killed after 30s regardless.
     if let Ok(mut warm) = Command::new(bin)
+        // No test downloads (#587): every Camerata binary a test starts runs offline.
+        .env("CAMERATA_OFFLINE", "1")
         .env("CAMERATA_WORKTREE_ROOT", &jail)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -112,6 +114,8 @@ fn mcp_transport_denies_a_forbidden_gated_write_with_no_file_created() {
     }
 
     let child = match Command::new(bin)
+        // No test downloads (#587): every Camerata binary a test starts runs offline.
+        .env("CAMERATA_OFFLINE", "1")
         .env("CAMERATA_WORKTREE_ROOT", &jail)
         .env_remove("CAMERATA_RULES_FILE")
         .env_remove("CAMERATA_GATE_EVENTS_FILE")

@@ -419,12 +419,56 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    --json` also carries `unclassified_types`, for the operator only: files of types nothing reads or lists. A pattern that removed nothing is not a file: Coverage counts it in its own
    sentence ("1 pattern is excluded by agreement; nothing here is read by default.").
 
-   **Scan tools auto-install on first use.** Camerata auto-provisions Semgrep and ESLint into its
-   own cache directory (`~/Library/Application Support/camerata/tooling/` on macOS;
-   `~/.local/share/camerata/tooling/` on Linux) the first time a scan needs them. The bundled
-   Semgrep ruleset runs fully offline after the one-time install. If `python3` or `npm` is not on
-   the PATH, Camerata degrades gracefully; the operator gets a coverage note explaining the gap, and the
-   rest of the scan continues unaffected.
+   **Camerata installs every scan tool itself, before the inspection spends anything.** Camerata is
+   self-contained: every scan tool and every runtime a tool needs is downloaded on first use into
+   Camerata's own tooling folder, at a pinned version, and checked against a SHA-256 pinned in
+   Camerata before it is unpacked. Nothing comes from your `PATH` or a global install (no Homebrew
+   `ruff`, no system `python3`, no `node` of your own), and nothing is installed onto them.
+
+   - **The folder:** `~/Library/Application Support/camerata/tooling/` on macOS
+     (`~/.local/share/camerata/tooling/` on Linux). Each download lives under `pinned/<tool>-<version>/`;
+     the eslint packages live under `eslint/`. Deleting the folder is safe: the next inspection installs
+     again.
+   - **The pinned versions and where they come from** (each project's official release location only):
+
+     | Tool | Version | Runs on | Downloaded from |
+     |---|---|---|---|
+     | ruff | 0.17.5 | itself | github.com/astral-sh/ruff releases |
+     | eslint (with its plugins) | 9.39.5 | Node.js v24.22.3 | nodejs.org/dist, then the npm registry from Camerata's lockfile |
+     | semgrep | 1.185.0 | CPython 3.12.16 (python-build-standalone 20261110) | python-build-standalone releases on GitHub, then PyPI by hash |
+     | osv-scanner | v1.9.2 | itself | github.com/google/osv-scanner releases |
+
+     Builds are pinned for Apple silicon Macs (macOS arm64), the only Mac Camerata supports. **Intel Macs
+     are not supported:** an inspection or a plan on one is refused before any model call with one line,
+     "Intel Macs are not supported: Camerata runs on Apple silicon Macs." Linux builds are pinned too,
+     because Camerata's tests and CI run on Linux.
+   - **When:** the moment an inspection is started. Camerata works out the tool set from the stacks it
+     detects and the rules it selected (a Python repo needs ruff; a JavaScript or TypeScript repo needs
+     eslint). It prints the list and installs what is missing; only then does it make its first model
+     call. The first inspection on a new machine downloads about 200 MB; later ones reuse the folder.
+   - **The list** (`camerata inspect --plan-only` and the pre-flight both show it under `== TOOLS ==`):
+     each tool with its version and state: `ready`, `will be installed` or `cannot be provisioned`, plus
+     the folder. `--plan-only` only reads the folder; it never downloads or installs.
+   - **Refusals:** a client inspection is refused before any model call when a tool it needs cannot be
+     provisioned on this machine. Any inspection is refused when a download fails or a checksum does not
+     match ("this client inspection did not start: ruff 0.17.5 could not be provisioned: ... Nothing was
+     sent to a model."). Fix the network and start again.
+   - **During a run:** if a tool has to be installed again mid-run (the folder was deleted) and that
+     fails, the inspection stops. It is never reported as a coverage note.
+   - **Another folder, or no downloads at all:** `CAMERATA_TOOLING_DIR=<folder>` puts the tooling folder
+     somewhere else. `CAMERATA_OFFLINE=1` makes Camerata download nothing: a tool that is not already in the
+     folder is a refusal ("ruff is not installed in ... and Camerata is offline (CAMERATA_OFFLINE=1), so
+     nothing was downloaded"). Every Camerata test runs this way; no test downloads anything.
+   - **Isolated installs:** eslint installs with `npm ci --ignore-scripts` from the lockfile built into
+     Camerata, with npm's own config files and cache in the tooling folder (your `~/.npmrc` and
+     `npm_config_*` variables are ignored). semgrep installs with pip reading no configuration file and none
+     of your `PIP_*` variables. Every download is HTTPS only and capped at 256 MB.
+   - `cargo clippy` is the one tool Camerata does not install: it builds the repository with this
+     machine's own Rust toolchain, and in a client inspection it only runs with **Run client tooling**.
+     The list shows it as "not provisioned".
+   - **First run on a clean Mac (for the owner):** `cargo test -p camerata-server --lib
+     real_first_run_provision -- --ignored --nocapture` downloads every tool for real into a temporary
+     folder, checks every checksum and runs each tool once. It needs the network; nothing else runs it.
 
    Pick the **model** and the **scan mode** (the select's exact options are in §3c; Camerata
    auto-selects a recommended one by the codebase's size):

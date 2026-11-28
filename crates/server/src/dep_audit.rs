@@ -47,7 +47,7 @@ use crate::onboard::scope::RepoScope;
 use std::time::Duration;
 
 use crate::onboard::{CoverageNote, Finding};
-use crate::tool_provisioning;
+use crate::scan_tools::ToolProvisioningStop;
 
 mod manifests;
 
@@ -65,7 +65,7 @@ pub use manifests::{scrub_local_paths, unread_files_sentence};
 ///
 /// **Purpose:** test isolation.  Onboarding scan tests (`audit_repos` tests in
 /// `onboard.rs`) exercise scan logic, not dep-audit specifically.  Without this
-/// escape hatch those tests trigger `ensure_osv_scanner` → `download_osv_scanner`,
+/// escape hatch those tests trigger the pinned osv-scanner provisioning (`ToolEnv::ensure_osv_scanner`),
 /// which makes a live network request and hangs indefinitely in environments with
 /// no network or a blocked GitHub releases URL.
 ///
@@ -771,10 +771,42 @@ pub(crate) fn cvss_score_to_severity(score: f64) -> &'static str {
 async fn run_dep_audit_with_tooling(
     repo: &str,
     repo_dir: &Path,
-    tooling_dir: &Path,
+    tools: &crate::pinned_tools::ToolEnv,
     scope: &RepoScope,
-) -> (Vec<Finding>, Option<CoverageNote>) {
-    run_dep_audit_in(repo, repo_dir, repo_dir, tooling_dir, scope).await
+) -> Result<(Vec<Finding>, Option<CoverageNote>), ToolProvisioningStop> {
+    run_dep_audit_in(repo, repo_dir, repo_dir, tools, scope).await
+}
+
+/// The pinned osv-scanner (#587), or why the audit cannot run. `Ok(Err(note))` is a disclosed
+/// scope limit known before the run (no build for this machine, or the test-process guard);
+/// `Err(stop)` is a provisioning failure during the run, which stops it.
+async fn pinned_osv_scanner(
+    repo: &str,
+    tools: &crate::pinned_tools::ToolEnv,
+) -> Result<Result<std::path::PathBuf, CoverageNote>, ToolProvisioningStop> {
+    use crate::tool_provisioning::ProvisionError as P;
+    match tools.ensure_osv_scanner().await {
+        Ok(bin) => Ok(Ok(bin)),
+        Err(
+            e @ (P::UnsupportedPlatform { .. }
+            | P::NoArtifactForPlatform { .. }
+            | P::RealToolingProtected { .. }),
+        ) => Ok(Err(CoverageNote {
+            tool_failed: false,
+            repo: None,
+            tool: TOOL_NAME.to_string(),
+            message: operator_only_failure(
+                repo,
+                "osv-scanner could not be provisioned",
+                &e.to_string(),
+            ),
+        })),
+        Err(e) => Err(ToolProvisioningStop {
+            repo: repo.to_string(),
+            tool: TOOL_NAME,
+            reason: e.to_string(),
+        }),
+    }
 }
 
 /// [`run_dep_audit_with_tooling`] with the folder osv-scanner runs on (`scan_dir`, the scan's
@@ -785,11 +817,25 @@ async fn run_dep_audit_in(
     repo: &str,
     repo_dir: &Path,
     scan_dir: &Path,
-    tooling_dir: &Path,
+    tools: &crate::pinned_tools::ToolEnv,
     scope: &RepoScope,
-) -> (Vec<Finding>, Option<CoverageNote>) {
+) -> Result<(Vec<Finding>, Option<CoverageNote>), ToolProvisioningStop> {
+    // Fast-exit when the disable env var is set (test isolation, see `DISABLE_ENV_VAR`).
+    if std::env::var(DISABLE_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok((Vec::new(), None));
+    }
+    let bin = match pinned_osv_scanner(repo, tools).await? {
+        Ok(bin) => bin,
+        Err(mut note) => {
+            note.repo.get_or_insert_with(|| repo.to_string());
+            return Ok((Vec::new(), Some(note)));
+        }
+    };
     let (mut findings, mut note) =
-        run_dep_audit_core(repo, repo_dir, scan_dir, tooling_dir, scope).await;
+        run_dep_audit_core(repo, repo_dir, scan_dir, &bin, &tools.child_path(), scope).await;
     // osv-scanner discovers lockfiles itself (`-r`), so a lockfile the project's exclusion list
     // names is dropped from its results here: the audit reports nothing about an excluded file.
     drop_excluded(&mut findings, scope);
@@ -798,7 +844,7 @@ async fn run_dep_audit_in(
     if let Some(n) = note.as_mut() {
         n.repo.get_or_insert_with(|| repo.to_string());
     }
-    (findings, note)
+    Ok((findings, note))
 }
 
 /// `path` relative to `root`, forward-slashed: directly, else through their real (canonical)
@@ -829,7 +875,9 @@ async fn run_dep_audit_core(
     repo: &str,
     repo_dir: &Path,
     scan_dir: &Path,
-    tooling_dir: &Path,
+    bin: &Path,
+    // The child `PATH` (Camerata's runtimes, then the OS folders): never the user's.
+    path_env: &std::ffi::OsStr,
     scope: &RepoScope,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
     // Fast-exit when the disable env var is set.  This is exclusively for test
@@ -840,25 +888,6 @@ async fn run_dep_audit_core(
     {
         return (Vec::new(), None);
     }
-
-    let bin = match tool_provisioning::ensure_osv_scanner(tooling_dir).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                Vec::new(),
-                Some(CoverageNote {
-                    tool_failed: false,
-                    repo: None,
-                    tool: TOOL_NAME.to_string(),
-                    message: operator_only_failure(
-                        repo,
-                        "osv-scanner could not be provisioned",
-                        &e.to_string(),
-                    ),
-                }),
-            );
-        }
-    };
 
     let bin_str = bin.to_string_lossy().into_owned();
 
@@ -875,6 +904,7 @@ async fn run_dep_audit_core(
         Duration::from_secs(120),
         tokio::process::Command::new(&bin_str)
             .args(osv_args(scan_dir))
+            .env("PATH", path_env)
             .envs(
                 crate::scan_mirror::git_ceiling_for(scan_dir)
                     .map(|c| ("GIT_CEILING_DIRECTORIES", c)),
@@ -1099,9 +1129,9 @@ fn given_to_osv(
 }
 
 /// Fold the files that failed to copy into the audit's outcome. When the audit did not run (a
-/// timeout, a spawn or parse error, provisioning), its own note stands as it is and no file is
-/// listed as checked: appending the not-copied text would make that note read as a run that
-/// happened. When it ran, the not-copied text is added, so the run is never read as clean.
+/// timeout, a spawn or parse error, no build of osv-scanner for this machine), its own note
+/// stands as it is and no file is listed as checked: appending the not-copied text would make
+/// that note read as a run that happened. When it ran, the not-copied text is added, so the run is never read as clean.
 fn with_copy_failures(
     repo: &str,
     note: Option<CoverageNote>,
@@ -1149,71 +1179,82 @@ pub fn record_audited_files(
     }
 }
 
-/// Run osv-scanner on `repo_dir` and return `(findings, coverage_note)`.
+/// [`run_dep_audit_listed`] under a time limit for the SCAN (the app's 60 s bound).
 ///
-/// On success: returns a possibly-empty `Vec<Finding>` and `None` for the note, unless the run
-/// left something unchecked (manifests no lockfile covers, files osv-scanner could not read), in
-/// which case the note says so (M12).
-/// On any failure (provisioning, subprocess, parse): returns `Vec::new()` and
-/// `Some(CoverageNote)` describing why dep-audit did not run.  The scan continues
-/// either way.
-///
-/// The invocation is: `osv-scanner --format json -r <repo_dir>`
-/// (`-r` / `--recursive` lets osv-scanner discover all lockfiles under the root).
-///
-/// # Fail-soft
-///
-/// When the Camerata data dir cannot be resolved (unusual) or osv-scanner cannot
-/// be provisioned (network unavailable, unsupported platform, no Go toolchain),
-/// a `CoverageNote` is returned and the scan is NOT aborted.
-pub async fn run_dep_audit(
+/// osv-scanner is provisioned FIRST, outside the limit: a slow first download is never cut short
+/// into a "timed out" coverage note, and a provisioning failure is a [`ToolProvisioningStop`] (the
+/// run-integrity rule), never a note. Only the scan itself is bounded; a scan past the limit is the
+/// disclosed timeout note it always was.
+pub async fn run_dep_audit_bounded(
     repo: &str,
     repo_dir: &Path,
     scope: &RepoScope,
-) -> (Vec<Finding>, Option<CoverageNote>) {
-    let (findings, note, _files) = run_dep_audit_listed(repo, repo_dir, scope).await;
-    (findings, note)
+    tools: &crate::pinned_tools::ToolEnv,
+    limit: Duration,
+) -> Result<
+    (
+        Vec<Finding>,
+        Option<CoverageNote>,
+        Vec<crate::scan_ledger::AuditedDependencyFile>,
+    ),
+    ToolProvisioningStop,
+> {
+    let disabled = std::env::var(DISABLE_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !disabled {
+        if let Err(mut note) = pinned_osv_scanner(repo, tools).await? {
+            note.repo.get_or_insert_with(|| repo.to_string());
+            return Ok((Vec::new(), Some(note), Vec::new()));
+        }
+    }
+    match tokio::time::timeout(limit, run_dep_audit_listed(repo, repo_dir, scope, tools)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Ok((Vec::new(), Some(timed_out_note(repo, limit)), Vec::new())),
+    }
 }
 
-/// [`run_dep_audit`] plus the dependency files osv-scanner was actually given: the ones that
-/// are in its mirror, so a file that failed to copy is never listed as checked (it is named in
-/// the coverage note instead). Empty when the audit did not run.
+/// The note for a dependency scan that ran past its limit.
+fn timed_out_note(repo: &str, limit: Duration) -> CoverageNote {
+    CoverageNote {
+        tool_failed: false,
+        repo: Some(repo.to_string()),
+        tool: TOOL_NAME.to_string(),
+        message: format!(
+            "dependency audit (osv-scanner) timed out after {} s for {repo}",
+            limit.as_secs()
+        ),
+    }
+}
+
+/// Run the dependency audit (`osv-scanner --format json -r <mirror>`) for one repo with the
+/// pinned osv-scanner from `tools` (#587), and return the findings, a coverage note when the
+/// audit could not run or covered less than the repo has, and the dependency files osv-scanner
+/// was actually given: the ones that are in its mirror, so a file that failed to copy is never
+/// listed as checked (it is named in the coverage note instead). Empty when the audit did not run.
+///
+/// `Err` is a provisioning failure during the run: it stops the run, never a coverage note.
 pub async fn run_dep_audit_listed(
     repo: &str,
     repo_dir: &Path,
     scope: &RepoScope,
-) -> (
-    Vec<Finding>,
-    Option<CoverageNote>,
-    Vec<crate::scan_ledger::AuditedDependencyFile>,
-) {
-    // Resolve the Camerata tooling dir where provisioned binaries live.
-    let tooling_dir = match tool_provisioning::tooling_dir() {
-        Some(d) => d,
-        None => {
-            return (
-                Vec::new(),
-                Some(CoverageNote {
-                    tool_failed: false,
-                    repo: Some(repo.to_string()),
-                    tool: TOOL_NAME.to_string(),
-                    message: "dependency audit (osv-scanner) did not run: \
-                              could not resolve Camerata data dir for tool provisioning"
-                        .to_string(),
-                }),
-                Vec::new(),
-            );
-        }
-    };
+    tools: &crate::pinned_tools::ToolEnv,
+) -> Result<
+    (
+        Vec<Finding>,
+        Option<CoverageNote>,
+        Vec<crate::scan_ledger::AuditedDependencyFile>,
+    ),
+    ToolProvisioningStop,
+> {
     // The scan's mirror: osv-scanner runs on a private copy of the admitted files and manifests,
     // never on the checkout, so a link inside the checkout cannot lead it to an outside file.
     if std::env::var(DISABLE_ENV_VAR)
         .map(|v| !v.is_empty())
         .unwrap_or(false)
     {
-        let (findings, note) =
-            run_dep_audit_with_tooling(repo, repo_dir, &tooling_dir, scope).await;
-        return (findings, note, Vec::new());
+        let (findings, note) = run_dep_audit_with_tooling(repo, repo_dir, tools, scope).await?;
+        return Ok((findings, note, Vec::new()));
     }
     let dir = repo_dir.to_path_buf();
     let scope_for_read = scope.clone();
@@ -1232,7 +1273,7 @@ pub async fn run_dep_audit_listed(
     let mirror = match mirror {
         Ok(m) => m,
         Err(why) => {
-            return (
+            return Ok((
                 Vec::new(),
                 Some(CoverageNote {
                     tool_failed: true,
@@ -1241,12 +1282,18 @@ pub async fn run_dep_audit_listed(
                     message: format!("dependency audit (osv-scanner) did not run: {why}"),
                 }),
                 Vec::new(),
-            );
+            ));
         }
     };
     let copy_failed = mirror.copy_failed.clone();
-    let (findings, note) =
-        run_dep_audit_in(repo, repo_dir, mirror.path(), &tooling_dir, scope).await;
+    let ran = run_dep_audit_in(repo, repo_dir, mirror.path(), tools, scope).await;
+    let (findings, note) = match ran {
+        Ok(done) => done,
+        Err(stop) => {
+            mirror.finish().await;
+            return Err(stop);
+        }
+    };
     // The dependency files it was given: those that are really in the mirror.
     let files = given_to_osv(
         audited_dependency_files(repo, repo_dir, scope),
@@ -1255,7 +1302,7 @@ pub async fn run_dep_audit_listed(
     );
     mirror.finish().await;
     let (note, files) = with_copy_failures(repo, note, files, &copy_failed);
-    (findings, note, files)
+    Ok((findings, note, files))
 }
 
 // ─── tests (pure parser + severity mapping) ──────────────────────────────────
@@ -1638,11 +1685,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn live_osv_reads_a_lockfile_a_gitignore_names_when_run_with_no_ignore() {
-        let Some(tooling) = tool_provisioning::tooling_dir() else {
+        let Ok(tools) = crate::pinned_tools::ToolEnv::product() else {
             return;
         };
-        let bin = tool_provisioning::osv_scanner_bin(&tool_provisioning::osv_scanner_dir(&tooling));
-        if !bin.is_file() {
+        let Some(bin) = tools.platform.and_then(|p| {
+            crate::pinned_tools::fetch::entry_point(
+                &tools.tooling,
+                tools.pins(crate::pinned_tools::Artifact::OsvScanner),
+                p,
+            )
+        }) else {
+            return;
+        };
+        if !tools.is_installed(crate::pinned_tools::Artifact::OsvScanner) {
             eprintln!("skipping: osv-scanner is not provisioned on this machine");
             return;
         }
@@ -1920,82 +1975,102 @@ mod tests {
         assert_eq!(findings[0].path, "/tmp/something/package-lock.json");
     }
 
-    // ── fail-soft: provisioning failure → coverage note ──────────────────────
+    // ── provisioning during the run (#587) ──────────────────────────────────
     //
-    // When osv-scanner cannot be provisioned (no binary on PATH, no cached binary,
-    // no network, no Go toolchain) the pass MUST emit a CoverageNote and return an
-    // empty findings list — never panic, never a silent clean result.
-    //
-    // We exercise this through `run_dep_audit_with_tooling` with a temp dir that
-    // has no cached binary inside it AND where neither `osv-scanner` nor `go` are
-    // expected on PATH in a typical CI-free unit test context.  The function will
-    // attempt to download from GitHub and fail (no binary in the tmp dir, no Go).
-    // We capture what comes back and assert the invariants regardless of HOW
-    // provisioning failed.
+    // osv-scanner is provisioned before the first model call. If it has to be provisioned at
+    // audit time and that fails, the run STOPS: the result is a `ToolProvisioningStop`, never a
+    // coverage note that would let the run finish as if the audit were a scope limit. What was
+    // known before the run (no build for this machine) stays a disclosed note.
 
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn provisioning_failure_emits_coverage_note_not_panic() {
-        use tempfile::TempDir;
-        // A fresh temp tooling dir: no cached binary inside it.  ensure_osv_scanner
-        // will probe PATH (osv-scanner almost certainly not there in unit tests),
-        // then try to download / go install.  Either it succeeds (machine has
-        // osv-scanner or network+Go) — in which case we get findings — or it fails
-        // with a coverage note.  In both cases no panic is the invariant.
-        // We just verify the type contract, not a specific outcome.
-        let tmp = TempDir::new().unwrap();
-        let repo_dir = std::path::Path::new("/nonexistent-camerata-dep-audit-repo-xyz");
-        let (findings, note) =
-            run_dep_audit_with_tooling("acme/test", repo_dir, tmp.path(), &RepoScope::none()).await;
-        // One of two valid outcomes:
-        //   (a) provisioning failed → findings empty, note is Some
-        //   (b) provisioning succeeded but repo_dir doesn't exist → note is Some, findings empty
-        // Either way: no panic, and the result is type-safe.
-        // We assert the invariant: findings empty AND note has the right tool name
-        // when it is present.
-        if let Some(ref n) = note {
-            assert_eq!(n.tool, "osv-scanner", "coverage note must name the tool");
-            assert_eq!(
-                n.repo.as_deref(),
-                Some("acme/test"),
-                "and the repo it is about"
-            );
-            assert!(!n.message.is_empty(), "coverage note must have a message");
-        }
-        // Findings from a nonexistent repo dir are always empty.
+    async fn a_provisioning_failure_during_the_audit_stops_the_run_not_a_note() {
+        let _on = camerata_test_env::EnvGuard::remove(DISABLE_ENV_VAR);
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
+        tools
+            .source
+            .fail_everything("network unreachable (fixture)");
+        let repo = tempfile::tempdir().unwrap();
+        let stop =
+            run_dep_audit_with_tooling("acme/test", repo.path(), &tools.env, &RepoScope::none())
+                .await
+                .expect_err("the run stops");
+        assert_eq!(stop.tool, "osv-scanner");
+        assert_eq!(stop.repo, "acme/test");
+        assert!(stop.reason.contains("unreachable"), "{}", stop.reason);
         assert!(
-            findings.is_empty(),
-            "dep-audit on a nonexistent dir must produce no findings: {findings:?}"
+            stop.to_string().starts_with("the inspection stopped"),
+            "{stop}"
         );
     }
 
-    /// Verify the fail-soft contract when the tooling dir cannot be written to
-    /// (read-only, empty, no cached binary and no network write capability).
-    /// The function must return a coverage note describing the failure, not panic.
+    /// The app bounds the dependency audit at 60 s. The bound is for the SCAN: a slow first
+    /// download of osv-scanner is not cut short into a "timed out" note, and a download that fails
+    /// stops the run (the run-integrity rule), never a coverage note.
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn no_cached_binary_and_impossible_tooling_dir_emits_note() {
-        // /nonexistent-tooling-xyz: does not exist, cannot be created (root-owned
-        // path segment).  ensure_osv_scanner will try PATH (likely fails), try the
-        // cache probe (the dir doesn't exist → no binary), then try to create the
-        // dir (fails because /nonexistent… is not writable as a non-root user on
-        // typical Unix systems).  Result: InstallFailed → CoverageNote.
-        //
-        // NOTE: on macOS / Linux the path /nonexistent-xyz below the root IS
-        // creatable by the current user IF they have root privs (e.g. CI sudo).
-        // We don't gate this on whether creation fails — the invariant is just
-        // "no panic and the result is well-typed."
-        let tooling = std::path::Path::new("/nonexistent-camerata-tooling-dir-xyz");
-        let repo_dir = std::path::Path::new("/nonexistent-camerata-repo-xyz");
+    async fn the_scan_time_limit_never_turns_a_provisioning_problem_into_a_note() {
+        let _on = camerata_test_env::EnvGuard::remove(DISABLE_ENV_VAR);
+        let repo = tempfile::tempdir().unwrap();
+        let limit = Duration::from_millis(100);
+
+        let slow = crate::pinned_tools::fixtures::FakeTools::new();
+        slow.source.delay_every_fetch(Duration::from_millis(600));
+        let (_, note, _) = run_dep_audit_bounded(
+            "acme/test",
+            repo.path(),
+            &RepoScope::none(),
+            &slow.env,
+            limit,
+        )
+        .await
+        .expect("a slow download is not a stop");
+        assert!(
+            note.as_ref()
+                .is_none_or(|n| !n.message.contains("timed out")),
+            "the download was cut short by the scan's limit: {note:?}"
+        );
+        assert!(slow
+            .env
+            .is_installed(crate::pinned_tools::Artifact::OsvScanner));
+
+        let broken = crate::pinned_tools::fixtures::FakeTools::new();
+        broken.source.delay_every_fetch(Duration::from_millis(600));
+        broken
+            .source
+            .fail_everything("network unreachable (fixture)");
+        let stop = run_dep_audit_bounded(
+            "acme/test",
+            repo.path(),
+            &RepoScope::none(),
+            &broken.env,
+            limit,
+        )
+        .await
+        .expect_err("a failed download stops the run");
+        assert_eq!(stop.tool, "osv-scanner");
+        assert!(stop.reason.contains("unreachable"), "{}", stop.reason);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn no_build_for_this_machine_is_a_disclosed_note_known_before_the_run() {
+        let _on = camerata_test_env::EnvGuard::remove(DISABLE_ENV_VAR);
+        let fakes = crate::pinned_tools::fixtures::FakeTools::new();
+        let pins = fakes.env.clone();
+        let env = crate::pinned_tools::ToolEnv::new(fakes.tooling(), None, fakes.source.clone())
+            .with_pins(move |a| pins.pins(a));
+        let repo = tempfile::tempdir().unwrap();
         let (findings, note) =
-            run_dep_audit_with_tooling("acme/test", repo_dir, tooling, &RepoScope::none()).await;
-        // Regardless of outcome: no panic, and if there's a note it is well-formed.
-        if let Some(ref n) = note {
-            assert_eq!(n.tool, "osv-scanner");
-            assert!(!n.message.is_empty());
-        }
-        // Nonexistent repo dir → no findings even if binary was found.
+            run_dep_audit_with_tooling("acme/test", repo.path(), &env, &RepoScope::none())
+                .await
+                .expect("not a stop");
         assert!(findings.is_empty());
+        let note = note.expect("a note");
+        assert_eq!(note.tool, "osv-scanner");
+        assert_eq!(note.repo.as_deref(), Some("acme/test"));
+        assert!(!note.tool_failed);
+        assert!(fakes.source.fetched().is_empty());
     }
 
     // ── hard total-timeout at call site (fail-soft) ───────────────────────────
@@ -2141,10 +2216,17 @@ mod tests {
     #[serial_test::serial(process_env)]
     async fn disable_env_var_skips_all_network_activity() {
         let _env = camerata_test_env::EnvGuard::set(DISABLE_ENV_VAR, "1");
-        let tooling = std::path::Path::new("/nonexistent-tooling-for-disable-test");
+        let tools = crate::pinned_tools::fixtures::FakeTools::new();
+        tools.source.fail_everything("must not be asked");
         let repo_dir = std::path::Path::new("/nonexistent-repo-for-disable-test");
         let (findings, note) =
-            run_dep_audit_with_tooling("acme/api", repo_dir, tooling, &RepoScope::none()).await;
+            run_dep_audit_with_tooling("acme/api", repo_dir, &tools.env, &RepoScope::none())
+                .await
+                .expect("no stop");
+        assert!(
+            tools.source.fetched().is_empty(),
+            "DISABLE → nothing downloaded"
+        );
         assert!(findings.is_empty(), "DISABLE → no findings");
         assert!(note.is_none(), "DISABLE → no coverage note (silent skip)");
     }
@@ -2176,9 +2258,8 @@ mod tests {
     // ── Round 1 item 4: the call site, with a fake osv-scanner in the tooling folder ────────
 
     /// A fake `osv-scanner` that reports one vulnerable package in each of `lockfiles` (absolute
-    /// paths), installed where `ensure_osv_scanner` finds it.
-    fn fake_osv(tooling: &Path, lockfiles: &[String]) {
-        use std::os::unix::fs::PermissionsExt;
+    /// paths), served as the pinned osv-scanner of a fixture tooling folder.
+    fn fake_osv(lockfiles: &[String]) -> crate::pinned_tools::fixtures::FakeTools {
         let results: Vec<String> = lockfiles
             .iter()
             .map(|path| {
@@ -2188,15 +2269,9 @@ mod tests {
             })
             .collect();
         let json = format!(r#"{{"results":[{}]}}"#, results.join(","));
-        let dir = crate::tool_provisioning::osv_scanner_dir(tooling);
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = crate::tool_provisioning::osv_scanner_bin(&dir);
-        std::fs::write(
-            &bin,
-            format!("#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\ncat <<'EOF'\n{json}\nEOF\nexit 1\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::pinned_tools::fixtures::FakeTools::with_osv_script(&format!(
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\ncat <<'EOF'\n{json}\nEOF\nexit 1\n"
+        ))
     }
 
     fn excluding(patterns: &[&str]) -> RepoScope {
@@ -2210,26 +2285,25 @@ mod tests {
     #[serial_test::serial(process_env)]
     async fn the_audit_drops_what_osv_reports_in_an_excluded_lockfile() {
         let _path = camerata_test_env::EnvGuard::set("PATH", "/usr/bin:/bin");
-        let tooling = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let root = repo.path().canonicalize().unwrap();
-        fake_osv(
-            tooling.path(),
-            &[
-                format!("{}/seeds/package-lock.json", root.display()),
-                format!("{}/package-lock.json", root.display()),
-            ],
-        );
+        let tools = fake_osv(&[
+            format!("{}/seeds/package-lock.json", root.display()),
+            format!("{}/package-lock.json", root.display()),
+        ]);
         let (all, _) =
-            run_dep_audit_with_tooling("acme/app", &root, tooling.path(), &RepoScope::none()).await;
+            run_dep_audit_with_tooling("acme/app", &root, &tools.env, &RepoScope::none())
+                .await
+                .unwrap();
         assert_eq!(all.len(), 2, "the fake reports both: {all:?}");
         let (kept, _) = run_dep_audit_with_tooling(
             "acme/app",
             &root,
-            tooling.path(),
+            &tools.env,
             &excluding(&["app/seeds/**"]),
         )
-        .await;
+        .await
+        .unwrap();
         let paths: Vec<&str> = kept.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["package-lock.json"]);
     }
@@ -2238,27 +2312,24 @@ mod tests {
     #[serial_test::serial(process_env)]
     async fn a_symlinked_repo_root_does_not_let_an_excluded_lockfile_through() {
         let _path = camerata_test_env::EnvGuard::set("PATH", "/usr/bin:/bin");
-        let tooling = tempfile::tempdir().unwrap();
         let real = tempfile::tempdir().unwrap();
         let real_root = real.path().canonicalize().unwrap();
         let links = tempfile::tempdir().unwrap();
         let link = links.path().join("clone");
         std::os::unix::fs::symlink(&real_root, &link).unwrap();
         // osv reports the real path; the run was given the symlink.
-        fake_osv(
-            tooling.path(),
-            &[
-                format!("{}/seeds/package-lock.json", real_root.display()),
-                format!("{}/package-lock.json", real_root.display()),
-            ],
-        );
+        let tools = fake_osv(&[
+            format!("{}/seeds/package-lock.json", real_root.display()),
+            format!("{}/package-lock.json", real_root.display()),
+        ]);
         let (kept, _) = run_dep_audit_with_tooling(
             "acme/app",
             &link,
-            tooling.path(),
+            &tools.env,
             &excluding(&["app/seeds/**"]),
         )
-        .await;
+        .await
+        .unwrap();
         let paths: Vec<&str> = kept.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -2271,19 +2342,16 @@ mod tests {
     #[serial_test::serial(process_env)]
     async fn a_path_that_cannot_be_made_relative_is_dropped_when_a_list_is_set() {
         let _path = camerata_test_env::EnvGuard::set("PATH", "/usr/bin:/bin");
-        let tooling = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        fake_osv(
-            tooling.path(),
-            &["/elsewhere/seeds/package-lock.json".to_string()],
-        );
+        let tools = fake_osv(&["/elsewhere/seeds/package-lock.json".to_string()]);
         let (kept, _) = run_dep_audit_with_tooling(
             "acme/app",
             repo.path(),
-            tooling.path(),
+            &tools.env,
             &excluding(&["app/seeds/**"]),
         )
-        .await;
+        .await
+        .unwrap();
         assert!(kept.is_empty(), "fail closed: {kept:?}");
     }
 }

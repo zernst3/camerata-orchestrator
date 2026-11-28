@@ -1362,6 +1362,8 @@ fn zero_token_env(state: &Path) -> Vec<camerata_test_env::EnvGuard> {
         camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_SEMGREP", "1"),
         camerata_test_env::EnvGuard::set("CAMERATA_BATCH_POLL_SECS", "1"),
         camerata_test_env::EnvGuard::set(camerata_server::credentials::NO_KEYCHAIN_ENV, "1"),
+        // No download, ever (#587): the tools come from the rig's fixture source.
+        camerata_test_env::EnvGuard::set(camerata_server::pinned_tools::OFFLINE_ENV, "1"),
         camerata_test_env::EnvGuard::set("HTTPS_PROXY", "http://127.0.0.1:9"),
         camerata_test_env::EnvGuard::set("HTTP_PROXY", "http://127.0.0.1:9"),
         camerata_test_env::EnvGuard::set("ALL_PROXY", "http://127.0.0.1:9"),
@@ -1377,6 +1379,8 @@ struct Rig {
     seam: BatchSeam,
     factory: AgentFactoryOverride,
     export: PathBuf,
+    /// The scan tools, served from memory as fakes (#587): the previews run offline.
+    tools: camerata_server::pinned_tools::fixtures::FakeTools,
     _work: tempfile::TempDir,
     _out: tempfile::TempDir,
 }
@@ -1433,6 +1437,7 @@ impl Rig {
             seam,
             factory,
             export,
+            tools: camerata_server::pinned_tools::fixtures::FakeTools::quiet(),
             _work: work,
             _out: out,
         }
@@ -1443,6 +1448,7 @@ impl Rig {
             resume: None,
             llm: Some(&self.seam),
             preflight_sink: &|_| {},
+            tools: Some(&self.tools.env),
         }
     }
 
@@ -1498,6 +1504,28 @@ async fn rehearse(scale: Scale, faults: Faults) {
     // ---- Attempt A: the 429 burst and the slow batch, then the credit runs out ----
     let a_began = Instant::now();
     let a = rig.start(&scale).await;
+    // The previews really ran, offline, on the fixture tools (#587): never turned into not-run
+    // notes for want of a tool.
+    {
+        use camerata_server::pinned_tools::fixtures::FakeTools;
+        use camerata_server::pinned_tools::Artifact;
+        let ruff = FakeTools::runs_of(&rig.tools.entry(Artifact::Ruff));
+        let eslint = FakeTools::recorded(&rig.tools.entry(Artifact::Node), "eslint-runs");
+        assert!(!ruff.is_empty(), "the ruff preview ran on the fake ruff");
+        assert!(
+            eslint.lines().count() > 0,
+            "the eslint preview ran on the fake Node.js"
+        );
+        assert!(
+            rig.tools
+                .source
+                .fetched()
+                .iter()
+                .all(|u| u.starts_with("https://fixture.invalid/")),
+            "only the fixture source was asked: {:?}",
+            rig.tools.source.fetched()
+        );
+    }
     eprintln!(
         "[rehearsal:{}] attempt A took {:.1}s: outage stop {}, incomplete {:?}",
         scale.name,

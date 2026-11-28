@@ -109,7 +109,19 @@ pub async fn run_plan_only_with(
     has_api_key: bool,
     sink: &(dyn Fn(&str) + Sync),
 ) -> Result<(), InspectError> {
-    let (text, verdict) = plan(args, has_api_key).await?;
+    let tools = camerata_server::pinned_tools::ToolEnv::product().map_err(InspectError::Failed)?;
+    run_plan_only_with_tools(args, has_api_key, sink, &tools).await
+}
+
+/// [`run_plan_only_with`] with the tooling folder explicit, so a test can show the tool list
+/// over a temporary folder. The list only reads the folder: nothing is downloaded or installed.
+pub async fn run_plan_only_with_tools(
+    args: InspectArgs,
+    has_api_key: bool,
+    sink: &(dyn Fn(&str) + Sync),
+    tools: &camerata_server::pinned_tools::ToolEnv,
+) -> Result<(), InspectError> {
+    let (text, verdict) = plan(args, has_api_key, tools).await?;
     sink(&text);
     verdict
 }
@@ -128,7 +140,12 @@ pub async fn run_plan_only(args: InspectArgs) -> Result<(), InspectError> {
 async fn plan(
     args: InspectArgs,
     has_api_key: bool,
+    tools: &camerata_server::pinned_tools::ToolEnv,
 ) -> Result<(String, Result<(), InspectError>), InspectError> {
+    // Intel Macs are not supported (the owner's ruling): a plan says so in one line, as a run does.
+    if let Some(line) = tools.machine_refusal() {
+        return Err(InspectError::Failed(line.to_string()));
+    }
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
     let sources = args.resolve_sources()?;
@@ -153,7 +170,7 @@ async fn plan(
 
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new(), &controls.scope).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
-    let (_ai, _mechanical, _preview, corpus, corpus_load_failures) =
+    let (_ai, _mechanical, preview_rules, corpus, corpus_load_failures) =
         camerata_server::split_scannable_rules(selected.clone()).await;
 
     let backend_resolution = resolve_backend(args.backend, has_api_key);
@@ -365,6 +382,38 @@ async fn plan(
     }
     writeln!(out, "\n== PRE-FLIGHT (as a real run prints it) ==").ok();
     out.push_str(&pf.text);
+
+    // The tool set a real run provisions before its first model call (#587): the SAME server
+    // computation, read-only here (nothing is downloaded or installed by a plan).
+    let required = camerata_server::pinned_tools::required_tool_set(
+        &sources,
+        &preview_rules,
+        corpus.as_ref(),
+        &controls.scope,
+        true,
+    );
+    let tool_list = camerata_server::pinned_tools::tool_set_report(tools, &required);
+    writeln!(
+        out,
+        "\n{} (a real run provisions these first)",
+        super::TOOLS_HEADING
+    )
+    .ok();
+    out.push_str(&tool_list.render());
+    if args.client_engagement {
+        if let Some(entry) = tool_list.cannot_provision().first() {
+            if let camerata_server::pinned_tools::ComponentState::CannotProvision(why) =
+                &entry.state
+            {
+                verdict = Err(InspectError::Failed(format!(
+                    "this client inspection would not start: {} {} cannot be provisioned on \
+                     this machine: {why}",
+                    entry.component.name(),
+                    entry.component.version(),
+                )));
+            }
+        }
+    }
 
     // The spend limit, decided by the run's own check.
     match (controls.max_cost_usd, pf.estimate_usd) {

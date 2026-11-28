@@ -2696,8 +2696,10 @@ async fn semgrep_covered_rule_never_reads_verified_clean_when_the_pass_does_not_
         None,
         crate::client_lock::ClientTooling::INTERNAL,
         &crate::onboard::scope::ScanScope::none(),
+        &crate::pinned_tools::ToolEnv::product().expect("a data folder"),
     )
-    .await;
+    .await
+    .expect("no provisioning stop");
 
     let entry = report
         .ledger

@@ -57,6 +57,7 @@ pub async fn run_recheck_saved_with_store(
             resume: None,
             llm: None,
             preflight_sink: &|text| print!("{text}"),
+            tools: None,
         },
     )
     .await
@@ -142,6 +143,13 @@ pub async fn recheck_saved_inspect(
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
 ) -> Result<InspectOutcome, InspectError> {
+    // With `--reask-failed-judge` the recheck may ask a model, so it is a paid run: on a machine
+    // Camerata does not run on (an Intel Mac) it is refused first, before any model call.
+    if reask.is_some() {
+        if let Some(line) = super::machine_refusal(seams.tools) {
+            return Err(InspectError::Failed(line.to_string()));
+        }
+    }
     let project_key = match repos {
         [] => None,
         [one] => Some(camerata_server::scan_cache::state_dir::repo_state_key(one)),

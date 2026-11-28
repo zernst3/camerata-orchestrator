@@ -1,26 +1,28 @@
-//! Lazy, cached provisioning of external scan tools (semgrep + eslint).
+//! Provisioning of the scan tools that are not a single downloaded file: the eslint package
+//! tree (installed by the pinned Node.js's npm) and the shared machinery every provisioner uses
+//! (the tooling folder, the per-tool lock, the test-process guard).
 //!
-//! The deterministic preview pass in [`crate::scan_tools`] needs semgrep and
-//! eslint to be available as binaries.  Rather than requiring the user to
-//! install them manually, this module provisions them once into a stable,
-//! app-owned cache directory (`<data_dir>/camerata/tooling/`) and reuses them
-//! on every subsequent scan.
+//! The downloaded artifacts (ruff, Node.js, CPython, osv-scanner) and semgrep (installed into a
+//! venv of the pinned CPython) live in [`crate::pinned_tools`], which also decides an
+//! inspection's tool set and provisions it before the first model call (#587). Nothing here runs
+//! a program from the user's `PATH`: npm is the pinned Node.js running npm's own script.
 //!
 //! # Cache-dir convention
 //!
-//! Follows the same convention as every other Camerata persistent store:
-//! `dirs::data_dir()` → `<data_dir>/camerata/` (the root all stores share).
-//! The tooling sub-tree lives at `<data_dir>/camerata/tooling/`:
+//! `dirs::data_dir()` → `<data_dir>/camerata/tooling/`:
 //!
 //! ```text
 //! <data_dir>/camerata/tooling/
-//! ├── semgrep-venv/          Python venv; semgrep installed inside it
-//! │   └── bin/semgrep        (or Scripts\semgrep.exe on Windows)
+//! ├── pinned/
+//! │   ├── ruff-<version>/         ruff release archive, unpacked
+//! │   ├── node-<version>/         Node.js release archive, unpacked (npm inside)
+//! │   ├── python-<version>/       python-build-standalone CPython, unpacked
+//! │   ├── semgrep-<version>/venv  venv of the pinned CPython; semgrep installed by hash
+//! │   └── osv-scanner-<version>/  the release binary
 //! ├── eslint  ->  eslint.gen/<id>     symlink to the current complete eslint tree (unix)
 //! ├── eslint.gen/
 //! │   └── <id>/              one COMPLETE generation; the previous one is kept a cycle
 //! │       ├── node_modules/  eslint + TS parser + plugins installed here
-//! │       │   └── .bin/eslint
 //! │       ├── package.json   generated lock-anchor
 //! │       └── camerata.config.mjs  bundled flat config (copied from binary assets)
 //! └── .<tool>.lock           advisory provisioning lock, one per tool
@@ -29,47 +31,69 @@
 //! # Concurrency: nothing is ever installed over a live tree
 //!
 //! The tooling dir is shared by the product, every scan, and (on a developer machine) every test
-//! process. Each `ensure_*` therefore (1) takes a per-tool OS file lock so only one provisioner
+//! process. Each provisioner therefore (1) takes a per-tool OS file lock so only one provisioner
 //! runs at a time, across processes and within one, then re-probes because the holder may have
 //! finished the job; and (2) for eslint, builds the new tree in a staging directory and publishes
 //! it with one atomic rename, so a reader sees the old complete tree or the new complete tree and
-//! never a half-installed one. See [`ensure_eslint`] for the incident this closes. Test processes
-//! additionally cannot provision into the real tooling dir at all
+//! never a half-installed one. See [`ensure_eslint_with`] for the incident this closes. Test
+//! processes additionally cannot provision into the real tooling dir at all
 //! ([`refuse_real_tooling_in_test_process`]).
 //!
-//! # Idempotency
+//! # Failure is never silent
 //!
-//! Before installing anything the module probes whether the binary already
-//! exists and responds to a version query (`--version`).  A successful probe
-//! short-circuits the install.  A failed probe (binary absent OR the process
-//! exits non-zero) triggers a fresh install — catching partial/broken
-//! installations.
-//!
-//! # Fail-soft guarantee
-//!
-//! Every public entry point returns `Result<PathBuf, ProvisionError>` rather
-//! than panicking.  The scan-time caller converts `Err` into a [`CoverageNote`]
-//! and continues — the scan always completes, just without that tool's
-//! findings.  Missing base interpreters (`python3`, `node`/`npm`) are
-//! `ProvisionError::BaseInterpreterMissing`, which the caller turns into a
-//! graceful "tool not available" note.
+//! Every entry point returns `Result<_, ProvisionError>`. Before a run, a failure refuses the
+//! inspection ([`crate::pinned_tools::provision_tool_set`]); during a run it stops the run
+//! ([`crate::scan_tools::ToolProvisioningStop`]).
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Errors that can arise during tool provisioning.  The scan caller converts
-/// these into `CoverageNote`s; they are never fatal to the scan.
+/// Errors that can arise during tool provisioning. Before a run they refuse the inspection; during
+/// a run they stop it.
 #[derive(Debug, thiserror::Error)]
 pub enum ProvisionError {
-    /// The base interpreter required to bootstrap the tool (`python3` for
-    /// semgrep, `node`/`npm` for eslint) is not on PATH.  The user must
-    /// install it; Camerata cannot self-bootstrap without it.
-    #[error("base interpreter not available: {0}")]
-    BaseInterpreterMissing(String),
+    /// Camerata has no build of this tool for this machine.
+    #[error("{tool} cannot be provisioned on this machine: {detail}")]
+    UnsupportedPlatform { tool: &'static str, detail: String },
 
-    /// The install command ran but exited non-zero or produced no binary.
+    /// The pin table has no file for this platform.
+    #[error("{tool} has no pinned build for {platform}")]
+    NoArtifactForPlatform {
+        tool: &'static str,
+        platform: &'static str,
+    },
+
+    /// The download did not complete.
+    #[error("downloading {tool} failed: {detail}")]
+    DownloadFailed { tool: &'static str, detail: String },
+
+    /// The downloaded file is not the pinned one. Nothing was unpacked.
+    #[error(
+        "the downloaded {tool} does not match its pinned checksum (expected sha256 {expected}, \
+         got {actual}); it was not installed"
+    )]
+    ChecksumMismatch {
+        tool: &'static str,
+        expected: String,
+        actual: String,
+    },
+
+    /// An install step ran but exited non-zero or produced no program.
     #[error("provisioning install failed for {tool}: {detail}")]
     InstallFailed { tool: &'static str, detail: String },
+
+    /// The tool is not installed and Camerata is offline ([`crate::pinned_tools::OFFLINE_ENV`]):
+    /// nothing was downloaded.
+    #[error(
+        "{tool} is not installed in {folder} and Camerata is offline ({env}=1), so nothing was \
+         downloaded"
+    )]
+    Offline {
+        tool: &'static str,
+        folder: String,
+        env: &'static str,
+    },
 
     /// An I/O error while creating directories, copying files, or probing.
     #[error("I/O error during provisioning: {0}")]
@@ -87,13 +111,24 @@ pub enum ProvisionError {
 
 // ─── root tooling dir ────────────────────────────────────────────────────────
 
-/// The root of the Camerata-managed tool environment:
-/// `<data_dir>/camerata/tooling/`.  Returns `None` when `dirs::data_dir()`
-/// can't be resolved (unusual; same condition under which the other stores
-/// fall back to in-memory).
+/// The root of the Camerata-managed tool environment: [`TOOLING_DIR_ENV`] when it is set, else
+/// `<data_dir>/camerata/tooling/`. Returns `None` when neither resolves (unusual; same condition
+/// under which the other stores fall back to in-memory).
 pub fn tooling_dir() -> Option<PathBuf> {
+    match std::env::var_os(TOOLING_DIR_ENV) {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => default_tooling_dir(),
+    }
+}
+
+/// The per-user tooling folder, ignoring [`TOOLING_DIR_ENV`]: the shared tree the test-process
+/// guard protects ([`refuse_real_tooling_in_test_process`]).
+pub fn default_tooling_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("camerata").join("tooling"))
 }
+
+/// The environment variable that points the tooling folder somewhere else (a test, a sandbox).
+pub const TOOLING_DIR_ENV: &str = "CAMERATA_TOOLING_DIR";
 
 // ─── shared-workspace protection ─────────────────────────────────────────────
 //
@@ -108,11 +143,12 @@ pub fn tooling_dir() -> Option<PathBuf> {
 //     over each other ([`acquire_provision_lock`]) — and an install must never be visible
 //     half-finished (the eslint staging + swap below).
 
-/// How long a caller waits for another provisioner's lock before giving up with a disclosed
-/// error. Generous: a cold `npm ci` or a `pip install semgrep` legitimately takes minutes. The
-/// bound exists so a wedged installer cannot hang every later scan forever; the caller turns the
-/// error into a `CoverageNote` and the scan completes without that tool.
-const PROVISION_LOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long a caller waits for another provisioner's lock before giving up with an error.
+/// Generous: a cold `npm ci` or a `pip install semgrep` legitimately takes minutes. The bound
+/// exists so a wedged installer cannot hang every later scan forever. The error is a provisioning
+/// failure like any other (#587): before the run it refuses the inspection, during the run it
+/// stops it.
+pub(crate) const PROVISION_LOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Poll interval while waiting on a contended provisioning lock.
 const PROVISION_LOCK_POLL: Duration = Duration::from_millis(50);
@@ -152,7 +188,7 @@ fn test_process_may_not_write(tooling: &Path, real: Option<&Path>, exe: Option<&
 /// # The defect this closes
 ///
 /// In a full `cargo test --workspace` run, many tests drive `run_scan_tools`, which calls
-/// [`ensure_eslint`] on the REAL tooling directory. When that shared workspace looked stale (a
+/// [`ensure_eslint_with`] on the REAL tooling directory. When that shared workspace looked stale (a
 /// new pin, a new bundled config), the first such test reinstalled it IN PLACE, `npm ci` deleted
 /// `node_modules`, and every other test running eslint at that moment saw
 /// `Cannot find module '../package.json'` — while a second test, seeing the half-deleted tree,
@@ -163,14 +199,15 @@ fn test_process_may_not_write(tooling: &Path, real: Option<&Path>, exe: Option<&
 ///
 /// Detection is by executable location rather than `cfg!(test)` so integration-test binaries
 /// (which link the library built WITHOUT `cfg(test)`) are covered by the same rule. The refusal
-/// is a [`ProvisionError`], which every scan caller already turns into a disclosed
-/// `CoverageNote`, so it fails soft exactly like an unavailable tool.
-fn refuse_real_tooling_in_test_process(
+/// is [`ProvisionError::RealToolingProtected`], which only a cargo test binary can hit: the scan
+/// step discloses the tool as not run and the pre-run provisioning leaves it as it is, so existing
+/// tests that use the product environment keep their behaviour.
+pub(crate) fn refuse_real_tooling_in_test_process(
     tooling: &Path,
     tool: &'static str,
 ) -> Result<(), ProvisionError> {
     let exe = std::env::current_exe().ok();
-    if test_process_may_not_write(tooling, tooling_dir().as_deref(), exe.as_deref()) {
+    if test_process_may_not_write(tooling, default_tooling_dir().as_deref(), exe.as_deref()) {
         return Err(ProvisionError::RealToolingProtected { tool });
     }
     Ok(())
@@ -184,7 +221,7 @@ fn refuse_real_tooling_in_test_process(
 /// process, so one mechanism serializes both cases. The OS releases it if the holder dies, so a
 /// crashed provisioner cannot leave a stale lock behind.
 #[derive(Debug)]
-struct ProvisionLock {
+pub(crate) struct ProvisionLock {
     _file: std::fs::File,
 }
 
@@ -193,7 +230,7 @@ struct ProvisionLock {
 /// The wait runs on the blocking pool (`flock` polling must not park a runtime worker). Callers
 /// MUST re-run their provisioned probe after this returns: whoever held the lock may well have
 /// finished the install the caller was about to start.
-async fn acquire_provision_lock(
+pub(crate) async fn acquire_provision_lock(
     tooling: &Path,
     tool: &'static str,
     timeout: Duration,
@@ -240,12 +277,6 @@ async fn acquire_provision_lock(
 
 // ─── semgrep ─────────────────────────────────────────────────────────────────
 
-/// Path to the Camerata-managed semgrep venv root:
-/// `<tooling_dir>/semgrep-venv/`.
-pub fn semgrep_venv_dir(tooling: &Path) -> PathBuf {
-    tooling.join("semgrep-venv")
-}
-
 /// Path to the semgrep binary inside the Camerata-managed venv.
 /// On Windows the venv layout uses `Scripts/`; everywhere else `bin/`.
 pub fn semgrep_bin(venv: &Path) -> PathBuf {
@@ -256,142 +287,76 @@ pub fn semgrep_bin(venv: &Path) -> PathBuf {
     bin
 }
 
-/// Path to the bundled semgrep ruleset shipped with the Camerata binary.
-/// The caller passes this to `semgrep --config <path>` so the scan runs
-/// fully offline, without pulling `p/ci` from the semgrep registry.
-///
-/// The rules live at `crates/server/assets/semgrep-rules/security.yml`
-/// at build time; `include_str!` / `include_bytes!` + a temp-copy (or an
-/// `OUT_DIR` embed) would be the production approach.  For now the path is
-/// resolved relative to the Cargo manifest so the dev binary finds them.
-pub fn bundled_semgrep_rules_dir() -> PathBuf {
-    // In production / installed binary: embed the YAML via include_str! and
-    // write it to a temp location inside the tooling dir.  In development
-    // builds the assets live next to the crate source.
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("assets").join("semgrep-rules")
-}
+/// The eslint flat config, embedded in the binary: an installed Camerata has no source tree to
+/// read it from (review round 1 on #587).
+pub(crate) const ESLINT_CONFIG: &str = include_str!("../assets/eslint/camerata.config.mjs");
 
-/// The `semgrep --version` probe command, with the fixed semgrep child environment.
-fn semgrep_probe_command(bin: &Path) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.arg("--version").kill_on_drop(true);
-    camerata_core::apply_semgrep_env(cmd.as_std_mut());
-    cmd
-}
+/// The committed lockfile that pins the whole eslint tool tree, embedded for the same reason.
+pub(crate) const ESLINT_LOCK: &str = include_str!("../assets/eslint/package-lock.json");
 
-/// Probe whether semgrep is already provisioned and healthy.  Returns `true`
-/// when the binary exists AND responds to `semgrep --version` with exit 0.
-/// A `false` return means the caller should (re-)provision.
-pub async fn semgrep_is_provisioned(venv: &Path) -> bool {
-    let bin = semgrep_bin(venv);
-    if !bin.exists() {
-        return false;
+/// The bundled semgrep rules, embedded in the binary as `(file name, contents)`. The list is the
+/// manifest of `assets/semgrep-rules/`: a test holds it to exactly that folder's files, so a rule
+/// file added there without a line here fails the build's tests rather than going missing at run
+/// time. (A build-script manifest was not used: `build.rs` is shared with the app crate.)
+pub const SEMGREP_RULES: &[(&str, &str)] = &[
+    (
+        "security.yml",
+        include_str!("../assets/semgrep-rules/security.yml"),
+    ),
+    (
+        "taint-security.yml",
+        include_str!("../assets/semgrep-rules/taint-security.yml"),
+    ),
+];
+
+/// The folder `semgrep --config` is given: the embedded rules, written into the tooling folder
+/// (`<tooling>/semgrep-rules/<hash>/`, the hash of the rules, so a build with other rules never
+/// reads an older copy). Written to a staging folder and renamed into place, so a concurrent
+/// scan never reads half a ruleset. The scan runs offline against it: no registry pack is pulled.
+pub fn semgrep_rules_dir(tooling: &Path) -> std::io::Result<PathBuf> {
+    let mut all = String::new();
+    for (name, text) in SEMGREP_RULES {
+        all.push_str(name);
+        all.push('\n');
+        all.push_str(text);
     }
-    // Version probe: a broken venv / corrupted binary would fail here.
-    match semgrep_probe_command(&bin).output().await {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
+    let hash = crate::pinned_tools::fetch::sha256_hex(all.as_bytes());
+    let root = tooling.join("semgrep-rules");
+    let dir = root.join(&hash[..16]);
+    let complete = |d: &Path| {
+        SEMGREP_RULES
+            .iter()
+            .all(|(n, t)| std::fs::read_to_string(d.join(n)).is_ok_and(|have| have == *t))
+    };
+    if complete(&dir) {
+        return Ok(dir);
     }
-}
-
-/// Ensure semgrep is provisioned in the given venv directory.
-///
-/// If the binary already passes the health probe, returns immediately (no
-/// install cost).  Otherwise:
-///
-/// 1. Creates the venv via `python3 -m venv <dir>`.
-/// 2. Installs semgrep via `<venv>/bin/pip install semgrep`.
-///
-/// Returns `Ok(PathBuf)` pointing to the semgrep binary on success, or a
-/// `ProvisionError` that the caller converts into a graceful `CoverageNote`.
-pub async fn ensure_semgrep(tooling: &Path) -> Result<PathBuf, ProvisionError> {
-    let venv = semgrep_venv_dir(tooling);
-    let bin = semgrep_bin(&venv);
-
-    if semgrep_is_provisioned(&venv).await {
-        return Ok(bin);
+    std::fs::create_dir_all(&root)?;
+    let staging = root.join(format!(".staging-{}-{:x}", &hash[..16], std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+    for (name, text) in SEMGREP_RULES {
+        std::fs::write(staging.join(name), text)?;
     }
-
-    // A test process never provisions the REAL shared venv (see the guard's doc comment).
-    refuse_real_tooling_in_test_process(tooling, "semgrep")?;
-
-    // Check that python3 is available before trying to create a venv.
-    if !interpreter_available("python3").await {
-        return Err(ProvisionError::BaseInterpreterMissing(
-            "python3 (required to provision semgrep via pip)".to_string(),
-        ));
+    if std::fs::rename(&staging, &dir).is_err() {
+        // Another scan published the same rules first; ours is not needed.
+        let _ = std::fs::remove_dir_all(&staging);
     }
-
-    // Serialize provisioners (across processes and within this one). A caller that waited re-checks
-    // the probe: the holder may have finished the very install this caller was about to start.
-    //
-    // The venv is built IN PLACE rather than in a staging directory and swapped in, unlike eslint:
-    // a Python venv is not relocatable (its console scripts carry the absolute path of the
-    // interpreter they were created under in a shebang), so a renamed staging venv would be a
-    // broken one. In-place is safe here for the reason it is not for eslint: this point is only
-    // reached when the probe FAILED, i.e. there is no working semgrep to tear down, and the lock
-    // keeps a second installer from building over this one.
-    let _lock = acquire_provision_lock(tooling, "semgrep", PROVISION_LOCK_TIMEOUT).await?;
-    if semgrep_is_provisioned(&venv).await {
-        return Ok(bin);
+    if complete(&dir) {
+        Ok(dir)
+    } else {
+        Err(std::io::Error::other(format!(
+            "the semgrep rules could not be written to {}",
+            dir.display()
+        )))
     }
-
-    // Create the venv.
-    tokio::fs::create_dir_all(&venv).await?;
-    let venv_out = tokio::process::Command::new("python3")
-        .args(["-m", "venv"])
-        .arg(&venv)
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !venv_out.status.success() {
-        return Err(ProvisionError::InstallFailed {
-            tool: "semgrep",
-            detail: format!(
-                "python3 -m venv failed: {}",
-                String::from_utf8_lossy(&venv_out.stderr)
-            ),
-        });
-    }
-
-    // Use the venv's pip to install semgrep.
-    #[cfg(windows)]
-    let pip = venv.join("Scripts").join("pip.exe");
-    #[cfg(not(windows))]
-    let pip = venv.join("bin").join("pip");
-
-    let pip_out = tokio::process::Command::new(&pip)
-        .args(["install", "--quiet", "semgrep"])
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !pip_out.status.success() {
-        return Err(ProvisionError::InstallFailed {
-            tool: "semgrep",
-            detail: format!(
-                "pip install semgrep failed: {}",
-                String::from_utf8_lossy(&pip_out.stderr)
-            ),
-        });
-    }
-
-    // Final probe: make sure the installed binary is functional.
-    if !semgrep_is_provisioned(&venv).await {
-        return Err(ProvisionError::InstallFailed {
-            tool: "semgrep",
-            detail: "semgrep binary did not respond to --version after install".to_string(),
-        });
-    }
-
-    Ok(bin)
 }
 
 // ─── eslint ──────────────────────────────────────────────────────────────────
 
 /// Path to the Camerata-managed eslint workspace:
 /// `<tooling_dir>/eslint/` (on unix a symlink to the current complete generation; see
-/// [`ensure_eslint`]). Probe and provision through this path; a process that RUNS eslint
+/// [`ensure_eslint_with`]). Probe and provision through this path; a process that RUNS eslint
 /// resolves it once via [`eslint_run_paths`] and uses the concrete paths for the whole run.
 pub fn eslint_workspace_dir(tooling: &Path) -> PathBuf {
     tooling.join("eslint")
@@ -410,7 +375,7 @@ pub fn eslint_bin(workspace: &Path) -> PathBuf {
 }
 
 /// Path to the bundled eslint flat config (copied into the workspace by
-/// [`ensure_eslint`]).  The caller passes `--config <path>` so eslint uses
+/// [`ensure_eslint_with`]).  The caller passes `--config <path>` so eslint uses
 /// Camerata's baseline rather than the repo's config.
 pub fn eslint_config_path(workspace: &Path) -> PathBuf {
     workspace.join("camerata.config.mjs")
@@ -426,6 +391,18 @@ pub struct EslintRunPaths {
     pub bin: PathBuf,
     /// The bundled flat config inside [`Self::workspace`].
     pub config: PathBuf,
+    /// eslint's own entry script, run as `<pinned node> <script>` so no `node` is looked up on
+    /// `PATH` (the `.bin/eslint` launcher's `#!/usr/bin/env node` would look one up).
+    pub script: PathBuf,
+}
+
+/// eslint's entry script inside a workspace.
+pub fn eslint_script(workspace: &Path) -> PathBuf {
+    workspace
+        .join("node_modules")
+        .join("eslint")
+        .join("bin")
+        .join("eslint.js")
 }
 
 /// Resolve the eslint workspace link ONCE to its concrete generation directory and derive every
@@ -453,17 +430,9 @@ pub async fn eslint_run_paths(tooling: &Path) -> std::io::Result<EslintRunPaths>
     Ok(EslintRunPaths {
         bin: eslint_bin(&workspace),
         config: eslint_config_path(&workspace),
+        script: eslint_script(&workspace),
         workspace,
     })
-}
-
-/// Source path of the bundled eslint flat config inside the Camerata repo
-/// (used at provisioning time to copy the file into the tooling workspace).
-fn bundled_eslint_config_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("eslint")
-        .join("camerata.config.mjs")
 }
 
 /// Probe whether eslint is already provisioned and healthy.
@@ -471,7 +440,7 @@ fn bundled_eslint_config_src() -> PathBuf {
 /// # Why the binary probe alone is NOT the health check (W6 / C11)
 ///
 /// This used to ask one question — "does the eslint binary answer `--version`" —
-/// and [`ensure_eslint`] returned early on a `true`. That made the provisioned
+/// and [`ensure_eslint_with`] returned early on a `true`. That made the provisioned
 /// workspace a WRITE-ONCE artifact: every package later added to
 /// [`ESLINT_NPM_PACKAGES`], and every subsequent edit to the bundled flat config,
 /// silently never reached a machine that had provisioned even once. Observed
@@ -488,25 +457,34 @@ fn bundled_eslint_config_src() -> PathBuf {
 /// one `npm install --prefer-offline`; the cost of a false positive is a silently
 /// dead tool tier.
 pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
-    let bin = eslint_bin(workspace);
-    if !bin.exists() {
+    eslint_is_provisioned_with(workspace, None).await
+}
+
+/// [`eslint_is_provisioned`] with the `PATH` the version probe runs with. The product passes the
+/// child `PATH` ([`crate::pinned_tools::ToolEnv::child_path`]), whose first folder is the pinned
+/// Node.js: the `.bin/eslint` launcher finds `node` through it, never through the user's `PATH`.
+pub async fn eslint_is_provisioned_with(workspace: &Path, path_env: Option<&OsStr>) -> bool {
+    if !eslint_workspace_is_current(workspace) {
         return false;
     }
-    if !eslint_packages_installed(workspace) {
-        return false;
+    let mut probe = tokio::process::Command::new(eslint_bin(workspace));
+    probe.arg("--version").kill_on_drop(true);
+    if let Some(path) = path_env {
+        probe.env("PATH", path);
     }
-    if !eslint_config_is_current(workspace) {
-        return false;
-    }
-    match tokio::process::Command::new(&bin)
-        .arg("--version")
-        .kill_on_drop(true)
-        .output()
-        .await
-    {
+    match probe.output().await {
         Ok(out) => out.status.success(),
         Err(_) => false,
     }
+}
+
+/// The disk half of [`eslint_is_provisioned`]: the launcher exists, every pinned package is
+/// installed at its version, and the config is the bundled one. Starts no process, so the tool
+/// list (`--plan-only`, the pre-flight) can use it.
+pub fn eslint_workspace_is_current(workspace: &Path) -> bool {
+    eslint_bin(workspace).exists()
+        && eslint_packages_installed(workspace)
+        && eslint_config_is_current(workspace)
 }
 
 /// `true` when every package in [`ESLINT_NPM_PACKAGES`] is present in the
@@ -531,22 +509,11 @@ fn eslint_packages_installed(workspace: &Path) -> bool {
     })
 }
 
-/// `true` when the workspace's copy of the flat config is byte-identical to the
-/// bundled asset. A content comparison rather than an mtime one: the asset ships
-/// inside the binary, so its mtime on disk says nothing about which Camerata
-/// build wrote the workspace copy.
-///
-/// Returns `true` when the bundled asset cannot be read at all — a packaging
-/// problem must not put provisioning into a re-install loop on every scan.
+/// `true` when the workspace's copy of the flat config is byte-identical to the embedded
+/// [`ESLINT_CONFIG`]. A content comparison rather than an mtime one: the config ships inside the
+/// binary, so a file's mtime says nothing about which Camerata build wrote it.
 fn eslint_config_is_current(workspace: &Path) -> bool {
-    let src = bundled_eslint_config_src();
-    let Ok(want) = std::fs::read(&src) else {
-        return true;
-    };
-    match std::fs::read(eslint_config_path(workspace)) {
-        Ok(have) => have == want,
-        Err(_) => false,
-    }
+    std::fs::read(eslint_config_path(workspace)).is_ok_and(|have| have == ESLINT_CONFIG.as_bytes())
 }
 
 /// The npm packages Camerata installs for the eslint preview pass.
@@ -592,13 +559,16 @@ fn eslint_config_is_current(workspace: &Path) -> bool {
 /// correct line. Bump these deliberately, in lockstep with the bundled config, the committed
 /// `assets/eslint/package.json` and the lockfile (a test holds the three together), never by
 /// letting `npm` choose.
-const ESLINT_NPM_PACKAGES: &[&str] = &[
+pub(crate) const ESLINT_NPM_PACKAGES: &[&str] = &[
     "eslint@9.39.5",
     "@typescript-eslint/parser@8.72.0",
     "@typescript-eslint/eslint-plugin@8.72.0",
     "eslint-plugin-react-hooks@5.2.0",
     "eslint-plugin-jest@28.14.0",
 ];
+
+/// The eslint version in [`ESLINT_NPM_PACKAGES`], for the tool list. A test holds the two equal.
+pub const ESLINT_VERSION: &str = "9.39.5";
 
 /// The workspace `package.json`: every package at its exact pinned version, no range. Written
 /// into the workspace before the install so `npm ci` has a manifest that matches the lockfile.
@@ -621,20 +591,21 @@ fn eslint_package_json() -> String {
     .to_string()
 }
 
-/// The `npm` arguments that install the workspace. With the committed lockfile in place,
-/// `npm ci` installs exactly that tree (and fails loudly if it disagrees with the manifest);
-/// without it (a packaging problem), install the exact pins. `--prefer-offline` either way: a
-/// warm npm cache needs no network.
-fn eslint_install_args(have_lockfile: bool) -> Vec<String> {
-    if have_lockfile {
-        return vec!["ci".to_string(), "--prefer-offline".to_string()];
-    }
-    let mut args: Vec<String> = ["install", "--save-dev", "--prefer-offline"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    args.extend(ESLINT_NPM_PACKAGES.iter().map(|s| (*s).to_string()));
-    args
+/// The `npm` arguments that install the workspace: `npm ci` from the embedded lockfile, exactly
+/// that tree (it fails loudly if the lockfile disagrees with the manifest). There is no fallback to
+/// an unpinned `npm install`. `--ignore-scripts`: no package's install script runs.
+/// `--prefer-offline`: a warm npm cache needs no network.
+fn eslint_install_args_now() -> Vec<String> {
+    [
+        "ci",
+        "--prefer-offline",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 /// Source path of the committed workspace manifest next to the bundled flat config. Provisioning
@@ -648,19 +619,11 @@ fn bundled_eslint_package_json_src() -> PathBuf {
         .join("package.json")
 }
 
-/// Source path of the committed lockfile that pins the whole eslint tool tree.
-fn bundled_eslint_lock_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("eslint")
-        .join("package-lock.json")
-}
-
 /// The bare npm package name from an [`ESLINT_NPM_PACKAGES`] spec, dropping any
 /// `@<range>` version suffix. Handles scoped names: the scope `@` at index 0 is not
 /// a version separator, so `@typescript-eslint/parser@^8` → `@typescript-eslint/parser`
 /// while `eslint@^9` → `eslint` and a bare `eslint` → `eslint`.
-fn npm_package_name(spec: &str) -> &str {
+pub(crate) fn npm_package_name(spec: &str) -> &str {
     match spec.rfind('@') {
         Some(i) if i > 0 => &spec[..i],
         _ => spec,
@@ -670,7 +633,7 @@ fn npm_package_name(spec: &str) -> &str {
 /// The pinned version from a spec (e.g. `eslint@9.39.5` → `Some("9.39.5")`), or `None`
 /// when the spec carries no version. The text after the last `@` is returned as written: the
 /// pins are exact, so it is compared for equality, never parsed as a range.
-fn npm_pinned_version(spec: &str) -> Option<&str> {
+pub(crate) fn npm_pinned_version(spec: &str) -> Option<&str> {
     let i = spec.rfind('@').filter(|&i| i > 0)?;
     Some(&spec[i + 1..])
 }
@@ -741,34 +704,33 @@ fn new_eslint_generation_id() -> String {
 /// aside and linking the new tree in; that migration, once per machine, is the only publish with
 /// a window (two renames) and it runs under the lock. Elsewhere (no symlinks) the publish is that
 /// same two-rename swap.
-pub async fn ensure_eslint(tooling: &Path) -> Result<PathBuf, ProvisionError> {
-    ensure_eslint_with(tooling, std::ffi::OsStr::new("npm")).await
-}
-
-/// [`ensure_eslint`] with the `npm` program injected, so the provisioning logic is testable
-/// against a fake `npm` without the network (and without touching the process-global `PATH`).
-async fn ensure_eslint_with(
+pub(crate) async fn ensure_eslint_with(
     tooling: &Path,
-    npm: &std::ffi::OsStr,
+    npm: &NpmCommand,
 ) -> Result<PathBuf, ProvisionError> {
     let workspace = eslint_workspace_dir(tooling);
     let bin = eslint_bin(&workspace);
+    let path_env = npm.path_env.as_deref();
 
-    if eslint_is_provisioned(&workspace).await {
+    if eslint_is_provisioned_with(&workspace, path_env).await {
         return Ok(bin);
     }
 
+    if npm.offline {
+        return Err(crate::pinned_tools::fetch::offline("eslint", tooling));
+    }
     refuse_real_tooling_in_test_process(tooling, "eslint")?;
 
-    // Need npm to install.
-    if !interpreter_available(npm).await {
-        return Err(ProvisionError::BaseInterpreterMissing(
-            "npm (required to provision eslint)".to_string(),
-        ));
+    npm.prepare_home().await?;
+    if !npm.answers_version().await {
+        return Err(ProvisionError::InstallFailed {
+            tool: "eslint",
+            detail: "the pinned Node.js npm did not answer --version".to_string(),
+        });
     }
 
     let _lock = acquire_provision_lock(tooling, "eslint", PROVISION_LOCK_TIMEOUT).await?;
-    if eslint_is_provisioned(&workspace).await {
+    if eslint_is_provisioned_with(&workspace, path_env).await {
         return Ok(bin);
     }
 
@@ -776,12 +738,93 @@ async fn ensure_eslint_with(
     Ok(bin)
 }
 
+/// How npm is started: the pinned Node.js running npm's own script, with the child `PATH`
+/// ([`crate::pinned_tools::ToolEnv::npm_command`]). Never a bare `npm` from the user's `PATH`.
+/// Tests use [`NpmCommand::program`] with a fake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmCommand {
+    pub launcher: OsString,
+    /// Arguments before npm's own (npm's script for the pinned Node.js).
+    pub prefix: Vec<OsString>,
+    /// The `PATH` npm and everything it starts get. `None` only for a test fake.
+    pub path_env: Option<OsString>,
+    /// True when Camerata is offline: npm would reach its registry, so a missing eslint tree is a
+    /// refusal instead.
+    pub offline: bool,
+    /// npm's own folder in the tooling folder: its user and global config files (empty) and its
+    /// cache live here, never the user's `~/.npmrc` or `~/.npm`. `None` only for a test fake.
+    pub home: Option<PathBuf>,
+}
+
+/// The registry eslint and its plugins install from: npm's official one.
+pub const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
+
+impl NpmCommand {
+    /// A single program that behaves as npm (a test fake).
+    pub fn program(program: impl Into<OsString>) -> Self {
+        Self {
+            launcher: program.into(),
+            prefix: Vec::new(),
+            path_env: None,
+            offline: false,
+            home: None,
+        }
+    }
+
+    /// The npm command: none of the user's `npm_config_*` variables (any case), Camerata's own
+    /// config files and cache, the official registry.
+    fn command(&self) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(&self.launcher);
+        cmd.args(&self.prefix).kill_on_drop(true);
+        if let Some(path) = &self.path_env {
+            cmd.env("PATH", path);
+        }
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("npm_config_")
+            {
+                cmd.env_remove(&key);
+            }
+        }
+        cmd.env("npm_config_registry", NPM_REGISTRY)
+            .env("npm_config_update_notifier", "false")
+            .env("npm_config_fund", "false")
+            .env("npm_config_audit", "false");
+        if let Some(home) = &self.home {
+            cmd.env("npm_config_userconfig", home.join("npmrc"))
+                .env("npm_config_globalconfig", home.join("global-npmrc"))
+                .env("npm_config_cache", home.join("cache"));
+        }
+        cmd
+    }
+
+    /// Create npm's own folder and its empty config files.
+    async fn prepare_home(&self) -> std::io::Result<()> {
+        let Some(home) = &self.home else {
+            return Ok(());
+        };
+        tokio::fs::create_dir_all(home.join("cache")).await?;
+        for file in ["npmrc", "global-npmrc"] {
+            tokio::fs::write(home.join(file), "").await?;
+        }
+        Ok(())
+    }
+
+    async fn answers_version(&self) -> bool {
+        self.command()
+            .arg("--version")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Build a complete, healthy eslint tree in staging, then publish it. The caller holds the
 /// provisioning lock.
-async fn install_eslint_generation(
-    tooling: &Path,
-    npm: &std::ffi::OsStr,
-) -> Result<(), ProvisionError> {
+async fn install_eslint_generation(tooling: &Path, npm: &NpmCommand) -> Result<(), ProvisionError> {
     let generations = eslint_generations_dir(tooling);
     tokio::fs::create_dir_all(&generations).await?;
     // We hold the lock, so any staging tree still here belongs to a dead provisioner.
@@ -801,7 +844,7 @@ async fn install_eslint_generation(
         discard_dir(&staging).await;
         return Err(ProvisionError::Io(e));
     }
-    if !eslint_is_provisioned(&finished).await {
+    if !eslint_is_provisioned_with(&finished, npm.path_env.as_deref()).await {
         discard_dir(&finished).await;
         return Err(ProvisionError::InstallFailed {
             tool: "eslint",
@@ -821,24 +864,21 @@ async fn install_eslint_generation(
 }
 
 /// Install the exact pinned tree into `dir` (a directory nothing else reads yet).
-async fn build_eslint_tree(dir: &Path, npm: &std::ffi::OsStr) -> Result<(), ProvisionError> {
+async fn build_eslint_tree(dir: &Path, npm: &NpmCommand) -> Result<(), ProvisionError> {
     tokio::fs::create_dir_all(dir).await?;
 
-    // The manifest pins every package to its exact version, and the committed lockfile pins the
+    // The manifest pins every package to its exact version, and the embedded lockfile pins the
     // whole tree (transitive dependencies included): `npm ci` then installs the same tool on
-    // every machine. If the lockfile cannot be read (a packaging problem), fall back to
-    // installing the exact pins rather than failing to provision at all.
+    // every machine, and nothing else.
     tokio::fs::write(dir.join("package.json"), eslint_package_json()).await?;
-    let have_lockfile = tokio::fs::copy(bundled_eslint_lock_src(), dir.join("package-lock.json"))
-        .await
-        .is_ok();
+    tokio::fs::write(dir.join("package-lock.json"), ESLINT_LOCK).await?;
 
-    let npm_args = eslint_install_args(have_lockfile);
+    let npm_args = eslint_install_args_now();
 
-    let npm_out = tokio::process::Command::new(npm)
+    let npm_out = npm
+        .command()
         .args(&npm_args)
         .current_dir(dir)
-        .kill_on_drop(true)
         .output()
         .await?;
     if !npm_out.status.success() {
@@ -851,11 +891,8 @@ async fn build_eslint_tree(dir: &Path, npm: &std::ffi::OsStr) -> Result<(), Prov
         });
     }
 
-    // Copy the bundled flat config into the tree so eslint can find it.
-    let config_src = bundled_eslint_config_src();
-    if config_src.exists() {
-        tokio::fs::copy(&config_src, eslint_config_path(dir)).await?;
-    }
+    // The embedded flat config, so eslint can find it.
+    tokio::fs::write(eslint_config_path(dir), ESLINT_CONFIG).await?;
     Ok(())
 }
 
@@ -975,1749 +1012,7 @@ async fn publish_eslint_generation(tooling: &Path, id: &str) -> std::io::Result<
     Ok(had_previous.then_some(aside_name))
 }
 
-// ─── osv-scanner ─────────────────────────────────────────────────────────────
-//
-// osv-scanner is Google's multi-ecosystem dependency-vulnerability scanner.  It
-// reads lockfiles (Cargo.lock, package-lock.json, go.sum, poetry.lock, etc.) and
-// queries the OSV database for known CVEs / GHSAs / RUSTSECs — one binary covers
-// every ecosystem Camerata's users write in.
-//
-// Provisioning resolution chain (fail-soft at every step — see module-level doc):
-//   (a) `osv-scanner` already on PATH → use it (cheapest, zero disk).
-//   (b) Cached provisioned binary at `<tooling_dir>/osv-scanner/osv-scanner[.exe]`
-//       that responds to `--version` → use it.
-//   (c) Attempt to download the pinned prebuilt GitHub release binary for the
-//       detected OS/arch (darwin/linux × amd64/arm64) via reqwest.
-//   (d) If download is unavailable/unsupported, try `go install` with the pinned
-//       module path if a Go toolchain is present.
-//   (e) None of the above → return `ProvisionError::InstallFailed` so the caller
-//       emits a `CoverageNote` and the scan continues without dep-audit.
-
-/// Pinned osv-scanner version.  Bump when a meaningful new ecosystem or advisory
-/// feed is added upstream.  The prebuilt binaries are downloaded from the GitHub
-/// releases page at this tag.
-pub const OSV_SCANNER_VERSION: &str = "v1.9.2";
-
-/// The download base URL for osv-scanner prebuilt release binaries.  The full
-/// asset URL is constructed as `{BASE}/{VERSION}/{ASSET_NAME}`.
-const OSV_RELEASE_BASE: &str = "https://github.com/google/osv-scanner/releases/download";
-
-/// Path to the Camerata-managed osv-scanner directory:
-/// `<tooling_dir>/osv-scanner/`.
-pub fn osv_scanner_dir(tooling: &Path) -> PathBuf {
-    tooling.join("osv-scanner")
-}
-
-/// Path to the cached osv-scanner binary inside the Camerata-managed directory.
-pub fn osv_scanner_bin(dir: &Path) -> PathBuf {
-    #[cfg(windows)]
-    let bin = dir.join("osv-scanner.exe");
-    #[cfg(not(windows))]
-    let bin = dir.join("osv-scanner");
-    bin
-}
-
-/// Probe whether the osv-scanner binary at `bin` is already provisioned and
-/// responds to `--version` with exit 0.  A `false` return triggers a fresh
-/// provision attempt.
-pub async fn osv_scanner_is_provisioned(bin: &Path) -> bool {
-    if !bin.exists() {
-        return false;
-    }
-    match tokio::process::Command::new(bin)
-        .arg("--version")
-        .kill_on_drop(true)
-        .output()
-        .await
-    {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
-}
-
-/// Detect the current OS / architecture label used in osv-scanner release asset
-/// names (e.g. `linux_amd64`, `darwin_arm64`).  Returns `None` when running on
-/// an unsupported combination (Windows / 32-bit / exotic arch) so the caller
-/// can fall through to the `go install` step.
-fn osv_release_asset() -> Option<String> {
-    // osv-scanner release asset naming convention (as of v1.7+):
-    //   osv-scanner_{os}_{arch}            (Linux / macOS)
-    //   osv-scanner_windows_{arch}.exe     (Windows)
-    // We target the most common developer platforms; CI images are typically
-    // linux_amd64.  Unsupported combinations fall through to `go install`.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return Some("osv-scanner_linux_amd64".to_string());
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    return Some("osv-scanner_linux_arm64".to_string());
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    return Some("osv-scanner_darwin_amd64".to_string());
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return Some("osv-scanner_darwin_arm64".to_string());
-    // Windows / 32-bit / everything else: unsupported for auto-download.
-    #[allow(unreachable_code)]
-    None
-}
-
-/// Attempt to download the pinned osv-scanner prebuilt binary from GitHub
-/// releases into `dest`.  Returns `Ok(())` on success or an error describing
-/// why the download failed (network unavailable, unsupported platform, etc.).
-async fn download_osv_scanner(dest: &Path) -> Result<(), ProvisionError> {
-    let asset = osv_release_asset().ok_or_else(|| ProvisionError::InstallFailed {
-        tool: "osv-scanner",
-        detail: "unsupported OS/arch for prebuilt binary download; \
-                 try `go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.2`"
-            .to_string(),
-    })?;
-
-    let url = format!(
-        "{base}/{version}/{asset}",
-        base = OSV_RELEASE_BASE,
-        version = OSV_SCANNER_VERSION,
-        asset = asset,
-    );
-
-    // reqwest is already a dependency (it fetches repo tarballs).  Use rustls
-    // (no system openssl dependency) for the binary download.
-    //
-    // IMPORTANT: both timeouts are mandatory.  Without them this function hangs
-    // forever on slow/blocked/no-network environments, which in turn hangs the
-    // entire onboarding scan and any test that exercises `audit_repos`.
-    // - connect_timeout: aborts if the TCP handshake doesn't complete in 5 s.
-    // - timeout: caps the TOTAL round-trip (connect + headers + body) at 30 s.
-    // On either timeout `send()` or `bytes()` returns an error → `ProvisionError`
-    // → `CoverageNote` → scan continues.  Never hangs.
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: format!("could not build HTTP client: {e}"),
-        })?;
-
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: format!("download failed (network unavailable?): {e}"),
-        })?;
-
-    if !resp.status().is_success() {
-        return Err(ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: format!(
-                "download returned HTTP {} for {url}",
-                resp.status().as_u16()
-            ),
-        });
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: format!("failed to read download body: {e}"),
-        })?;
-
-    write_executable_atomically(dest, &bytes).await?;
-    Ok(())
-}
-
-/// Write `bytes` to `dest` as an executable so that `dest` is never observable half-written or
-/// not-yet-executable: the bytes go to a sibling temp file, are marked executable, and only then
-/// renamed over `dest` (atomic within a directory). A concurrent `osv_scanner_is_provisioned`
-/// probe therefore sees either the previous state or a complete binary, never a truncated one
-/// (a truncated download that fails `--version` used to read as "not provisioned" and trigger a
-/// second, overlapping download).
-async fn write_executable_atomically(dest: &Path, bytes: &[u8]) -> Result<(), ProvisionError> {
-    let file_name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "osv-scanner".to_string());
-    let tmp = dest.with_file_name(format!(".{file_name}.{}.part", std::process::id()));
-    let staged: Result<(), ProvisionError> = async {
-        tokio::fs::write(&tmp, bytes).await?;
-        // Mark executable on Unix.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await?;
-        }
-        tokio::fs::rename(&tmp, dest).await?;
-        Ok(())
-    }
-    .await;
-    if staged.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    staged
-}
-
-/// Attempt to provision osv-scanner via `go install` with the pinned version.
-/// Only tried when a `go` toolchain is available (checked before calling) and
-/// the prebuilt-binary download did not succeed.  Returns the path to the
-/// installed binary on success.
-async fn go_install_osv_scanner() -> Result<PathBuf, ProvisionError> {
-    // `go env GOPATH` gives us the GOPATH so we can locate the installed binary.
-    // Bound at 10 s: `go env` is a local metadata query and should be nearly
-    // instant; a hang here means the Go toolchain is broken/stalled.
-    let gopath_out = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::process::Command::new("go")
-            .args(["env", "GOPATH"])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| ProvisionError::InstallFailed {
-        tool: "osv-scanner",
-        detail: "`go env GOPATH` timed out after 10 s".to_string(),
-    })?
-    .map_err(ProvisionError::Io)?;
-    let gopath = String::from_utf8_lossy(&gopath_out.stdout)
-        .trim()
-        .to_string();
-    if gopath.is_empty() {
-        return Err(ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: "`go env GOPATH` returned an empty path".to_string(),
-        });
-    }
-    let bin_dir = std::path::PathBuf::from(&gopath).join("bin");
-    #[cfg(windows)]
-    let bin = bin_dir.join("osv-scanner.exe");
-    #[cfg(not(windows))]
-    let bin = bin_dir.join("osv-scanner");
-
-    let pkg = format!(
-        "github.com/google/osv-scanner/cmd/osv-scanner@{ver}",
-        ver = OSV_SCANNER_VERSION
-    );
-    // Cap `go install` at 60 s.  On a slow network or constrained CI runner this
-    // can take a while, but an unlimited wait hangs the scan indefinitely.  60 s
-    // is generous for a ~15 MB binary compile + module download while still
-    // ensuring the provisioning path is always bounded.
-    let install_out = tokio::time::timeout(
-        Duration::from_secs(60),
-        tokio::process::Command::new("go")
-            .args(["install", &pkg])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| ProvisionError::InstallFailed {
-        tool: "osv-scanner",
-        detail: format!("`go install {pkg}` timed out after 60 s"),
-    })?
-    .map_err(ProvisionError::Io)?;
-    if !install_out.status.success() {
-        return Err(ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: format!(
-                "`go install {pkg}` failed: {}",
-                String::from_utf8_lossy(&install_out.stderr)
-            ),
-        });
-    }
-
-    if !bin.exists() {
-        return Err(ProvisionError::InstallFailed {
-            tool: "osv-scanner",
-            detail: format!(
-                "`go install` succeeded but binary not found at: {}",
-                bin.display()
-            ),
-        });
-    }
-    Ok(bin)
-}
-
-/// Ensure osv-scanner is available, returning a `PathBuf` to the binary.
-///
-/// # Resolution chain
-///
-/// 1. If `osv-scanner` is already on PATH and responds to `--version`, use it.
-/// 2. If the cached provisioned binary at `<tooling_dir>/osv-scanner/osv-scanner`
-///    already exists and responds to `--version`, use it.
-/// 3. Attempt to download the pinned prebuilt release binary for this OS/arch
-///    from the osv-scanner GitHub releases page.
-/// 4. Fall back to `go install github.com/google/osv-scanner/cmd/osv-scanner@<pin>`
-///    if a Go toolchain (`go`) is available.
-/// 5. If none of the above succeeds, return `Err(ProvisionError::InstallFailed)`
-///    so the caller emits a `CoverageNote` and the scan continues without dep-audit.
-///
-/// The function is idempotent: a passing health probe short-circuits every step.
-pub async fn ensure_osv_scanner(tooling: &Path) -> Result<PathBuf, ProvisionError> {
-    // Step (a): already on PATH?
-    if interpreter_available("osv-scanner").await {
-        // Resolve the actual binary path from PATH so the caller has a concrete
-        // `PathBuf`.  `which` is a crate we don't depend on; use the tokio
-        // process approach — run it and if it exits 0 we know it's on PATH.
-        // We return a sentinal PATH-relative string as a PathBuf here because the
-        // scan invocation uses `tokio::process::Command::new(bin_str)` which
-        // accepts PATH-resident names when the path has no separator.
-        return Ok(PathBuf::from("osv-scanner"));
-    }
-
-    // Step (b): already provisioned in our managed dir?
-    let dir = osv_scanner_dir(tooling);
-    let bin = osv_scanner_bin(&dir);
-    if osv_scanner_is_provisioned(&bin).await {
-        return Ok(bin);
-    }
-
-    // Neither probe passed — attempt provisioning. A test process never does that into the REAL
-    // shared tooling dir, and concurrent provisioners are serialized (a caller that waited re-checks
-    // the probe: the holder may have installed the binary this caller was about to download).
-    refuse_real_tooling_in_test_process(tooling, "osv-scanner")?;
-    let _lock = acquire_provision_lock(tooling, "osv-scanner", PROVISION_LOCK_TIMEOUT).await?;
-    if osv_scanner_is_provisioned(&bin).await {
-        return Ok(bin);
-    }
-    tokio::fs::create_dir_all(&dir).await?;
-
-    // Step (c): download prebuilt binary from GitHub releases.
-    match download_osv_scanner(&bin).await {
-        Ok(()) => {
-            // Final health probe after download.
-            if osv_scanner_is_provisioned(&bin).await {
-                return Ok(bin);
-            }
-            // Downloaded but the binary doesn't execute (wrong arch / partial write).
-            // Fall through to go install.
-        }
-        Err(e) => {
-            // Log the download failure reason but don't surface it yet — the go
-            // install path may still succeed.  If go install also fails we will
-            // return the go-install error (more actionable for the user).
-            let _ = e; // intentionally dropped; go-install error wins
-        }
-    }
-
-    // Step (d): go install fallback.
-    if interpreter_available("go").await {
-        let go_bin = go_install_osv_scanner()
-            .await
-            .map_err(|e| ProvisionError::InstallFailed {
-                tool: "osv-scanner",
-                detail: format!("prebuilt download failed and `go install` also failed: {e}"),
-            })?;
-        return Ok(go_bin);
-    }
-
-    // Step (e): nothing worked.
-    Err(ProvisionError::InstallFailed {
-        tool: "osv-scanner",
-        detail: format!(
-            "could not provision osv-scanner {OSV_SCANNER_VERSION}: \
-             prebuilt download failed and no Go toolchain is available. \
-             Install manually: `go install github.com/google/osv-scanner/cmd/osv-scanner@{OSV_SCANNER_VERSION}`"
-        ),
-    })
-}
-
-// ─── shared helper ───────────────────────────────────────────────────────────
-
-/// Returns `true` when `program` can be found and executed on PATH (by running
-/// `<program> --version`; some tools use `--help` but most accept `--version`).
-/// Used to detect base interpreters (python3, npm/node) before attempting a
-/// provisioning step that would fail anyway.
-async fn interpreter_available(program: impl AsRef<std::ffi::OsStr>) -> bool {
-    tokio::process::Command::new(program)
-        .arg("--version")
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The provisioning health probe runs semgrep: it must not call the vendor.
-    #[test]
-    fn semgrep_probe_carries_the_version_check_off_env() {
-        let cmd = semgrep_probe_command(Path::new("/x/semgrep"));
-        let v = cmd
-            .as_std()
-            .get_envs()
-            .find(|(k, _)| {
-                *k == std::ffi::OsStr::new(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_ENV)
-            })
-            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
-        assert_eq!(
-            v.as_deref(),
-            Some(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_OFF)
-        );
-    }
-    use tempfile::TempDir;
-
-    // ── W30 eslint version-pin parsing (pure) ─────────────────────────────────
-
-    #[test]
-    fn npm_package_name_strips_version_and_respects_scopes() {
-        assert_eq!(npm_package_name("eslint@^9"), "eslint");
-        assert_eq!(npm_package_name("eslint"), "eslint");
-        assert_eq!(
-            npm_package_name("@typescript-eslint/parser@^8"),
-            "@typescript-eslint/parser"
-        );
-        // scoped, no version: the leading `@` is a scope, not a separator.
-        assert_eq!(
-            npm_package_name("@typescript-eslint/parser"),
-            "@typescript-eslint/parser"
-        );
-    }
-
-    #[test]
-    fn npm_pinned_version_parses_the_exact_pin() {
-        assert_eq!(npm_pinned_version("eslint@9.39.5"), Some("9.39.5"));
-        assert_eq!(
-            npm_pinned_version("eslint-plugin-react-hooks@5.2.0"),
-            Some("5.2.0")
-        );
-        assert_eq!(
-            npm_pinned_version("@typescript-eslint/parser@8.72.0"),
-            Some("8.72.0")
-        );
-        assert_eq!(npm_pinned_version("eslint"), None); // unpinned
-        assert_eq!(npm_pinned_version("@scope/pkg"), None); // scoped, unpinned
-    }
-
-    /// An exact pin is `major.minor.patch` and nothing else: a range marker (`^`, `~`, `>=`,
-    /// `x`, `*`) or a dist-tag lets `npm` pick, and the graded accuracy tests need the tool to
-    /// behave the same on every machine on every day.
-    #[test]
-    fn every_bundled_eslint_pin_is_an_exact_version() {
-        for spec in ESLINT_NPM_PACKAGES {
-            let version = npm_pinned_version(spec).unwrap_or_else(|| {
-                panic!("ESLINT_NPM_PACKAGES entry {spec:?} is unpinned; it would drift to latest")
-            });
-            let parts: Vec<&str> = version.split('.').collect();
-            assert!(
-                parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok()),
-                "ESLINT_NPM_PACKAGES entry {spec:?} must pin an exact major.minor.patch, not a \
-                 range: {version:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn installed_version_reads_package_json_and_forces_reprovision_on_any_mismatch() {
-        let tmp = TempDir::new().unwrap();
-        let nm = tmp.path().join("node_modules");
-        std::fs::create_dir_all(nm.join("eslint")).unwrap();
-        std::fs::write(
-            nm.join("eslint").join("package.json"),
-            r#"{"name":"eslint","version":"9.12.0"}"#,
-        )
-        .unwrap();
-        assert_eq!(installed_version(&nm, "eslint").as_deref(), Some("9.12.0"));
-        // The SAME major, a different minor: caret majors let this drift in silently. An exact
-        // pin does not read it as installed.
-        assert_ne!(
-            installed_version(&nm, "eslint").as_deref(),
-            npm_pinned_version("eslint@9.39.5")
-        );
-        // A package with no package.json reads as absent.
-        assert_eq!(installed_version(&nm, "nope"), None);
-    }
-
-    /// A workspace whose packages are the right MAJOR but not the pinned version must
-    /// re-provision (the old probe compared majors only).
-    #[test]
-    fn a_workspace_with_a_package_at_the_right_major_but_the_wrong_version_must_reprovision() {
-        for spec in ESLINT_NPM_PACKAGES {
-            let tmp = fully_provisioned_workspace();
-            let name = npm_package_name(spec);
-            let pinned = npm_pinned_version(spec).unwrap();
-            let major = pinned.split('.').next().unwrap();
-            std::fs::write(
-                tmp.path()
-                    .join("node_modules")
-                    .join(name)
-                    .join("package.json"),
-                format!("{{\"version\":\"{major}.99.99\"}}"),
-            )
-            .unwrap();
-            assert!(
-                !eslint_packages_installed(tmp.path()),
-                "`{name}` at {major}.99.99 is not the pinned {pinned}"
-            );
-        }
-    }
-
-    /// The generated workspace manifest pins every package to the exact version, no range.
-    #[test]
-    fn the_generated_workspace_package_json_has_exact_versions() {
-        let json: serde_json::Value = serde_json::from_str(&eslint_package_json()).unwrap();
-        let dev = json["devDependencies"]
-            .as_object()
-            .expect("devDependencies");
-        assert_eq!(dev.len(), ESLINT_NPM_PACKAGES.len());
-        for spec in ESLINT_NPM_PACKAGES {
-            let name = npm_package_name(spec);
-            assert_eq!(
-                dev.get(name).and_then(|v| v.as_str()),
-                npm_pinned_version(spec),
-                "{name}"
-            );
-        }
-        for (name, version) in dev {
-            let v = version.as_str().unwrap();
-            assert!(
-                !v.starts_with(['^', '~', '>', '<', '=', '*']) && !v.contains(['x', ' ', '|']),
-                "{name}: {v:?} is a range, not an exact version"
-            );
-        }
-    }
-
-    /// The committed lockfile is what provisioning installs from, so it must agree with the pins
-    /// (a lock built for other versions makes `npm ci` fail, or worse, install the wrong ones),
-    /// and the committed manifest next to it must be the one the code generates.
-    #[test]
-    fn the_committed_lockfile_and_manifest_agree_with_the_pins() {
-        let manifest = std::fs::read_to_string(bundled_eslint_package_json_src())
-            .expect("assets/eslint/package.json is committed");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&manifest).unwrap(),
-            serde_json::from_str::<serde_json::Value>(&eslint_package_json()).unwrap(),
-            "assets/eslint/package.json must equal the generated manifest"
-        );
-        let lock: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(bundled_eslint_lock_src())
-                .expect("assets/eslint/package-lock.json is committed"),
-        )
-        .unwrap();
-        assert!(lock["lockfileVersion"].as_u64().unwrap_or(0) >= 2);
-        for spec in ESLINT_NPM_PACKAGES {
-            let name = npm_package_name(spec);
-            let pinned = npm_pinned_version(spec).unwrap();
-            assert_eq!(
-                lock["packages"][""]["devDependencies"][name].as_str(),
-                Some(pinned),
-                "lock root requirement for {name}"
-            );
-            assert_eq!(
-                lock["packages"][format!("node_modules/{name}")]["version"].as_str(),
-                Some(pinned),
-                "lock resolved version for {name}"
-            );
-            assert!(
-                lock["packages"][format!("node_modules/{name}")]["integrity"]
-                    .as_str()
-                    .is_some_and(|i| i.starts_with("sha512-")),
-                "the lock carries an integrity hash for {name}"
-            );
-        }
-    }
-
-    /// Network: a fresh provisioning into an empty tooling directory installs the pinned tree
-    /// from the committed lockfile (`npm ci`), leaves the workspace manifest exact, and reads as
-    /// provisioned. Ignored by default because it needs `npm` and the registry (or a warm npm
-    /// cache); run with `cargo test -p camerata-server --lib fresh_eslint -- --ignored`.
-    #[tokio::test]
-    #[ignore = "needs npm and network (or a warm npm cache)"]
-    async fn fresh_eslint_provisioning_installs_the_pinned_tree_from_the_lockfile() {
-        let tmp = TempDir::new().unwrap();
-        let bin = ensure_eslint(tmp.path()).await.expect("provisions");
-        let ws = eslint_workspace_dir(tmp.path());
-        assert!(bin.exists());
-        assert!(eslint_is_provisioned(&ws).await);
-        let nm = ws.join("node_modules");
-        for spec in ESLINT_NPM_PACKAGES {
-            assert_eq!(
-                installed_version(&nm, npm_package_name(spec)).as_deref(),
-                npm_pinned_version(spec),
-                "{spec}"
-            );
-        }
-        let manifest: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(ws.join("package.json")).unwrap())
-                .unwrap();
-        assert_eq!(manifest["devDependencies"]["eslint"], "9.39.5");
-        let lock = std::fs::read_to_string(ws.join("package-lock.json")).unwrap();
-        assert_eq!(
-            lock,
-            std::fs::read_to_string(bundled_eslint_lock_src()).unwrap(),
-            "`npm ci` must not rewrite the committed lockfile"
-        );
-    }
-
-    /// With the lockfile available provisioning installs exactly from it (`npm ci`, still
-    /// `--prefer-offline`); without it (a packaging problem) it falls back to installing the
-    /// exact pins, never to a range.
-    #[test]
-    fn eslint_installs_from_the_lockfile_and_falls_back_to_the_exact_pins() {
-        assert_eq!(eslint_install_args(true), ["ci", "--prefer-offline"]);
-        let fallback = eslint_install_args(false);
-        assert_eq!(
-            &fallback[..3],
-            ["install", "--save-dev", "--prefer-offline"]
-        );
-        assert!(
-            fallback.contains(&"eslint@9.39.5".to_string()),
-            "{fallback:?}"
-        );
-        assert!(
-            fallback[3..]
-                .iter()
-                .all(|a| npm_pinned_version(a).is_some()),
-            "every fallback package is an exact pin: {fallback:?}"
-        );
-    }
-
-    // ── path resolution (pure) ────────────────────────────────────────────────
-
-    #[test]
-    fn semgrep_bin_path_is_inside_venv() {
-        let tmp = TempDir::new().unwrap();
-        let venv = tmp.path().join("semgrep-venv");
-        let bin = semgrep_bin(&venv);
-        // Must be inside the venv.
-        assert!(bin.starts_with(&venv));
-        // Must end with the binary name.
-        let name = bin.file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("semgrep"), "bin name was: {name}");
-    }
-
-    #[test]
-    fn eslint_bin_path_is_inside_workspace() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("eslint");
-        let bin = eslint_bin(&ws);
-        assert!(bin.starts_with(&ws));
-        let name = bin.file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("eslint"), "bin name was: {name}");
-    }
-
-    #[test]
-    fn tooling_sub_dirs_are_under_root() {
-        let tmp = TempDir::new().unwrap();
-        let tooling = tmp.path().to_path_buf();
-        assert!(semgrep_venv_dir(&tooling).starts_with(&tooling));
-        assert!(eslint_workspace_dir(&tooling).starts_with(&tooling));
-    }
-
-    #[test]
-    fn eslint_config_path_is_inside_workspace() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("eslint");
-        let cfg = eslint_config_path(&ws);
-        assert!(cfg.starts_with(&ws));
-    }
-
-    // ── req_c11: the health probe covers the whole provisioned state ──────────
-    //
-    // The probe used to ask only "does the binary answer --version", which made
-    // the workspace write-once: packages added to ESLINT_NPM_PACKAGES later, and
-    // every edit to the bundled flat config, never reached a machine that had
-    // provisioned once. Observed live while diagnosing C11 — 3 of 6 packages
-    // missing and a four-month-stale config, on a workspace this probe called
-    // healthy. See `eslint_is_provisioned`'s doc comment.
-
-    /// Build a workspace that looks fully provisioned to the probe's sub-checks:
-    /// every required package present, config byte-identical to the asset.
-    fn fully_provisioned_workspace() -> TempDir {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path();
-        for spec in ESLINT_NPM_PACKAGES {
-            let name = npm_package_name(spec);
-            let dir = ws.join("node_modules").join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            let version = npm_pinned_version(spec).unwrap_or("0.0.0");
-            std::fs::write(
-                dir.join("package.json"),
-                format!("{{\"version\":\"{version}\"}}"),
-            )
-            .unwrap();
-        }
-        let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
-        std::fs::write(eslint_config_path(ws), asset).unwrap();
-        tmp
-    }
-
-    /// req_c11: every required package present ⇒ the package sub-check passes.
-    #[test]
-    fn req_c11_a_workspace_with_every_required_package_passes_the_package_check() {
-        let tmp = fully_provisioned_workspace();
-        assert!(eslint_packages_installed(tmp.path()));
-    }
-
-    /// req_c11: the exact observed defect — a workspace missing a package that was
-    /// added to `ESLINT_NPM_PACKAGES` after it was provisioned must re-provision.
-    ///
-    /// FAILS BEFORE THE FIX: `eslint_is_provisioned` never looked at `node_modules`
-    /// at all, so this workspace was indistinguishable from a complete one.
-    #[test]
-    fn req_c11_a_workspace_missing_one_required_package_must_reprovision() {
-        for missing in ESLINT_NPM_PACKAGES {
-            let tmp = fully_provisioned_workspace();
-            let name = npm_package_name(missing);
-            std::fs::remove_dir_all(tmp.path().join("node_modules").join(name)).unwrap();
-            assert!(
-                !eslint_packages_installed(tmp.path()),
-                "a workspace missing `{name}` must not read as provisioned — that is how \
-                 three plugin packages stayed missing for months and zeroed the whole pass"
-            );
-        }
-    }
-
-    /// req_c11: a package DIRECTORY with no `package.json` (an interrupted
-    /// `npm install`) counts as absent — the conservative direction.
-    #[test]
-    fn req_c11_a_package_dir_without_a_manifest_counts_as_absent() {
-        let tmp = fully_provisioned_workspace();
-        let dir = tmp
-            .path()
-            .join("node_modules")
-            .join(npm_package_name(ESLINT_NPM_PACKAGES[0]));
-        std::fs::remove_file(dir.join("package.json")).unwrap();
-        assert!(!eslint_packages_installed(tmp.path()));
-    }
-
-    /// req_c11: the config sub-check is a CONTENT comparison against the bundled
-    /// asset, so a workspace carrying an older copy re-provisions.
-    ///
-    /// FAILS BEFORE THE FIX: `ensure_eslint` only ever copied the config on the
-    /// install path, and the probe short-circuited before reaching it, so a stale
-    /// config was permanent.
-    #[test]
-    fn req_c11_a_stale_workspace_config_must_reprovision_but_a_current_one_must_not() {
-        let tmp = fully_provisioned_workspace();
-        assert!(
-            eslint_config_is_current(tmp.path()),
-            "a byte-identical copy of the bundled asset is current"
-        );
-
-        std::fs::write(
-            eslint_config_path(tmp.path()),
-            "export default [];\n// an older Camerata's config\n",
-        )
-        .unwrap();
-        assert!(
-            !eslint_config_is_current(tmp.path()),
-            "a workspace config that differs from the shipped asset must re-provision"
-        );
-    }
-
-    /// req_c11: an ABSENT workspace config re-provisions (it is not "current").
-    #[test]
-    fn req_c11_an_absent_workspace_config_must_reprovision() {
-        let tmp = fully_provisioned_workspace();
-        std::fs::remove_file(eslint_config_path(tmp.path())).unwrap();
-        assert!(!eslint_config_is_current(tmp.path()));
-    }
-
-    /// req_c11: the SARIF formatter package is no longer installed — nothing
-    /// requests it, so installing it would be pure cost. Also guards the inverse
-    /// regression: re-adding it would reintroduce the temptation to pass it to
-    /// `--format`, which is the C11 defect itself.
-    #[test]
-    fn req_c11_the_npm_sarif_formatter_is_no_longer_provisioned() {
-        assert!(
-            !ESLINT_NPM_PACKAGES
-                .iter()
-                .any(|p| p.contains("eslint-formatter")),
-            "no eslint formatter PACKAGE may be provisioned; the scan pass uses eslint's \
-             built-in `json` formatter: {ESLINT_NPM_PACKAGES:?}"
-        );
-    }
-
-    // ── probe logic (absent binary → not provisioned) ─────────────────────────
-
-    #[tokio::test]
-    async fn missing_semgrep_binary_is_not_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let venv = tmp.path().join("nonexistent-venv");
-        // No binary created → must report not provisioned.
-        assert!(!semgrep_is_provisioned(&venv).await);
-    }
-
-    #[tokio::test]
-    async fn missing_eslint_binary_is_not_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("nonexistent-eslint");
-        assert!(!eslint_is_provisioned(&ws).await);
-    }
-
-    // ── probe with a stub binary ──────────────────────────────────────────────
-    //
-    // A tiny shell script that always exits 0 stands in for the real binary to
-    // verify the probe logic detects "binary present + exits 0 → provisioned".
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stub_semgrep_binary_is_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let venv = tmp.path().join("semgrep-venv");
-        // Replicate the directory layout the probe expects.
-        let bin_dir = venv.join("bin");
-        tokio::fs::create_dir_all(&bin_dir).await.unwrap();
-        let stub = bin_dir.join("semgrep");
-        tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
-            .await
-            .unwrap();
-        // Make it executable.
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-            .await
-            .unwrap();
-        assert!(semgrep_is_provisioned(&venv).await);
-    }
-
-    /// Lay down the NON-binary half of a provisioned eslint workspace: every
-    /// required package, and a workspace config byte-identical to the bundled
-    /// asset. The stub-binary tests below need this because
-    /// [`eslint_is_provisioned`] deliberately no longer accepts a bare binary as
-    /// proof of provisioning — see its doc comment for the write-once defect that
-    /// change closes.
-    fn stub_eslint_packages_and_config(ws: &Path) {
-        for spec in ESLINT_NPM_PACKAGES {
-            // Use the BARE package name for the directory (the probe looks there), and write a
-            // version matching the pinned major so the W30 version-aware probe reads the stub as
-            // correctly provisioned.
-            let name = npm_package_name(spec);
-            let dir = ws.join("node_modules").join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            let version = npm_pinned_version(spec).unwrap_or("0.0.0");
-            std::fs::write(
-                dir.join("package.json"),
-                format!("{{\"version\":\"{version}\"}}"),
-            )
-            .unwrap();
-        }
-        let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
-        std::fs::write(eslint_config_path(ws), asset).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stub_eslint_binary_is_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("eslint");
-        let bin_dir = ws.join("node_modules").join(".bin");
-        tokio::fs::create_dir_all(&bin_dir).await.unwrap();
-        let stub = bin_dir.join("eslint");
-        tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
-            .await
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-            .await
-            .unwrap();
-        stub_eslint_packages_and_config(&ws);
-        assert!(eslint_is_provisioned(&ws).await);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn broken_stub_binary_is_not_provisioned() {
-        // A binary that exits non-zero is treated as broken/not-provisioned.
-        let tmp = TempDir::new().unwrap();
-        let venv = tmp.path().join("semgrep-venv");
-        let bin_dir = venv.join("bin");
-        tokio::fs::create_dir_all(&bin_dir).await.unwrap();
-        let stub = bin_dir.join("semgrep");
-        tokio::fs::write(&stub, b"#!/bin/sh\nexit 1\n")
-            .await
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-            .await
-            .unwrap();
-        // Exit 1 should report not provisioned.
-        assert!(!semgrep_is_provisioned(&venv).await);
-    }
-
-    // ── ensure_* on missing python3/npm ──────────────────────────────────────
-    //
-    // We can't assume python3 or npm are absent on the test machine, so instead
-    // we exercise the "tooling dir not writable" failure path which always
-    // returns an error without needing to be on a machine without python3/npm.
-    // The BaseInterpreterMissing path is covered by the interpreter_available
-    // helper indirectly; testing it end-to-end would require a controlled
-    // PATH, which is brittle in CI.
-
-    #[tokio::test]
-    async fn ensure_semgrep_is_idempotent_when_provisioned() {
-        // If semgrep is already provisioned (the stub trick) a second call to
-        // ensure_semgrep must NOT attempt a re-install — it returns the same
-        // path immediately.
-        #[cfg(unix)]
-        {
-            let tmp = TempDir::new().unwrap();
-            let tooling = tmp.path().to_path_buf();
-            let venv = semgrep_venv_dir(&tooling);
-            let bin_dir = venv.join("bin");
-            tokio::fs::create_dir_all(&bin_dir).await.unwrap();
-            let stub = bin_dir.join("semgrep");
-            tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
-                .await
-                .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-                .await
-                .unwrap();
-            // First call — short-circuits at the probe.
-            let result1 = ensure_semgrep(&tooling).await;
-            assert!(result1.is_ok());
-            // Second call — same.
-            let result2 = ensure_semgrep(&tooling).await;
-            assert!(result2.is_ok());
-            assert_eq!(result1.unwrap(), result2.unwrap());
-        }
-    }
-
-    #[tokio::test]
-    async fn ensure_eslint_is_idempotent_when_provisioned() {
-        #[cfg(unix)]
-        {
-            let tmp = TempDir::new().unwrap();
-            let tooling = tmp.path().to_path_buf();
-            let ws = eslint_workspace_dir(&tooling);
-            let bin_dir = ws.join("node_modules").join(".bin");
-            tokio::fs::create_dir_all(&bin_dir).await.unwrap();
-            let stub = bin_dir.join("eslint");
-            tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
-                .await
-                .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-                .await
-                .unwrap();
-            stub_eslint_packages_and_config(&ws);
-            let r1 = ensure_eslint(&tooling).await;
-            assert!(r1.is_ok());
-            let r2 = ensure_eslint(&tooling).await;
-            assert!(r2.is_ok());
-            assert_eq!(r1.unwrap(), r2.unwrap());
-        }
-    }
-
-    // ── atomic, serialized eslint provisioning ────────────────────────────────
-    //
-    // The incident: a full `cargo test --workspace` found the shared eslint workspace stale, one
-    // test ran `npm ci` IN PLACE (which deletes `node_modules` first), another test running eslint
-    // died with `Cannot find module '../package.json'`, and a third saw the half-deleted tree and
-    // ran a SECOND `npm ci` over the first (two npm runs, 0.5 s apart, same cwd, in npm's logs).
-    // These tests drive the real provisioning code against a temp tooling dir and a fake `npm`,
-    // so no network and nothing shared is involved.
-
-    /// A fake `npm` that behaves like the real one where it matters here: `ci` / `install` first
-    /// DELETE `node_modules` (the destructive step that caused the incident), take a while, then
-    /// lay down every pinned package and a working `eslint` stub. Each install appends one line
-    /// (`<subcommand> <cwd>`) to `log`. `--version` answers without logging.
-    #[cfg(unix)]
-    struct FakeNpm {
-        _dir: TempDir,
-        program: PathBuf,
-        log: PathBuf,
-    }
-
-    #[cfg(unix)]
-    impl FakeNpm {
-        fn new(install_seconds: &str, fail: bool) -> Self {
-            use std::os::unix::fs::PermissionsExt;
-            let dir = TempDir::new().unwrap();
-            let program = dir.path().join("fake-npm");
-            let log = dir.path().join("installs.log");
-            let mut script = format!(
-                "#!/bin/sh\n\
-                 if [ \"$1\" = \"--version\" ]; then echo 10.0.0; exit 0; fi\n\
-                 echo \"$1 $(pwd)\" >> '{log}'\n\
-                 sleep {install_seconds}\n",
-                log = log.display(),
-            );
-            if fail {
-                script.push_str("echo 'fake npm: simulated failure' >&2\nexit 1\n");
-            } else {
-                script.push_str("rm -rf node_modules\nmkdir -p node_modules/.bin\n");
-                for spec in ESLINT_NPM_PACKAGES {
-                    let name = npm_package_name(spec);
-                    let version = npm_pinned_version(spec).unwrap_or("0.0.0");
-                    script.push_str(&format!(
-                        "mkdir -p node_modules/{name}\n\
-                         printf '{{\"version\":\"{version}\"}}' > node_modules/{name}/package.json\n"
-                    ));
-                }
-                script.push_str(
-                    "printf '#!/bin/sh\\nexit 0\\n' > node_modules/.bin/eslint\n\
-                     chmod +x node_modules/.bin/eslint\n",
-                );
-            }
-            std::fs::write(&program, script).unwrap();
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self {
-                _dir: dir,
-                program,
-                log,
-            }
-        }
-
-        fn installs(&self) -> usize {
-            std::fs::read_to_string(&self.log)
-                .map(|s| s.lines().count())
-                .unwrap_or(0)
-        }
-    }
-
-    /// Make the (already provisioned) workspace under `tooling` read as stale, so the next
-    /// `ensure_eslint` must re-provision it. Writes through the workspace path.
-    #[cfg(unix)]
-    fn make_eslint_workspace_stale(tooling: &Path) {
-        std::fs::write(
-            eslint_config_path(&eslint_workspace_dir(tooling)),
-            "// an older Camerata's config\n",
-        )
-        .unwrap();
-    }
-
-    #[cfg(unix)]
-    fn generation_names(tooling: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(eslint_generations_dir(tooling))
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names
-    }
-
-    #[cfg(unix)]
-    async fn eslint_runs(bin: &Path) -> bool {
-        tokio::process::Command::new(bin)
-            .arg("--version")
-            .output()
-            .await
-            .is_ok_and(|o| o.status.success())
-    }
-
-    /// Eight callers racing on one un-provisioned tooling dir produce ONE install, and every one
-    /// of them is handed a bin that runs.
-    ///
-    /// FAILS BEFORE THE FIX: every caller saw the empty workspace, all eight wrote the manifest
-    /// and ran `npm` in the same directory.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_ensure_eslint_calls_install_once_and_every_caller_gets_a_working_bin() {
-        let tooling = TempDir::new().unwrap();
-        let npm = FakeNpm::new("0.4", false);
-        let mut callers = Vec::new();
-        for _ in 0..8 {
-            let tooling = tooling.path().to_path_buf();
-            let program = npm.program.clone();
-            callers.push(tokio::spawn(async move {
-                ensure_eslint_with(&tooling, program.as_os_str()).await
-            }));
-        }
-        let mut bins = Vec::new();
-        for caller in callers {
-            bins.push(
-                caller
-                    .await
-                    .unwrap()
-                    .expect("every caller provisions or waits"),
-            );
-        }
-
-        assert_eq!(npm.installs(), 1, "exactly one install ran: {:?}", npm.log);
-        assert!(
-            bins.windows(2).all(|w| w[0] == w[1]),
-            "one bin for all: {bins:?}"
-        );
-        assert!(eslint_runs(&bins[0]).await, "the returned bin works");
-        assert!(eslint_is_provisioned(&eslint_workspace_dir(tooling.path())).await);
-        assert_eq!(
-            generation_names(tooling.path()).len(),
-            1,
-            "one generation, no staging debris: {:?}",
-            generation_names(tooling.path())
-        );
-    }
-
-    /// A real eslint run spawns from the CONCRETE generation directory, never through the
-    /// `eslint` symlink: the binary, the config and the workspace all live under the canonical
-    /// `eslint.gen/<id>` path, resolved once. A re-provision that swaps the link afterwards
-    /// cannot affect a run already holding these paths, and the previous generation (kept one
-    /// cycle) still serves them.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn eslint_run_paths_are_canonical_generation_paths_not_the_symlink() {
-        let tooling = TempDir::new().unwrap();
-        let npm = FakeNpm::new("0", false);
-        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .expect("first provision");
-        let link = eslint_workspace_dir(tooling.path());
-        let generation = std::fs::canonicalize(&link).unwrap();
-
-        let paths = eslint_run_paths(tooling.path()).await.expect("resolve");
-        assert_eq!(paths.workspace, generation);
-        assert_ne!(paths.workspace, link, "must not be the symlink path");
-        assert!(paths.bin.starts_with(&generation), "{:?}", paths.bin);
-        assert!(paths.config.starts_with(&generation), "{:?}", paths.config);
-        for p in [&paths.workspace, &paths.bin, &paths.config] {
-            assert!(!p.starts_with(&link), "{p:?} goes through the symlink");
-        }
-
-        // A re-provision swaps the link to a new generation; the resolved paths still work
-        // because the previous generation is kept for one cycle.
-        make_eslint_workspace_stale(tooling.path());
-        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .expect("re-provision");
-        assert_ne!(
-            std::fs::canonicalize(&link).unwrap(),
-            generation,
-            "link swapped"
-        );
-        assert!(
-            paths.config.exists(),
-            "previous generation is kept one cycle"
-        );
-        assert!(eslint_runs(&paths.bin).await, "the resolved bin still runs");
-    }
-
-    /// Whether `path` is readable, tolerating the kernel's transient `EINVAL`.
-    ///
-    /// On macOS, resolving a path THROUGH a symlink while `rename(2)` replaces that symlink can
-    /// fail one lookup with `EINVAL` (observed: ~5% of runs under CPU load). It is not a missing
-    /// tree: the very next lookup resolves, and a genuinely absent tree fails with `ENOENT`
-    /// every time. So only a PERSISTENT failure, or any `NotFound`, counts as a miss.
-    #[cfg(unix)]
-    fn readable_through_a_link_swap(path: &Path) -> bool {
-        for _ in 0..5 {
-            match std::fs::read_to_string(path) {
-                Ok(_) => return true,
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => std::thread::yield_now(),
-                Err(_) => return false,
-            }
-        }
-        false
-    }
-
-    /// A reader polling the workspace while it RE-provisions never observes a missing or partial
-    /// tree: `node_modules/eslint/package.json` is readable on every single poll, and `eslint`
-    /// runs from the same path afterwards.
-    ///
-    /// FAILS BEFORE THE FIX: `npm ci` ran in the live directory and deleted `node_modules` first.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_reader_never_sees_a_missing_tree_while_eslint_reprovisions() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let tooling = TempDir::new().unwrap();
-        let npm = FakeNpm::new("0.5", false);
-        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .expect("first provision");
-        make_eslint_workspace_stale(tooling.path());
-        assert!(!eslint_is_provisioned(&eslint_workspace_dir(tooling.path())).await);
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let polls = Arc::new(AtomicUsize::new(0));
-        let misses = Arc::new(AtomicUsize::new(0));
-        let marker = eslint_workspace_dir(tooling.path())
-            .join("node_modules")
-            .join("eslint")
-            .join("package.json");
-        let reader = {
-            let (stop, polls, misses) = (stop.clone(), polls.clone(), misses.clone());
-            std::thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    polls.fetch_add(1, Ordering::SeqCst);
-                    if !readable_through_a_link_swap(&marker) {
-                        misses.fetch_add(1, Ordering::SeqCst);
-                    }
-                    std::thread::sleep(Duration::from_micros(100));
-                }
-            })
-        };
-
-        let bin = ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .expect("re-provision");
-        stop.store(true, Ordering::SeqCst);
-        reader.join().unwrap();
-
-        assert_eq!(npm.installs(), 2, "first provision + the re-provision");
-        assert!(
-            polls.load(Ordering::SeqCst) > 100,
-            "the reader must have actually overlapped the install ({} polls)",
-            polls.load(Ordering::SeqCst)
-        );
-        assert_eq!(
-            misses.load(Ordering::SeqCst),
-            0,
-            "a reader saw the eslint package missing during a re-provision"
-        );
-        assert!(eslint_runs(&bin).await);
-        assert!(eslint_is_provisioned(&eslint_workspace_dir(tooling.path())).await);
-    }
-
-    /// A FAILED re-provision leaves the live workspace exactly as it was (still usable by
-    /// whoever is reading it) and leaves no staging debris behind.
-    ///
-    /// FAILS BEFORE THE FIX: the install ran in place, so a failing `npm ci` had already deleted
-    /// `node_modules` out from under every reader.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_failed_reprovision_leaves_the_live_workspace_untouched() {
-        let tooling = TempDir::new().unwrap();
-        let good = FakeNpm::new("0", false);
-        ensure_eslint_with(tooling.path(), good.program.as_os_str())
-            .await
-            .unwrap();
-        make_eslint_workspace_stale(tooling.path());
-        let ws = eslint_workspace_dir(tooling.path());
-        let link_before = std::fs::read_link(&ws).unwrap();
-
-        let broken = FakeNpm::new("0", true);
-        let err = ensure_eslint_with(tooling.path(), broken.program.as_os_str())
-            .await
-            .expect_err("the install fails");
-        assert!(
-            matches!(err, ProvisionError::InstallFailed { tool: "eslint", .. }),
-            "{err:?}"
-        );
-
-        assert_eq!(
-            std::fs::read_link(&ws).unwrap(),
-            link_before,
-            "link unmoved"
-        );
-        assert!(
-            ws.join("node_modules")
-                .join("eslint")
-                .join("package.json")
-                .exists(),
-            "the live tree is intact"
-        );
-        assert_eq!(
-            std::fs::read_to_string(eslint_config_path(&ws)).unwrap(),
-            "// an older Camerata's config\n",
-            "the live workspace was not rewritten"
-        );
-        assert_eq!(
-            generation_names(tooling.path()).len(),
-            1,
-            "staging cleaned up"
-        );
-    }
-
-    /// A workspace in the OLD layout (a real `eslint/` directory) migrates to a published
-    /// generation, and generations are pruned to the current one plus the one it replaced.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_legacy_real_directory_workspace_migrates_and_old_generations_are_pruned() {
-        let tooling = TempDir::new().unwrap();
-        let ws = eslint_workspace_dir(tooling.path());
-        std::fs::create_dir_all(ws.join("node_modules").join(".bin")).unwrap();
-        std::fs::write(ws.join("camerata.fresh.test.mjs"), "// stray file").unwrap();
-        assert!(!ws.is_symlink());
-
-        let npm = FakeNpm::new("0", false);
-        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .expect("migrates");
-        assert!(
-            ws.is_symlink(),
-            "the workspace is now a published generation"
-        );
-        assert!(eslint_is_provisioned(&ws).await);
-        assert!(
-            !ws.join("camerata.fresh.test.mjs").exists(),
-            "the stray file belonged to the legacy tree"
-        );
-        // current + the legacy tree, kept one cycle.
-        assert_eq!(generation_names(tooling.path()).len(), 2);
-
-        make_eslint_workspace_stale(tooling.path());
-        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .unwrap();
-        assert_eq!(
-            generation_names(tooling.path()).len(),
-            2,
-            "current + previous only: {:?}",
-            generation_names(tooling.path())
-        );
-        make_eslint_workspace_stale(tooling.path());
-        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
-            .await
-            .unwrap();
-        assert_eq!(generation_names(tooling.path()).len(), 2);
-        assert_eq!(npm.installs(), 3);
-    }
-
-    /// A caller arriving while ANOTHER provisioner holds the lock waits for it, then re-probes
-    /// and does NOT install again.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_caller_that_waited_on_the_lock_reprobes_instead_of_installing() {
-        let tooling = TempDir::new().unwrap();
-        let npm = FakeNpm::new("0", false);
-
-        // "Another process" holds the lock and, while holding it, finishes the install.
-        let held = acquire_provision_lock(tooling.path(), "eslint", Duration::from_secs(5))
-            .await
-            .unwrap();
-        let waiter = {
-            let tooling = tooling.path().to_path_buf();
-            let program = npm.program.clone();
-            tokio::spawn(async move { ensure_eslint_with(&tooling, program.as_os_str()).await })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!waiter.is_finished(), "the waiter is blocked on the lock");
-        assert_eq!(npm.installs(), 0, "and has not installed");
-
-        // The holder's install lands (a separate provisioner, e.g. another process).
-        let other = FakeNpm::new("0", false);
-        install_eslint_generation(tooling.path(), other.program.as_os_str())
-            .await
-            .unwrap();
-        drop(held);
-
-        let bin = waiter
-            .await
-            .unwrap()
-            .expect("waiter returns the provisioned bin");
-        assert!(eslint_runs(&bin).await);
-        assert_eq!(
-            npm.installs(),
-            0,
-            "the waiter re-probed and did not install"
-        );
-        assert_eq!(other.installs(), 1);
-    }
-
-    /// The lock is exclusive and the wait is bounded: a wedged holder cannot hang callers forever.
-    #[tokio::test]
-    async fn the_provision_lock_is_exclusive_and_the_wait_is_bounded() {
-        let tooling = TempDir::new().unwrap();
-        let held = acquire_provision_lock(tooling.path(), "eslint", Duration::from_secs(5))
-            .await
-            .unwrap();
-        let err = acquire_provision_lock(tooling.path(), "eslint", Duration::from_millis(150))
-            .await
-            .expect_err("contended");
-        assert!(
-            matches!(&err, ProvisionError::InstallFailed { tool: "eslint", detail } if detail.contains("timed out")),
-            "{err:?}"
-        );
-        // Another tool's lock is independent.
-        acquire_provision_lock(tooling.path(), "semgrep", Duration::from_millis(150))
-            .await
-            .expect("per-tool locks do not block each other");
-        drop(held);
-        acquire_provision_lock(tooling.path(), "eslint", Duration::from_millis(150))
-            .await
-            .expect("released on drop");
-    }
-
-    /// semgrep: a caller that waited on the lock re-probes and does not rebuild the venv the
-    /// holder just finished. (Needs python3 only to get past the interpreter check.)
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_semgrep_caller_that_waited_on_the_lock_does_not_rebuild_the_venv() {
-        use std::os::unix::fs::PermissionsExt;
-        if !interpreter_available("python3").await {
-            eprintln!("skipping: python3 not available to reach the lock");
-            return;
-        }
-        let tooling = TempDir::new().unwrap();
-        let held = acquire_provision_lock(tooling.path(), "semgrep", Duration::from_secs(5))
-            .await
-            .unwrap();
-        let waiter = {
-            let tooling = tooling.path().to_path_buf();
-            tokio::spawn(async move { ensure_semgrep(&tooling).await })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!waiter.is_finished(), "blocked on the lock");
-
-        let venv = semgrep_venv_dir(tooling.path());
-        std::fs::create_dir_all(venv.join("bin")).unwrap();
-        let stub = venv.join("bin").join("semgrep");
-        std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        drop(held);
-
-        waiter.await.unwrap().expect("returns the holder's venv");
-        assert!(
-            !venv.join("pyvenv.cfg").exists(),
-            "the waiter must not have run `python3 -m venv` over the finished install"
-        );
-    }
-
-    /// osv-scanner's binary is written so it is never visible half-written or non-executable.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn the_osv_binary_is_written_atomically_and_executable() {
-        let dir = TempDir::new().unwrap();
-        let dest = dir.path().join("osv-scanner");
-        write_executable_atomically(&dest, b"#!/bin/sh\nexit 0\n")
-            .await
-            .unwrap();
-        assert!(osv_scanner_is_provisioned(&dest).await);
-        // Replacing a working binary is also a single rename.
-        write_executable_atomically(&dest, b"#!/bin/sh\nexit 0\n# v2\n")
-            .await
-            .unwrap();
-        assert!(osv_scanner_is_provisioned(&dest).await);
-        let names: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, ["osv-scanner"], "no .part debris: {names:?}");
-    }
-
-    // ── tests never write to the REAL shared tooling dir ──────────────────────
-
-    #[test]
-    fn a_cargo_test_binary_is_recognised_by_its_location() {
-        assert!(is_cargo_test_binary(Path::new(
-            "/w/target/debug/deps/camerata_server-0123abcd"
-        )));
-        assert!(!is_cargo_test_binary(Path::new(
-            "/w/target/debug/camerata-server"
-        )));
-        assert!(!is_cargo_test_binary(Path::new(
-            "/Applications/Camerata.app/camerata"
-        )));
-        // THIS very process is a test binary: the heuristic holds where it matters.
-        assert!(
-            is_cargo_test_binary(&std::env::current_exe().unwrap()),
-            "the guard would not protect the real tooling dir from this test binary"
-        );
-    }
-
-    #[test]
-    fn a_test_process_may_write_a_temp_tooling_dir_but_never_the_real_one() {
-        let real = Path::new("/home/u/.local/share/camerata/tooling");
-        let test_exe = Path::new("/w/target/debug/deps/camerata_server-0123abcd");
-        let app_exe = Path::new("/w/target/debug/camerata-server");
-        let tmp = TempDir::new().unwrap();
-
-        assert!(test_process_may_not_write(real, Some(real), Some(test_exe)));
-        assert!(!test_process_may_not_write(
-            tmp.path(),
-            Some(real),
-            Some(test_exe)
-        ));
-        // The product itself is never restricted.
-        assert!(!test_process_may_not_write(real, Some(real), Some(app_exe)));
-        // Unresolvable inputs do not restrict (there is nothing to protect).
-        assert!(!test_process_may_not_write(real, None, Some(test_exe)));
-        assert!(!test_process_may_not_write(real, Some(real), None));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_differently_spelled_path_to_the_real_tooling_dir_is_still_refused() {
-        let tmp = TempDir::new().unwrap();
-        let real = tmp.path().join("tooling");
-        std::fs::create_dir_all(&real).unwrap();
-        let alias = tmp.path().join("alias");
-        std::os::unix::fs::symlink(&real, &alias).unwrap();
-        let test_exe = Path::new("/w/target/debug/deps/camerata_server-0123abcd");
-        assert!(test_process_may_not_write(
-            &alias,
-            Some(&real),
-            Some(test_exe)
-        ));
-    }
-
-    /// THE regression test for "tests mutate the shared workspace". Aims every `ensure_*` at the
-    /// REAL per-user tooling dir from this test binary. Whatever state that dir is in, none of
-    /// them may write to it: healthy tools are returned as they are, anything that would need an
-    /// install is refused. No `package.json` is rewritten, no generation directory or lock file
-    /// appears. (Safe to run on any machine: the only outcomes are a read or a refusal.)
-    #[tokio::test]
-    async fn ensure_calls_from_a_test_process_never_write_the_real_tooling_dir() {
-        let Some(real) = tooling_dir() else {
-            return;
-        };
-        let manifest = eslint_workspace_dir(&real).join("package.json");
-        let mtime_before = std::fs::metadata(&manifest).and_then(|m| m.modified()).ok();
-        let existed_before = (
-            real.exists(),
-            eslint_generations_dir(&real).exists(),
-            real.join(".eslint.lock").exists(),
-            real.join(".semgrep.lock").exists(),
-            real.join(".osv-scanner.lock").exists(),
-        );
-
-        let eslint = ensure_eslint(&real).await;
-        let semgrep = ensure_semgrep(&real).await;
-        let osv = ensure_osv_scanner(&real).await;
-
-        for (tool, outcome) in [
-            ("eslint", eslint.map(|_| ())),
-            ("semgrep", semgrep.map(|_| ())),
-            ("osv-scanner", osv.map(|_| ())),
-        ] {
-            assert!(
-                matches!(
-                    outcome,
-                    Ok(()) | Err(ProvisionError::RealToolingProtected { .. })
-                ),
-                "{tool}: a test process either reads a healthy tool or is refused, got {outcome:?}"
-            );
-        }
-        assert_eq!(
-            std::fs::metadata(&manifest).and_then(|m| m.modified()).ok(),
-            mtime_before,
-            "the real eslint workspace was rewritten by a test"
-        );
-        let exists_after = (
-            real.exists(),
-            eslint_generations_dir(&real).exists(),
-            real.join(".eslint.lock").exists(),
-            real.join(".semgrep.lock").exists(),
-            real.join(".osv-scanner.lock").exists(),
-        );
-        assert_eq!(
-            exists_after, existed_before,
-            "a test created files in the real tooling dir"
-        );
-    }
-
-    // ── bundled rules dir exists ──────────────────────────────────────────────
-
-    #[test]
-    fn bundled_semgrep_rules_dir_exists_in_dev() {
-        // In a dev build the assets live next to the crate source. Verify the
-        // path resolves to something that exists (catches typos / renames).
-        let dir = bundled_semgrep_rules_dir();
-        assert!(
-            dir.exists(),
-            "bundled semgrep rules dir not found at: {}",
-            dir.display()
-        );
-        // Must contain at least one YAML file.
-        let has_yaml = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .any(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .map(|x| x == "yml" || x == "yaml")
-                    .unwrap_or(false)
-            });
-        assert!(has_yaml, "no YAML rules found in: {}", dir.display());
-    }
-
-    #[test]
-    fn bundled_eslint_config_src_exists_in_dev() {
-        let src = bundled_eslint_config_src();
-        assert!(
-            src.exists(),
-            "bundled eslint config not found at: {}",
-            src.display()
-        );
-    }
-
-    // ── osv-scanner path helpers ──────────────────────────────────────────────
-
-    #[test]
-    fn osv_scanner_dir_is_under_tooling() {
-        let tmp = TempDir::new().unwrap();
-        let tooling = tmp.path().to_path_buf();
-        let dir = osv_scanner_dir(&tooling);
-        assert!(
-            dir.starts_with(&tooling),
-            "osv-scanner dir must be inside tooling: {dir:?}"
-        );
-    }
-
-    #[test]
-    fn osv_scanner_bin_is_inside_dir() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("osv-scanner");
-        let bin = osv_scanner_bin(&dir);
-        assert!(
-            bin.starts_with(&dir),
-            "osv-scanner bin must be inside its dir: {bin:?}"
-        );
-        let name = bin.file_name().unwrap().to_str().unwrap();
-        assert!(
-            name.starts_with("osv-scanner"),
-            "binary name must start with osv-scanner: {name}"
-        );
-    }
-
-    // ── osv-scanner probe logic ───────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn missing_osv_scanner_binary_is_not_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("osv-scanner");
-        let bin = osv_scanner_bin(&dir);
-        // No binary created: must report not provisioned.
-        assert!(!osv_scanner_is_provisioned(&bin).await);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stub_osv_scanner_binary_is_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("osv-scanner");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let bin = osv_scanner_bin(&dir);
-        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n")
-            .await
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .await
-            .unwrap();
-        assert!(osv_scanner_is_provisioned(&bin).await);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn broken_osv_scanner_binary_is_not_provisioned() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("osv-scanner");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let bin = osv_scanner_bin(&dir);
-        tokio::fs::write(&bin, b"#!/bin/sh\nexit 1\n")
-            .await
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .await
-            .unwrap();
-        assert!(!osv_scanner_is_provisioned(&bin).await);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn ensure_osv_scanner_is_idempotent_when_provisioned() {
-        // When the binary is already present + healthy, ensure_osv_scanner must
-        // short-circuit at the cache probe and return the same path twice.
-        let tmp = TempDir::new().unwrap();
-        let tooling = tmp.path().to_path_buf();
-        let dir = osv_scanner_dir(&tooling);
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let bin = osv_scanner_bin(&dir);
-        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n")
-            .await
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .await
-            .unwrap();
-        let r1 = ensure_osv_scanner(&tooling).await;
-        assert!(r1.is_ok(), "first call must succeed: {r1:?}");
-        let r2 = ensure_osv_scanner(&tooling).await;
-        assert!(r2.is_ok(), "second call must succeed: {r2:?}");
-        assert_eq!(
-            r1.unwrap(),
-            r2.unwrap(),
-            "both calls must return the same path"
-        );
-    }
-
-    // ── download timeout bounds ───────────────────────────────────────────────
-    //
-    // Verify that `download_osv_scanner` fails fast (within the declared timeout
-    // window) when pointed at an unroutable host.  The test uses a TCP black-hole
-    // address (192.0.2.1 is TEST-NET-1 from RFC 5737; packets are dropped, not
-    // refused) to exercise the connect-timeout path without relying on DNS or a
-    // real server.
-    //
-    // The test calls into the private function indirectly by temporarily replacing
-    // the URL — but since `download_osv_scanner` constructs the URL from the
-    // module-level constants we instead verify the *client builder* carries the
-    // right timeout by building one the same way and asserting it doesn't hang
-    // on a loopback connection to a closed port.
-    //
-    // Approach: build a reqwest Client with the same parameters, attempt a GET
-    // to 127.0.0.1:<closed-port>, and assert the whole thing completes (with an
-    // error) within a generous 10 s wall-clock window.  If the timeout logic is
-    // missing the future never resolves and the test runner itself times out.
-    #[tokio::test]
-    async fn download_client_has_connect_timeout_and_fails_fast() {
-        // A randomly chosen high port that is almost certainly not listening.
-        // We just need the connection to fail (refused or timeout), not succeed.
-        let url = "http://192.0.2.1:9/"; // TEST-NET-1 (RFC 5737) — black hole
-
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("client build must not fail");
-
-        // The whole attempt (including the connect_timeout) must complete within
-        // 8 s (generous buffer above the 5 s connect-timeout).  If there is no
-        // timeout on the client the request hangs indefinitely.
-        let result = tokio::time::timeout(Duration::from_secs(8), client.get(url).send()).await;
-
-        // Either the outer timeout fired first (should not happen if connect_timeout
-        // is wired up) or reqwest itself returned an error (connection refused or
-        // timeout).  In both cases the important property is the future resolved
-        // within 8 s — a hang would cause the outer timeout to be `Err(Elapsed)`.
-        match result {
-            Ok(_) => {
-                // reqwest returned (Ok or Err) within 8 s — timeout is working.
-            }
-            Err(_elapsed) => {
-                // The 8-second guard fired — the connect_timeout is NOT working.
-                panic!(
-                    "download_osv_scanner client did not time out within 8 s; \
-                     connect_timeout is likely missing from the Client builder"
-                );
-            }
-        }
-    }
-
-    // ── release asset naming ──────────────────────────────────────────────────
-
-    #[test]
-    fn osv_release_asset_is_some_on_common_platforms() {
-        // This test runs on the CI / dev machine — verify the function returns
-        // *something* on a typical developer host (linux/darwin, 64-bit).  It will
-        // legitimately return None on 32-bit / Windows / exotic arch, so we can't
-        // unconditionally assert Some.  The test just documents expected behaviour.
-        let asset = osv_release_asset();
-        // On common platforms (linux amd64/arm64, darwin amd64/arm64) it must be Some.
-        #[cfg(any(
-            all(
-                target_os = "linux",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ),
-            all(
-                target_os = "macos",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            )
-        ))]
-        assert!(
-            asset.is_some(),
-            "expected a release asset name on this platform (linux/darwin 64-bit)"
-        );
-        // Whatever it returns, it must start with osv-scanner_.
-        if let Some(a) = asset {
-            assert!(
-                a.starts_with("osv-scanner_"),
-                "release asset name must start with osv-scanner_: {a}"
-            );
-        }
-    }
-}
+mod tests;

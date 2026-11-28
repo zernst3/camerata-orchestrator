@@ -99,6 +99,7 @@ pub mod onboard;
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;
 pub mod ownership;
+pub mod pinned_tools;
 pub mod pr;
 pub mod pr_resolve_run;
 pub mod preflight;
@@ -296,6 +297,10 @@ pub struct AppState {
     /// state built by `new()` can touch nothing outside a checkout; only `from_env()` installs
     /// the real ones. See [`crate::client_source::storage`].
     storage_roots: Arc<crate::client_source::storage::StorageRoots>,
+    /// Where the scan tools are provisioned and downloaded from (#587). `None` is the product's
+    /// ([`crate::pinned_tools::ToolEnv::product`]); a test installs fake tools with
+    /// [`AppState::with_tool_env`].
+    tool_env: Option<crate::pinned_tools::ToolEnv>,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
@@ -418,6 +423,7 @@ impl AppState {
             source_ops: crate::client_source::ops::SourceOps::new(),
             git_remotes: crate::client_source::remote::GitRemotes::default(),
             storage_roots: Arc::new(crate::client_source::storage::StorageRoots::default()),
+            tool_env: None,
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -1224,6 +1230,22 @@ impl AppState {
     ) -> Self {
         self.storage_roots = Arc::new(roots);
         self
+    }
+
+    /// Replace where the scan tools are provisioned and downloaded from. The test seam that
+    /// serves fake tools from memory; production never calls this.
+    #[must_use]
+    pub fn with_tool_env(mut self, tools: crate::pinned_tools::ToolEnv) -> Self {
+        self.tool_env = Some(tools);
+        self
+    }
+
+    /// The scan tool environment this state's scans use.
+    pub fn scan_tool_env(&self) -> Result<crate::pinned_tools::ToolEnv, String> {
+        match &self.tool_env {
+            Some(tools) => Ok(tools.clone()),
+            None => crate::pinned_tools::ToolEnv::product(),
+        }
     }
 
     /// Open every JSON-file-backed store under `dir`. The single list of those stores: both
@@ -2618,6 +2640,47 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // Every scan tool and runtime this scan needs is provisioned now, before the first model call
+    // (#587). A tool set that cannot be provisioned refuses the scan here, with nothing spent.
+    let tools = match state.scan_tool_env() {
+        Ok(tools) => tools,
+        Err(why) => {
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(why.clone());
+            r.message = Some(why);
+            return Json(r);
+        }
+    };
+    // Intel Macs are not supported (the owner's ruling): one plain line, before any model call.
+    if let Some(line) = tools.machine_refusal() {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.ai_error = Some(line.to_string());
+        r.message = Some(line.to_string());
+        return Json(r);
+    }
+    if run_deterministic {
+        let required = crate::pinned_tools::required_tool_set(
+            &sources,
+            &preview_rules,
+            corpus.as_ref(),
+            &scan_scope,
+            true,
+        );
+        let client = active_project.as_ref().is_none_or(|p| p.client_engagement);
+        if let Err(refusal) =
+            crate::pinned_tools::provision_tool_set(&tools, &required, client).await
+        {
+            let why =
+                format!("this inspection did not start: {refusal}. Nothing was sent to a model.");
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(why.clone());
+            r.message = Some(why);
+            return Json(r);
+        }
+    }
     let outcome = std::panic::AssertUnwindSafe(async move {
         let chosen_options = active_project
             .as_ref()
@@ -2677,7 +2740,9 @@ async fn onboard_audit(
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
         // (No job here, so no live deterministic progress on the synchronous path.)
         if run_deterministic {
-            merge_scan_preview(
+            // A tool that could not be provisioned mid-run makes the run incomplete (#587): the
+            // reason is the run's error, so the report says the run did not finish.
+            if let Err(stop) = merge_scan_preview(
                 &mut report,
                 &sources,
                 &preview_rules,
@@ -2685,16 +2750,23 @@ async fn onboard_audit(
                 None,
                 project_client_tooling(active_project.as_ref()),
                 &scan_scope,
+                &tools,
             )
-            .await;
+            .await
+            {
+                report.ai_error = Some(stop.to_string());
+                report.message = Some(stop.to_string());
+                return report;
+            }
         }
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
         // Runs after preview linters so a slow osv-scanner never blocks them.
-        // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
+        // osv-scanner is provisioned first, outside the bound; a provisioning failure stops the
+        // run (#587). Only the scan is bounded, at 60 s; a scan past it is a disclosed note.
         // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
         if run_deterministic {
-            use tokio::time::{timeout, Duration};
+            use tokio::time::Duration;
             let dep_audit_timeout = Duration::from_secs(60);
             // Pass-1 W1 seal fix: snapshotted so the whole loop's net additions get ONE ledger
             // stage entry (a no-op when every repo's dep-audit found nothing new) — see
@@ -2709,23 +2781,23 @@ async fn onboard_audit(
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let repo_scope = scan_scope.for_repo(spec);
-                let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
-                let (dep_findings, dep_note, dep_files) =
-                    match timeout(dep_audit_timeout, run).await {
-                        Ok(result) => result,
-                        Err(_elapsed) => (
-                            Vec::new(),
-                            Some(crate::onboard::CoverageNote {
-                                tool_failed: false,
-                                repo: None,
-                                tool: "osv-scanner".to_string(),
-                                message: format!(
-                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                            ),
-                            }),
-                            Vec::new(),
-                        ),
-                    };
+                // osv-scanner is provisioned outside the 60 s bound; a failure there stops the run
+                // (#587, the run-integrity rule). Only the scan is bounded.
+                let run = crate::dep_audit::run_dep_audit_bounded(
+                    spec,
+                    dir,
+                    &repo_scope,
+                    &tools,
+                    dep_audit_timeout,
+                );
+                let (dep_findings, dep_note, dep_files) = match run.await {
+                    Ok(result) => result,
+                    Err(stop) => {
+                        report.ai_error = Some(stop.to_string());
+                        report.message = Some(stop.to_string());
+                        return report;
+                    }
+                };
                 let dep_note = dep_note.map(|mut note| {
                     note.repo.get_or_insert_with(|| spec.to_string());
                     note
@@ -3025,6 +3097,8 @@ pub(crate) async fn start_audit_job(
         }
     });
     let scan_cache = state.scan_cache.clone();
+    // Resolved now, before the job starts: where its scan tools live (#587).
+    let tool_env = state.scan_tool_env();
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
@@ -3388,6 +3462,45 @@ pub(crate) async fn start_audit_job(
                     return;
                 }
             };
+            // Every scan tool and runtime this scan needs is provisioned now, before the first
+            // model call (#587). A tool set that cannot be provisioned fails the job here.
+            let tools = match tool_env {
+                Ok(tools) => tools,
+                Err(why) => {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            };
+            // Intel Macs are not supported (the owner's ruling): fail the job in one plain line,
+            // before any model call.
+            if let Some(line) = tools.machine_refusal() {
+                body_jobs.fail(&body_jid, line.to_string());
+                return;
+            }
+            if run_deterministic {
+                let required = crate::pinned_tools::required_tool_set(
+                    &sources,
+                    &preview_rules,
+                    corpus.as_ref(),
+                    &scan_scope,
+                    true,
+                );
+                let client = engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement);
+                if let Err(refusal) =
+                    crate::pinned_tools::provision_tool_set(&tools, &required, client).await
+                {
+                    body_jobs.fail(
+                        &body_jid,
+                        format!(
+                            "this inspection did not start: {refusal}. Nothing was sent to a \
+                             model."
+                        ),
+                    );
+                    return;
+                }
+            }
             let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
                 run_store.as_ref().map(|s| s.checkpoint_dir()),
                 crate::prompt_frame::with_seed(
@@ -3445,7 +3558,8 @@ pub(crate) async fn start_audit_job(
             // the deterministic selection; reports per-tool progress into the job so the cockpit's
             // deterministic progress view shows each preview tool start/run/done live.
             if run_deterministic {
-                merge_scan_preview(
+                // A tool that could not be provisioned mid-run stops the run (#587, #582).
+                if let Err(stop) = merge_scan_preview(
                     &mut report,
                     &sources,
                     &preview_rules,
@@ -3453,21 +3567,26 @@ pub(crate) async fn start_audit_job(
                     Some((&body_jobs, &body_jid)),
                     client_tooling,
                     &scan_scope,
+                    &tools,
                 )
-                .await;
+                .await
+                {
+                    body_jobs.fail(&body_jid, stop.to_string());
+                    return;
+                }
             }
 
             // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
             //
-            // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
-            // provisioning or scan never blocks them.  A single 60-second hard
-            // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
-            // the step fails soft and the scan completes without dep-audit findings.
+            // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner never
+            // blocks them. osv-scanner is provisioned first, outside the bound; a provisioning
+            // failure fails the job (#587). Only the scan is bounded, at 60 s; a scan past it
+            // is a disclosed note and the scan completes without dep-audit findings.
             //
             // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
             // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
             if run_deterministic {
-                use tokio::time::{timeout, Duration};
+                use tokio::time::Duration;
                 let dep_audit_timeout = Duration::from_secs(60);
                 // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
                 // path — one ledger stage entry for the whole loop's net additions.
@@ -3479,23 +3598,22 @@ pub(crate) async fn start_audit_job(
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let repo_scope = scan_scope.for_repo(spec);
-                    let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
-                    let (dep_findings, dep_note, dep_files) =
-                        match timeout(dep_audit_timeout, run).await {
-                            Ok(result) => result,
-                            Err(_elapsed) => (
-                                Vec::new(),
-                                Some(crate::onboard::CoverageNote {
-                                    tool_failed: false,
-                                    repo: None,
-                                    tool: "osv-scanner".to_string(),
-                                    message: format!(
-                                    "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                                ),
-                                }),
-                                Vec::new(),
-                            ),
-                        };
+                    // osv-scanner is provisioned outside the 60 s bound; a failure there stops the run
+                    // (#587, the run-integrity rule). Only the scan is bounded.
+                    let run = crate::dep_audit::run_dep_audit_bounded(
+                        spec,
+                        dir,
+                        &repo_scope,
+                        &tools,
+                        dep_audit_timeout,
+                    );
+                    let (dep_findings, dep_note, dep_files) = match run.await {
+                        Ok(result) => result,
+                        Err(stop) => {
+                            body_jobs.fail(&body_jid, stop.to_string());
+                            return;
+                        }
+                    };
                     let dep_note = dep_note.map(|mut note| {
                         note.repo.get_or_insert_with(|| spec.to_string());
                         note
@@ -5340,6 +5458,8 @@ mod greenfield_lock_tests;
 #[cfg(test)]
 mod model_input_chat_tests;
 
+#[cfg(test)]
+mod intel_refusal_tests;
 #[cfg(test)]
 mod site_key_paths_tests;
 

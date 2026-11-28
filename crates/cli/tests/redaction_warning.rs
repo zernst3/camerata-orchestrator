@@ -4,7 +4,7 @@
 //! operator's environment: it can neither switch redaction off nor stay silent about it.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 const VAR: &str = "CAMERATA_FEATURE_MODEL_PROMPT_REDACTION";
 const WARNING: &str = "model-prompt redaction is OFF";
@@ -12,11 +12,13 @@ const WARNING: &str = "model-prompt redaction is OFF";
 /// Run a command that exits immediately (`release-gate` on a path that does not exist) with
 /// `cwd` as the working directory and `env` as the operator's environment for the variable.
 fn run_in(cwd: &Path, env: Option<&str>) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camerata"));
+    let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
     cmd.current_dir(cwd)
         .arg("release-gate")
         .arg(cwd.join("missing.zip"))
         .env(camerata_server::credentials::NO_KEYCHAIN_ENV, "1")
+        // No test downloads (#587).
+        .env(camerata_server::pinned_tools::OFFLINE_ENV, "1")
         .env_remove(VAR);
     if let Some(value) = env {
         cmd.env(VAR, value);
