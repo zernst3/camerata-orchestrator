@@ -73,7 +73,8 @@ fn audit_request() -> AuditReq {
         "repos": ["acme/one"],
         "mode": "parallel",
         "incremental": false,
-        "run_ai_review": true,
+        // Off, so even a regressed refusal could never reach a real model.
+        "run_ai_review": false,
         "run_deterministic": true,
     }))
     .unwrap()
