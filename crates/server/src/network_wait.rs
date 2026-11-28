@@ -299,6 +299,10 @@ impl BatchApi for WaitingBatchApi {
         Ok(id)
     }
 
+    // A poll or a fetch after the run stopped is let through on purpose: neither is billed, and
+    // reading a batch the provider ran (or is running) is how the run keeps what it paid for.
+    // Only `submit` is refused once the run refuses sends, and the network wait itself ends
+    // at its next step after a stop (`NetworkWait::stop`), so a stopped run never waits on one.
     async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
         let status = self
             .control

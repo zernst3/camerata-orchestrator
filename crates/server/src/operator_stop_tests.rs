@@ -395,3 +395,37 @@ async fn after_the_outage_stop_the_seam_sends_nothing_and_submits_no_batch() {
     // Nothing is canceled: an outage stop is not the operator's stop.
     assert!(!control.is_stopped());
 }
+
+#[tokio::test]
+async fn after_a_stop_polls_and_fetches_are_read_but_no_batch_is_submitted() {
+    // Neither a poll nor a fetch is billed: a stopped run may still read what it paid for.
+    for outage in [false, true] {
+        let provider = Arc::new(Provider::default());
+        let control = Arc::new(RunControl::new());
+        let seam = seam(provider.clone(), &control);
+        let api = api_of(seam.as_ref());
+        let id = api.submit(Vec::new()).await.unwrap();
+        if outage {
+            control.note_outage_stop();
+        } else {
+            control.stop().await;
+        }
+        assert!(
+            api.poll(&id).await.is_ok(),
+            "outage={outage}: a poll after the stop"
+        );
+        assert!(
+            api.fetch(&id, CacheTtl::OneHour).await.is_ok(),
+            "outage={outage}: a fetch after the stop"
+        );
+        assert!(
+            api.submit(Vec::new()).await.is_err(),
+            "outage={outage}: a batch submitted after the stop"
+        );
+        assert_eq!(
+            provider.submits.load(Ordering::SeqCst),
+            1,
+            "outage={outage}"
+        );
+    }
+}
