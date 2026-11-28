@@ -36,6 +36,7 @@ members = [
     "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
+    "crates/key-reader",      # #574: tiny stable keychain reader helper (camerata-key-reader); its hash changes only when its own code does, so the macOS approval survives engine rebuilds. Depends on nothing in the workspace.
     "crates/linter-registry", # citation validator: canonical linter rule-id lists + corpus scan report
     "crates/scaffold",        # Rust-fullstack PWA scaffolder (Part 1): vetted Dioxus-fullstack skeleton + ScaffoldStrategy fit-check seam (the product-owner vibe-mode design notes)
     "crates/test-env",    # TEST SUPPORT ONLY (dev-dependency of env-mutating test suites): EnvGuard RAII env-var override + the `process_env` serial-key discipline test

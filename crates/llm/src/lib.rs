@@ -27,6 +27,7 @@
 pub mod claude_version;
 pub mod credentials;
 pub mod failure;
+pub mod key_reader;
 pub mod llm;
 pub mod model_input;
 pub mod model_registry;

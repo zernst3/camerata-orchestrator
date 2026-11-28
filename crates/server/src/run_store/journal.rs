@@ -573,6 +573,26 @@ pub fn stored_reply_texts(dir: &Path, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether the run stored any call at all (answered, failed or turned down) under `key`.
+pub fn has_stored_call(dir: &Path, key: &str) -> bool {
+    load_call_file(dir, key).is_some_and(|f| !f.entries.is_empty())
+}
+
+/// Every stored reply under `key` with what became of it, oldest first (a reply cut off at the
+/// output limit is left out). A reply stored as [`EntryStatus::Done`] was accepted and used by the
+/// stage that asked; any other status was turned down or unusable. Nothing is changed.
+pub fn stored_replies(dir: &Path, key: &str) -> Vec<(EntryStatus, String)> {
+    let Some(file) = load_call_file(dir, key) else {
+        return Vec::new();
+    };
+    file.entries
+        .values()
+        .filter_map(|e| e.response.as_ref().map(|r| (e.status, r)))
+        .filter(|(_, r)| !r.truncated)
+        .map(|(status, r)| (status, r.text.clone()))
+        .collect()
+}
+
 fn load_call_file(dir: &Path, key: &str) -> Option<CallFile> {
     read_json(&call_path(dir, key))
 }

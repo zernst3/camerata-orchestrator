@@ -43,7 +43,7 @@ pub mod operator_stop;
 pub mod plan_only;
 pub use operator_stop::EXIT_OPERATOR_STOPPED;
 pub mod recheck;
-pub use recheck::{recheck_saved_inspect, run_recheck_saved};
+pub use recheck::{recheck_saved_inspect, run_recheck_saved, run_recheck_saved_with_store};
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};

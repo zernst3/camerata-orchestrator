@@ -354,6 +354,33 @@ mod tests {
         }
     }
 
+    /// The body of the save the editor sent, waited for: the server may record other requests (a
+    /// load) first, and on a busy machine the save can arrive after a fixed pump has ended.
+    async fn saved_body(
+        server: &MockServer,
+        vdom: &mut VirtualDom,
+        seen: &mut Seen,
+    ) -> serde_json::Value {
+        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let sent = server.received_requests().await.unwrap_or_default();
+            if let Some(save) = sent.iter().find(|r| {
+                r.method == wiremock::http::Method::POST
+                    && r.url.path().ends_with("/scan-exclusions")
+            }) {
+                return serde_json::from_slice(&save.body).unwrap();
+            }
+            assert!(
+                tokio::time::Instant::now() < until,
+                "the editor never sent its save; the server saw: {:?}",
+                sent.iter()
+                    .map(|r| (r.method.to_string(), r.url.path().to_string()))
+                    .collect::<Vec<_>>()
+            );
+            pump(vdom, seen, 50).await;
+        }
+    }
+
     fn press_save(vdom: &mut VirtualDom, seen: &Seen) {
         use std::any::Any;
         use std::rc::Rc;
@@ -461,8 +488,7 @@ mod tests {
         assert!(html.contains("changed since you opened it"), "{html}");
         assert!(!html.contains(">Saved<"), "{html}");
         // What the editor sent says which list it was based on.
-        let sent = server.received_requests().await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&sent[0].body).unwrap();
+        let body = saved_body(&server, &mut vdom, &mut seen).await;
         assert_eq!(body["based_on"], serde_json::json!(["app/dump.sql"]));
     }
 
@@ -527,8 +553,7 @@ mod tests {
         // Its next save is based on the new list, so it is not refused as stale.
         press_save(&mut vdom, &seen);
         pump(&mut vdom, &mut seen, 600).await;
-        let sent = server.received_requests().await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&sent[0].body).unwrap();
+        let body = saved_body(&server, &mut vdom, &mut seen).await;
         assert_eq!(body["based_on"], serde_json::json!(["app/seeds/big.js"]));
         assert_eq!(body["patterns"], serde_json::json!(["app/seeds/big.js"]));
     }

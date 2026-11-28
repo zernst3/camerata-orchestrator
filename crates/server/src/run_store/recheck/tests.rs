@@ -999,6 +999,31 @@ fn a_ledger_file_that_is_not_the_reports_ledger_is_refused() {
     assert!(why.contains("does not match"), "{why}");
 }
 
+/// The first build saves its ledger file BEFORE it seals, and the seal rebuilds the review tree
+/// (which records the fix merge and the place merge in the report's ledger). A run written in
+/// that order has a ledger file without those two blocks as the seal left them, and it must load.
+#[test]
+fn a_ledger_file_written_before_the_seal_rebuilt_the_tree_still_loads() {
+    let sealed = report_of(&[finding("SEC-X-1", "a.ts", 1)]).seal();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(REPORT_FILE),
+        serde_json::to_vec(&sealed).unwrap(),
+    )
+    .unwrap();
+    let mut file: serde_json::Value = serde_json::to_value(&sealed.ledger).unwrap();
+    let o = file.as_object_mut().unwrap();
+    assert!(
+        o.contains_key("fix_merge") && o.contains_key("place_merge"),
+        "the seal recorded both blocks"
+    );
+    o.remove("fix_merge");
+    o.remove("place_merge");
+    let ledger = dir.path().join("l.json");
+    std::fs::write(&ledger, serde_json::to_vec(&file).unwrap()).unwrap();
+    load_saved_report(dir.path(), &ledger).expect("loads");
+}
+
 /// The ledger stage checks are the first build's: a stage failure it stored stays as saved, and a
 /// stage it never checked (one added after the convention check) is not checked by the recheck.
 #[test]
@@ -1243,4 +1268,504 @@ async fn a_re_asked_call_waits_out_a_short_network_drop() {
         vec![crate::network_wait::NETWORK_WAIT_STEPS[0]]
     );
     assert_eq!(llm.inner.calls(), 1, "answered once, after the wait");
+}
+
+// ── A clone check part judged in part, batch by batch (#594) ─────────────────────────────────
+
+/// The family id a candidate's rows carry (`captures["family"]`).
+fn family_of(id: &str) -> String {
+    id.strip_prefix(&format!("{}:", RULE.id()))
+        .unwrap_or(id)
+        .to_string()
+}
+
+/// One function whose statements follow a sequence unique to family `i`, so no two families share
+/// a run of tokens long enough to be one clone candidate.
+fn shaped_body(i: usize, name: &str, rate: &str) -> String {
+    let shapes = [
+        "  const v = order.a * user.b;\n",
+        "  if (order.a > user.b) {\n    return order.c;\n  }\n",
+        "  total = total + order.a - user.b;\n",
+        "  for (const x of order.items) {\n    total += x.p;\n  }\n",
+        "  if (user.a && !order.b) {\n    total = 0;\n  }\n",
+        "  total = order.a ? user.b : order.c;\n",
+    ];
+    let mut s = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut out = format!("export function {name}(order, user) {{\n  let total = {rate};\n");
+    for _ in 0..14 {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        out.push_str(shapes[(s % 6) as usize]);
+    }
+    out.push_str("  return total;\n}\n");
+    out
+}
+
+/// A decision written twice in each of `n` structurally different shapes, so the clone search finds
+/// `n` candidates for the rule.
+fn many_family_repo(n: usize) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@example.com"]);
+    g(&["config", "user.name", "T"]);
+    for i in 0..n {
+        std::fs::create_dir_all(dir.path().join(format!("src/a{i}"))).unwrap();
+        std::fs::create_dir_all(dir.path().join(format!("src/b{i}"))).unwrap();
+        std::fs::write(
+            dir.path().join(format!("src/a{i}/total.ts")),
+            shaped_body(i, &format!("applyA{i}"), "0.2"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(format!("src/b{i}/summary.ts")),
+            shaped_body(i, &format!("quoteB{i}"), "0.15"),
+        )
+        .unwrap();
+    }
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "decisions, written twice"]);
+    dir
+}
+
+/// What the first build left of the third batch of [`three_batch_run`].
+#[derive(Clone, Copy, PartialEq)]
+enum Third {
+    /// Prose nothing reads.
+    Unreadable,
+    /// A reply the current reader reads, for every candidate.
+    Readable,
+    /// A reply the current reader reads for all but one of its candidates.
+    Partial,
+    /// The scan never batched the candidates this way: its verdict cache held the first candidate,
+    /// so its batches are shifted by one and none of the rebuilt keys 1 to 3 has a stored call.
+    Shifted,
+}
+
+/// Each request a scripted model saw: its digest and the candidate ids it asked about.
+type AskLog = Vec<(String, Vec<String>)>;
+
+struct ThreeBatches {
+    saved: Saved,
+    /// The candidate ids of each batch, in the order asked.
+    batches: Vec<Vec<String>>,
+    /// The rows the first build saved for the rule (the good batch's), as saved.
+    saved_rows: Vec<Finding>,
+}
+
+/// A saved run with three judge batches for one rule, the way the scan leaves it: batch 1 was
+/// answered with good verdicts and merged (one candidate judged `different`, one `unsure`, the
+/// rest `same_decision`); batch 2 was answered with prose the first build's reader turned down
+/// and the current one reads; batch 3 was answered with prose nothing reads, unless
+/// `Third::Readable`.
+async fn three_batch_run(third: Third) -> ThreeBatches {
+    let state = state_dir();
+    let repo = many_family_repo(22);
+    let store = new_run(repo.path());
+    let files = rule_files(repo.path());
+    let armed: std::collections::HashSet<&str> = [RULE.id()].into_iter().collect();
+    let mut set = camerata_checks::clone_rules::candidates(&files, &armed);
+    let ids: Vec<String> = set.by_rule[&RULE].iter().map(|c| c.id.clone()).collect();
+    if third == Third::Shifted {
+        // The verdict cache served the first candidate: the scan batched the rest.
+        set.by_rule.get_mut(&RULE).unwrap().remove(0);
+    }
+    let size = crate::onboard::clone_advisory::BATCH_SIZE;
+    assert!(
+        ids.len() > 2 * size + 1 && ids.len() <= 3 * size,
+        "the fixture holds three batches of candidates: {}",
+        ids.len()
+    );
+    let batches: Vec<Vec<String>> = ids.chunks(size).map(<[String]>::to_vec).collect();
+    let judge_model = store.record().pin.unwrap().clone_judge_model;
+    let first = if third == Third::Shifted {
+        ids[1..=size].to_vec()
+    } else {
+        batches[0].clone()
+    };
+    let log: Arc<std::sync::Mutex<AskLog>> = Arc::default();
+    let seen = log.clone();
+    let stub = Counting::with(move |req| {
+        let want = asked(req);
+        seen.lock()
+            .unwrap()
+            .push((crate::run_store::journal::request_key(req), want.clone()));
+        if want == first {
+            let verdicts: Vec<serde_json::Value> = want
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let word = match i {
+                        0 => "different",
+                        1 => "unsure",
+                        _ => "same_decision",
+                    };
+                    serde_json::json!({"id": id, "verdict": word, "concept": "the discount"})
+                })
+                .collect();
+            serde_json::json!({ "verdicts": verdicts }).to_string()
+        } else {
+            "I cannot give verdicts for these.".to_string()
+        }
+    });
+    let journal = JournalLlm::new(&stub, store.clone());
+    let mut cache = VerdictCache::default();
+    let outcome = crate::prompt_frame::with_seed(
+        Some(store.nonce_seed()),
+        judge_clone_candidates(
+            Some(&journal),
+            JudgeRequest {
+                repo: REPO,
+                files: &files,
+                set,
+                judge_model: &judge_model,
+                corpus: None,
+                unavailable_reason: "",
+            },
+            &mut cache,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(outcome.failed.len(), 1, "the judge failed in part");
+    assert!(
+        outcome.not_assessed.is_empty(),
+        "a part judged in part saves confirmed rows"
+    );
+    // The first build turned the replies of batches 2 and 3 down; the current reader may read
+    // them. Each stored call is matched to its batch by the ids it asked about.
+    let log = log.lock().unwrap().clone();
+    for mut file in call_files(&store) {
+        let Some((_, want)) = log.iter().find(|(k, _)| *k == file.key) else {
+            continue;
+        };
+        let text = if *want == batches[1] {
+            Some(disjoint_objects(&batches[1]))
+        } else if *want == batches[2] && third == Third::Readable {
+            Some(disjoint_objects(&batches[2]))
+        } else if *want == batches[2] && third == Third::Partial {
+            Some(disjoint_objects(&batches[2][..batches[2].len() - 1]))
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            for entry in file.entries.values_mut() {
+                if let Some(r) = entry.response.as_mut() {
+                    r.text = text.clone();
+                }
+                if third == Third::Partial && *want == batches[2] {
+                    // Turned down whole, so the journal asks again rather than replays it.
+                    entry.status = crate::run_store::journal::EntryStatus::Rejected;
+                }
+            }
+            std::fs::write(
+                store.dir().join("calls").join(format!("{}.json", file.key)),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    let mut rows = vec![finding("SEC-NO-RAW-SQL-1", "src/db.ts", 20)];
+    rows.extend(outcome.findings.clone());
+    let mut ledger = ScanLedger::new();
+    crate::onboard::clone_advisory::record_in_ledger(&mut ledger, REPO, &outcome);
+    let mut report = report_of(&rows);
+    report.failed_passes = outcome.failed.clone();
+    report.ledger = ledger;
+    let sealed = report.seal();
+    // The rows as the first build saved them: sealed, with their keys.
+    let saved_rows: Vec<Finding> = sealed
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE.id())
+        .cloned()
+        .collect();
+    crate::run_store::write_report(&store.dir().join(REPORT_FILE), &sealed).unwrap();
+    let ledger_file = state.0.path().join("o-r.ledger.json");
+    std::fs::write(&ledger_file, serde_json::to_vec(&sealed.ledger).unwrap()).unwrap();
+    finish_run(&store, &sealed, false);
+    let run_id = store.run_id();
+    drop(store);
+    let path = crate::run_store::runs_dir().join(&run_id).join("run.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    v["pin"]["build"]["commit"] = serde_json::json!(BUILD_A);
+    v["pin"]["build"]["dirty"] = serde_json::json!(false);
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    ThreeBatches {
+        saved: Saved {
+            run_id,
+            repo,
+            ledger_file,
+            _state: state,
+        },
+        batches,
+        saved_rows,
+    }
+}
+
+/// The saved files a refused recheck must leave as they were.
+fn saved_bytes(saved: &Saved) -> Vec<Vec<u8>> {
+    let dir = crate::run_store::runs_dir().join(&saved.run_id);
+    [
+        dir.join(REPORT_FILE),
+        dir.join("run.json"),
+        saved.ledger_file.clone(),
+    ]
+    .iter()
+    .map(|p| std::fs::read(p).unwrap())
+    .collect()
+}
+
+/// Change the saved report's rows in place, leaving everything else (the seal's inputs, the
+/// ledger) as saved.
+fn edit_saved_findings(dir: &std::path::Path, edit: impl FnOnce(&mut Vec<serde_json::Value>)) {
+    let path = dir.join(REPORT_FILE);
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let rows = v["findings"].as_array_mut().unwrap();
+    edit(rows);
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+}
+
+/// The good batch's rows after the recheck are the saved rows, field for field and in order.
+fn assert_rows_as_saved(kept: &[&Finding], saved: &[Finding]) {
+    assert_eq!(kept.len(), saved.len(), "the same number of rows");
+    for (now, was) in kept.iter().zip(saved) {
+        let (now, was) = (
+            serde_json::to_value(now).unwrap(),
+            serde_json::to_value(was).unwrap(),
+        );
+        for (key, value) in was.as_object().unwrap() {
+            assert_eq!(now.get(key), Some(value), "saved field {key} changed");
+        }
+        assert_eq!(
+            now.as_object().unwrap().len(),
+            was.as_object().unwrap().len(),
+            "no field added"
+        );
+    }
+}
+
+fn rows_of_families<'a>(report: &'a ScanReport, ids: &[String]) -> Vec<&'a Finding> {
+    let fams: std::collections::HashSet<String> = ids.iter().map(|i| family_of(i)).collect();
+    clone_rows(report)
+        .into_iter()
+        .filter(|f| {
+            f.captures
+                .get("family")
+                .is_some_and(|fam| fams.contains(fam))
+        })
+        .collect()
+}
+
+/// Without the flag the unreadable batch refuses the recheck, naming it; nothing is asked and no
+/// saved file changes.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_part_with_an_unreadable_batch_refuses_naming_it_and_changes_nothing() {
+    let run = three_batch_run(Third::Unreadable).await;
+    let before = saved_bytes(&run.saved);
+    let llm = Counting::garbage();
+    let Err(RecheckError::Refused(why)) = recheck(&run.saved, ReaskFlag::Off, &llm).await else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        why.contains("batch 3 of 3"),
+        "names the unreadable batch: {why}"
+    );
+    assert!(
+        !why.contains("batch 1 of 3") && !why.contains("batch 2 of 3"),
+        "names only the batch left: {why}"
+    );
+    assert!(!why.contains("Resume the run"), "{why}");
+    assert_eq!(llm.calls(), 0);
+    assert_eq!(saved_bytes(&run.saved), before, "saved files untouched");
+}
+
+/// With the flag: exactly one call (the unreadable batch), the good batch's saved rows are
+/// byte-identical, the rejected-but-readable batch's verdicts are added with no call, and no
+/// candidate has a second row.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn with_the_flag_one_call_is_made_good_rows_stay_and_the_readable_batch_is_added() {
+    let run = three_batch_run(Third::Unreadable).await;
+    let log: Arc<std::sync::Mutex<Vec<Vec<String>>>> = Arc::default();
+    let seen = log.clone();
+    let llm = Counting::with(move |req| {
+        seen.lock().unwrap().push(asked(req));
+        disjoint_objects(&asked(req))
+    });
+    let done = recheck(&run.saved, ReaskFlag::Allow { max_parts: 5 }, &llm)
+        .await
+        .expect("the recheck passes");
+    assert_eq!(llm.calls(), 1, "only the unreadable batch is asked");
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        &[run.batches[2].clone()],
+        "and it asks only about its own candidates"
+    );
+    let report = &done.report;
+    assert!(
+        report.failed_passes.is_empty(),
+        "{:?}",
+        report.failed_passes
+    );
+    // The good batch's saved rows, byte for byte.
+    let kept = rows_of_families(report, &run.batches[0]);
+    assert_rows_as_saved(&kept, &run.saved_rows);
+    // The rejected-but-readable batch and the asked batch got their rows, once each.
+    for batch in [&run.batches[1], &run.batches[2]] {
+        // (The collapse may fold rows of different candidates into one survivor.)
+        assert!(
+            !rows_of_families(report, batch).is_empty(),
+            "the batch's candidates are judged"
+        );
+    }
+    // No candidate is merged twice: a (family, path, line) row occurs once.
+    let mut seen_rows = std::collections::HashSet::new();
+    for f in clone_rows(report) {
+        let key = (
+            f.captures.get("family").cloned(),
+            f.path.clone(),
+            f.line,
+            f.needs_review,
+        );
+        assert!(seen_rows.insert(key.clone()), "a second row for {key:?}");
+    }
+    assert!(
+        clone_rows(report)
+            .iter()
+            .all(|f| !matches!(f.kind, Some(FindingKind::NotAssessed(_)))),
+        "the part is settled: no not-assessed row"
+    );
+}
+
+/// With only a good batch and a rejected-but-readable one, the part is settled from the run's own
+/// stored replies: zero calls, nothing left unfinished.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_good_batch_and_readable_ones_finish_with_zero_calls() {
+    let run = three_batch_run(Third::Readable).await;
+    let llm = Counting::garbage();
+    let done = recheck(&run.saved, ReaskFlag::Off, &llm)
+        .await
+        .expect("the recheck passes");
+    assert_eq!(llm.calls(), 0);
+    assert!(done.report.incomplete_reasons().is_empty());
+    let kept = rows_of_families(&done.report, &run.batches[0]);
+    assert_rows_as_saved(&kept, &run.saved_rows);
+}
+
+/// A saved row of a candidate whose batch was never merged cannot be tied to the batches: a second
+/// row would follow, so the recheck refuses rather than guess.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_saved_row_for_a_candidate_of_an_unmerged_batch_refuses_naming_the_part() {
+    let run = three_batch_run(Third::Readable).await;
+    let dir = crate::run_store::runs_dir().join(&run.saved.run_id);
+    edit_saved_findings(&dir, |rows| {
+        let mut stray = rows[1].clone();
+        stray["captures"]["family"] = serde_json::json!(family_of(&run.batches[1][0]));
+        rows.push(stray);
+    });
+    let before = saved_bytes(&run.saved);
+    let llm = Counting::garbage();
+    let Err(RecheckError::Refused(why)) = recheck(&run.saved, ReaskFlag::Off, &llm).await else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains(RULE.id()) && why.contains("judged"), "{why}");
+    assert!(!why.contains("Resume the run"), "{why}");
+    assert_eq!(llm.calls(), 0);
+    assert_eq!(saved_bytes(&run.saved), before);
+}
+
+/// A good batch whose confirmed candidate has no saved row cannot be tied either: refused.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_good_batch_whose_confirmed_candidate_has_no_saved_row_refuses() {
+    let run = three_batch_run(Third::Readable).await;
+    let dir = crate::run_store::runs_dir().join(&run.saved.run_id);
+    let gone = family_of(&run.batches[0][5]);
+    edit_saved_findings(&dir, |rows| {
+        rows.retain(|r| r["captures"]["family"] != serde_json::json!(gone));
+    });
+    let llm = Counting::garbage();
+    let Err(RecheckError::Refused(why)) = recheck(&run.saved, ReaskFlag::Off, &llm).await else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains(RULE.id()), "{why}");
+    assert_eq!(llm.calls(), 0);
+}
+
+/// A stored reply that covers all but one of a batch's candidates does not settle it: without
+/// the flag the recheck refuses, naming the batch and what is left, and changes nothing.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_reply_that_misses_a_candidate_does_not_settle_its_batch() {
+    let run = three_batch_run(Third::Partial).await;
+    let before = saved_bytes(&run.saved);
+    let llm = Counting::garbage();
+    let Err(RecheckError::Refused(why)) = recheck(&run.saved, ReaskFlag::Off, &llm).await else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains("batch 3 of 3"), "{why}");
+    let n = run.batches[2].len();
+    assert!(
+        why.contains(&format!("{} of {n}", n - 1)),
+        "names what the stored reply covers: {why}"
+    );
+    assert_eq!(llm.calls(), 0);
+    assert_eq!(saved_bytes(&run.saved), before);
+}
+
+/// With the flag the partly read batch is asked once; a reply that is still partial refuses,
+/// naming the batch and the count left, and the saved files stay as they were.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_re_asked_reply_that_is_still_partial_refuses_naming_the_count_left() {
+    let run = three_batch_run(Third::Partial).await;
+    let before = saved_bytes(&run.saved);
+    let llm = Counting::with(|req| {
+        let ids = asked(req);
+        disjoint_objects(&ids[..ids.len() - 1])
+    });
+    let Err(RecheckError::Refused(why)) =
+        recheck(&run.saved, ReaskFlag::Allow { max_parts: 5 }, &llm).await
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(llm.calls(), 1);
+    let n = run.batches[2].len();
+    assert!(
+        why.contains("batch 3 of 3") && why.contains(&format!("1 of {n} candidates left")),
+        "{why}"
+    );
+    assert_eq!(saved_bytes(&run.saved), before);
+}
+
+/// The scan batched only the candidates its verdict cache did not hold; the run does not record
+/// which those were, so a batch whose rebuilt request has no stored call cannot be shown to be
+/// one the scan sent. It is never asked, flag or not.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_batch_with_no_stored_call_is_never_asked() {
+    let run = three_batch_run(Third::Shifted).await;
+    let before = saved_bytes(&run.saved);
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    let Err(RecheckError::Refused(why)) =
+        recheck(&run.saved, ReaskFlag::Allow { max_parts: 9 }, &llm).await
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(llm.calls(), 0, "nothing the scan never sent is asked");
+    assert!(why.contains("cannot be reproduced"), "{why}");
+    assert_eq!(saved_bytes(&run.saved), before);
 }
