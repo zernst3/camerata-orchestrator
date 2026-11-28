@@ -232,6 +232,9 @@ pub struct ApiPieceAgent {
     wire: Option<Arc<dyn FinderWire>>,
     pause: Option<PauseFn>,
     meter: Option<Arc<UsageMeter>>,
+    /// The run's control (the operator's stop, the app's cancel), taken from the run's scope
+    /// when the agent is built (#583).
+    control: Option<Arc<crate::operator_stop::RunControl>>,
     store: Arc<Mutex<Store>>,
 }
 
@@ -264,8 +267,16 @@ impl ApiPieceAgent {
             wire: None,
             pause: None,
             meter: None,
+            control: crate::operator_stop::current_run_control(),
             store: Arc::default(),
         }
+    }
+
+    /// Why the run's control refuses another request, if it does: the operator's stop or the
+    /// app's cancel, or the outage stop it was told of.
+    fn control_refusal(&self) -> Option<AgentStop> {
+        let control = self.control.as_ref().filter(|c| c.refuses_sends())?;
+        Some(AgentStop::Failed(control.refusal().to_string()))
     }
 
     /// Record every turn on the run's meter (stage `Finder`), feed its health record and have it
@@ -330,6 +341,9 @@ impl ApiPieceAgent {
         }
         if meter.outage_stopped() {
             anyhow::bail!("the run stopped after repeated provider failures; no request was sent");
+        }
+        if let Some(AgentStop::Failed(why)) = self.control_refusal() {
+            anyhow::bail!("{why}; no request was sent");
         }
         Ok(())
     }
@@ -600,6 +614,11 @@ impl ApiPieceAgent {
     /// Why the run says no further request may go out, if it does: an outage or credit stop, or
     /// the spend limit. The same stops the loop checks between turns.
     fn stop_between_attempts(&self) -> Option<AgentStop> {
+        // The run's control first: the operator's stop or the app's cancel ends a wait too, not
+        // only the meter's own stops.
+        if let Some(stop) = self.control_refusal() {
+            return Some(stop);
+        }
         let meter = self.meter.as_ref()?;
         if meter.outage_stopped() {
             return Some(AgentStop::Failed(run_stopped_text(meter)));
@@ -709,6 +728,9 @@ impl ApiPieceAgent {
         let stop = loop {
             if let Some(m) = self.meter.as_ref().filter(|m| m.outage_stopped()) {
                 break AgentStop::Failed(run_stopped_text(m));
+            }
+            if let Some(stop) = self.control_refusal() {
+                break stop;
             }
             if usage.len() >= limits.max_turns {
                 break AgentStop::TurnLimit(format!(

@@ -2207,3 +2207,113 @@ async fn the_cockpit_stop_during_a_network_wait_sends_nothing_more() {
     );
     assert_eq!(rig.job.status, "cancelled", "{:?}", rig.job.message);
 }
+
+/// A finder wire whose every connection drops, counting the sends, and the sends made once the
+/// Stop had had time to land (`settled` set).
+#[derive(Default)]
+struct DroppingFinderWire {
+    sends: std::sync::atomic::AtomicUsize,
+    after_stop: std::sync::atomic::AtomicUsize,
+    settled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::ai_audit::agent_finder::api_agent::FinderWire for DroppingFinderWire {
+    async fn send(
+        &self,
+        _body: &serde_json::Value,
+        _use_caching: bool,
+    ) -> Result<crate::llm::LlmResponse, crate::api_agent_driver::AnthropicPostError> {
+        use std::sync::atomic::Ordering;
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        if self.settled.load(Ordering::SeqCst) {
+            self.after_stop.fetch_add(1, Ordering::SeqCst);
+        }
+        Err(crate::api_agent_driver::AnthropicPostError::Network(
+            "Anthropic API request failed: connection reset by peer".to_string(),
+        ))
+    }
+}
+
+/// The cockpit's Stop while the agent finder waits out the network (#582, #583): the agent's wait
+/// honors the run's control, so the waiting piece never sends again and no other piece sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_cockpit_stop_during_the_agent_finders_network_wait_sends_nothing_more() {
+    use std::sync::atomic::Ordering;
+    if !camerata_test_env::python3_on_path_for("the_cockpit_stop_during_the_agent_finders") {
+        return;
+    }
+    let job: Arc<std::sync::OnceLock<(crate::jobs::JobStore, String)>> = Arc::default();
+    let wire = Arc::new(DroppingFinderWire::default());
+    let canceled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pause: crate::ai_audit::agent_finder::api_agent::PauseFn = {
+        let (job, canceled, settled) = (job.clone(), canceled.clone(), wire.settled.clone());
+        Arc::new(move |d| {
+            let (job, canceled, settled) = (job.clone(), canceled.clone(), settled.clone());
+            Box::pin(async move {
+                let first_network_step = d >= crate::network_wait::NETWORK_WAIT_STEPS[0]
+                    && !canceled.swap(true, Ordering::SeqCst);
+                if !first_network_step {
+                    tokio::task::yield_now().await;
+                    return;
+                }
+                while job.get().is_none() {
+                    tokio::task::yield_now().await;
+                }
+                let (jobs, id) = job.get().unwrap();
+                // What the cockpit's Stop does (`routes::onboarding`).
+                jobs.cancel(id);
+                // Long enough for the Stop to reach the run's control; from here no send may go.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                settled.store(true, Ordering::SeqCst);
+            })
+        })
+    };
+    let factory: crate::ai_audit::agent_finder::run::AgentFactoryOverride = {
+        let (wire, pause) = (wire.clone(), pause.clone());
+        Arc::new(move |meter| {
+            let agent = crate::ai_audit::agent_finder::api_agent::ApiPieceAgent::new(
+                "claude-sonnet-5-5",
+                "sk-test-not-a-real-key",
+            )
+            .with_meter(meter)
+            .with_wire(wire.clone())
+            .with_pause(pause.clone());
+            Arc::new(agent) as Arc<dyn crate::ai_audit::agent_finder::PieceAgent>
+        })
+    };
+    let hook = |state: &AppState, id: &str| {
+        let _ = job.set((state.jobs.clone(), id.to_string()));
+    };
+    let rig = crate::ai_audit::agent_finder::run::with_agent_factory_override(
+        factory,
+        scan_rig_hooked("down", true, Some(&hook)),
+    )
+    .await;
+    // The job reads "cancelled" at once; wait for the agent's sends to stay quiet.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !wire.settled.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut last = wire.sends.load(Ordering::SeqCst);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let now = wire.sends.load(Ordering::SeqCst);
+        if now == last || std::time::Instant::now() > deadline {
+            break;
+        }
+        last = now;
+    }
+    assert!(
+        wire.settled.load(Ordering::SeqCst),
+        "a finder request waited out the network and the job was cancelled then"
+    );
+    assert_eq!(
+        wire.after_stop.load(Ordering::SeqCst),
+        0,
+        "the agent finder sent after the Stop ({} sends in all)",
+        wire.sends.load(Ordering::SeqCst)
+    );
+    assert_eq!(rig.job.status, "cancelled", "{:?}", rig.job.message);
+}

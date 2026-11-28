@@ -3034,6 +3034,10 @@ pub(crate) async fn start_audit_job(
     // project-agnostic recent_scan fallback, and the persisted inspection entry) through the
     // ONE shared writer, `AppState::set_last_scan`, the instant the report is final.
     let scan_state = state.clone();
+    // TEST SUPPORT: a test's agent factory reaches the job's own task (task-locals do not cross
+    // `tokio::spawn`). Production builds have no such seam.
+    #[cfg(any(test, feature = "test-support"))]
+    let test_agent_factory = crate::ai_audit::agent_finder::run::agent_factory_override_in_scope();
     tokio::spawn(async move {
         // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
         // rationale): everything below runs the entire AI + deterministic pipeline in this
@@ -3430,6 +3434,11 @@ pub(crate) async fn start_audit_job(
                     ),
                 )),
             ));
+            #[cfg(any(test, feature = "test-support"))]
+            let audit = crate::ai_audit::agent_finder::run::with_optional_agent_factory_override(
+                test_agent_factory.clone(),
+                audit,
+            );
             let (mut report, mut manifest) =
                 crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
                     .await;
