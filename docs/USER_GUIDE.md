@@ -439,6 +439,14 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      sent to a model."). Fix the network and start again.
    - **During a run:** if a tool has to be installed again mid-run (the folder was deleted) and that
      fails, the inspection stops. It is never reported as a coverage note.
+   - **Another folder, or no downloads at all:** `CAMERATA_TOOLING_DIR=<folder>` puts the tooling folder
+     somewhere else. `CAMERATA_OFFLINE=1` makes Camerata download nothing: a tool that is not already in the
+     folder is a refusal ("ruff is not installed in ... and Camerata is offline (CAMERATA_OFFLINE=1), so
+     nothing was downloaded"). Every Camerata test runs this way; no test downloads anything.
+   - **Isolated installs:** eslint installs with `npm ci --ignore-scripts` from the lockfile built into
+     Camerata, with npm's own config files and cache in the tooling folder (your `~/.npmrc` and
+     `npm_config_*` variables are ignored). semgrep installs with pip reading no configuration file and none
+     of your `PIP_*` variables. Every download is HTTPS only and capped at 256 MB.
    - `cargo clippy` is the one tool Camerata does not install: it builds the repository with this
      machine's own Rust toolchain, and in a client inspection it only runs with **Run client tooling**.
      The list shows it as "not provisioned".
