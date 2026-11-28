@@ -3005,3 +3005,20 @@ async fn only_a_reply_time_out_is_counted_as_spend_a_connect_time_out_never_is()
     let _ = run_ok(&agent, &room(), &limits()).await;
     assert_eq!(meter.snapshot().calls, 4, "{:?}", meter.snapshot());
 }
+
+#[tokio::test]
+async fn a_finder_turn_is_the_providers_own_answer_on_a_meter_that_counts_only_those() {
+    // A meter linked to the run's journal counts only the provider's own answers; the finder's
+    // turns do not go through the journal, so the agent notes its own.
+    let meter = Arc::new(UsageMeter::default());
+    meter.health().link_provider_answers();
+    let wire = ScriptedWire::new(vec![text_reply("done")]);
+    let (agent, _) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished);
+    assert_eq!(
+        meter.health().successes(),
+        1,
+        "the finder's turn was a provider answer"
+    );
+}
