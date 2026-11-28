@@ -3335,15 +3335,22 @@ async fn a_failed_warm_call_does_not_block_the_prefix_for_the_next_submission() 
 }
 
 /// A row its batch never ran (canceled at the provider, or expired) is never sent again by the
-/// stage itself while the process lives: the run folder keeps it as a row to send on the resume,
-/// and a second send now would be billed once now and once more by that resume.
+/// stage itself while the run is stopped: the run folder keeps it as a row the resume sends, and a
+/// second send now would be billed once now and once more by that resume. On a run that is not
+/// stopped (a resume that fetched such a batch, a cancel the run did not make), the stage sends
+/// it once, as it would any row that never ran.
 #[tokio::test(start_paused = true)]
-async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_itself() {
+async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_while_the_run_is_stopped() {
     for word in ["canceled", "expired"] {
+        let control = Arc::new(crate::operator_stop::RunControl::new());
+        control.note_outage_stop();
         let api = Api::new().rows(move |_, _| Row::NotRun(word));
-        let mut stage = Scripted::new(&["a1", "a2"]);
-        let c = ctx(&api.realtime, Some(&api));
-        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        let out = crate::operator_stop::with_run_control(control, async {
+            let mut stage = Scripted::new(&["a1", "a2"]);
+            let c = ctx(&api.realtime, Some(&api));
+            run_stage(STAGE, &mut stage, StageMode::Batch, &c).await
+        })
+        .await;
         assert_eq!(
             api.submit_calls.load(Ordering::SeqCst),
             1,
@@ -3356,10 +3363,21 @@ async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_itself() {
         );
         assert_eq!(out.failed.len(), 2, "{word}");
         for f in &out.failed {
-            assert!(
-                !f.class.is_retried_at_end(),
-                "{word}: the end-of-run second try would send it again: {f:?}"
-            );
+            assert_eq!(f.class, FailureClass::OutageStop, "{word}: {f:?}");
         }
+
+        // Not stopped: the rows are sent once more, and answered.
+        let api = Api::new().rows(move |round, _| {
+            if round == 0 {
+                Row::NotRun(word)
+            } else {
+                Row::Ok
+            }
+        });
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let c = ctx(&api.realtime, Some(&api));
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        assert!(out.failed.is_empty(), "{word}: {:?}", out.failed);
+        assert_eq!(api.submit_calls.load(Ordering::SeqCst), 2, "{word}");
     }
 }

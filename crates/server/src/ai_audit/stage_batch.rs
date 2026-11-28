@@ -783,6 +783,14 @@ fn report_progress<Id: Clone + Ord>(ctx: &StageCtx<'_>, stage: Stage, book: &Boo
 
 // ── cancel ──────────────────────────────────────────────────────────────────────────────────────
 
+/// True once the run sends nothing more: the job was cancelled, the run's outage stop tripped, or
+/// the run's control refuses sends (the operator's stop, #583).
+fn run_stopped(ctx: &StageCtx<'_>) -> bool {
+    cancel_requested(ctx)
+        || ctx.meter.is_some_and(UsageMeter::outage_stopped)
+        || crate::operator_stop::current_run_control().is_some_and(|c| c.refuses_sends())
+}
+
 /// True once the job this stage runs for has been cancelled. A run with no job is never cancelled.
 fn cancel_requested(ctx: &StageCtx<'_>) -> bool {
     ctx.job
@@ -1529,21 +1537,14 @@ fn settle_rows<S: StageItems>(
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
                     report_progress(ctx, stage, book);
-                } else if camerata_llm::failure::is_unrun_batch_row(&error) {
-                    // The batch never ran this row (canceled or expired first), nothing billed.
-                    // The run folder keeps it as a row the resume sends; sending it again now,
-                    // in a batch or in real time, would be billed twice. It is a part that did
-                    // not run when the run was stopped, else a failed part with its reason.
-                    let stopped =
-                        cancel_requested(ctx) || ctx.meter.is_some_and(UsageMeter::outage_stopped);
-                    let class = if stopped {
-                        FailureClass::OutageStop
-                    } else {
-                        FailureClass::Content
-                    };
+                } else if camerata_llm::failure::is_unrun_batch_row(&error) && run_stopped(ctx) {
+                    // The batch never ran this row (canceled or expired first, nothing billed)
+                    // and the run is stopped (the operator's stop, a cancel, the outage stop):
+                    // the run folder keeps the row and the resume sends it. Sending it again
+                    // now would be billed once now and once more by that resume.
                     book.fail(
                         &work.id,
-                        class,
+                        FailureClass::OutageStop,
                         &format!(
                             "the batch was {} before this item ran; nothing was billed, and a \
                              resume sends it",
