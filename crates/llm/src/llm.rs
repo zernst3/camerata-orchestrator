@@ -1806,7 +1806,7 @@ async fn stream_attempt(
     .await;
     let resp = match sent {
         Ok(Ok(r)) => r,
-        Ok(Err(e)) => return StreamAttempt::Connect(e.to_string()),
+        Ok(Err(e)) => return StreamAttempt::Connect(e.to_string(), e.is_connect()),
         Err(_) => {
             return StreamAttempt::Stalled(format!(
                 "the reply stream went silent for {}s before any answer (set \
@@ -3069,7 +3069,10 @@ impl Llm {
             .first()
             .map(|i| i.params.model.clone())
             .unwrap_or_default();
-        let out = crate::retry::execute_traced(make_request, self.sleeper(), &model).await?;
+        // A submit that may have reached the provider is never sent again: a second accepted
+        // submission bills a second batch nobody tracks (#582).
+        let out =
+            crate::retry::execute_traced_no_resend(make_request, self.sleeper(), &model).await?;
         if !(200..300).contains(&out.status) {
             return Err(http_failure("Message Batches API", out));
         }

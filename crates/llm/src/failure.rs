@@ -129,6 +129,11 @@ pub struct AttemptRecord {
     /// output limit), scrubbed and capped, and never client code beyond the name that was wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejections: Vec<String>,
+    /// True when the attempt failed before any connection to the provider was made (a refused
+    /// connection, a DNS failure, a connect timeout): the provider provably never saw the
+    /// request. Read by kind (`reqwest::Error::is_connect`), never from the message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_sent: bool,
 }
 
 /// The longest message an attempt record keeps.
@@ -297,6 +302,21 @@ impl std::error::Error for LlmCallFailure {}
 /// The typed failure inside `e`, if the transport produced one.
 pub fn call_failure_of(e: &anyhow::Error) -> Option<&LlmCallFailure> {
     e.downcast_ref::<LlmCallFailure>()
+}
+
+/// Whether the call that failed with `e` provably never reached the provider: every attempt it
+/// made failed before a connection was made (a typed trail whose every record is
+/// [`AttemptRecord::not_sent`]), or the error is a `reqwest` connect failure. A timeout after the
+/// request went out, an interrupted reply, an HTTP answer, or an error with no trail could each
+/// have been received (a batch accepted, then the reply lost), so none of them counts.
+pub fn never_reached_provider(e: &anyhow::Error) -> bool {
+    if let Some(f) = call_failure_of(e) {
+        return !f.attempts.is_empty() && f.attempts.iter().all(|a| a.not_sent);
+    }
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect)
+    })
 }
 
 /// How long the provider asked the caller to wait: the `retry-after` of the LAST attempt on the
@@ -836,5 +856,29 @@ mod tests {
     fn display_is_the_message_unchanged() {
         let f = LlmCallFailure::new(FailureClass::Transport, "Anthropic API HTTP 529: x");
         assert_eq!(f.to_string(), "Anthropic API HTTP 529: x");
+    }
+
+    #[test]
+    fn never_reached_provider_holds_only_when_every_attempt_failed_before_connecting() {
+        let failure = |not_sent: &[bool]| {
+            let mut f = LlmCallFailure::new(FailureClass::Transport, "request failed");
+            f.attempts = not_sent
+                .iter()
+                .map(|&n| AttemptRecord {
+                    not_sent: n,
+                    ..AttemptRecord::default()
+                })
+                .collect();
+            anyhow::Error::new(f)
+        };
+        assert!(never_reached_provider(&failure(&[true, true, true])));
+        // One attempt that may have reached the provider (a timeout after sending) is enough to
+        // make a resend unsafe for a batch submit.
+        assert!(!never_reached_provider(&failure(&[true, false, true])));
+        // No trail: nothing proves it.
+        assert!(!never_reached_provider(&failure(&[])));
+        assert!(!never_reached_provider(&anyhow::anyhow!(
+            "connection refused (a message, not a kind)"
+        )));
     }
 }

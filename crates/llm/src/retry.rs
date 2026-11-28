@@ -355,14 +355,30 @@ pub(crate) struct ApiOutcome {
 /// body (success, a fatal status, or the last retryable status once retries ran out; the caller
 /// formats its own error from a non-success status, exactly as before). A network-level error
 /// that outlasts the retries is an `Err` holding a typed [`LlmCallFailure`].
-pub(crate) async fn execute_http<F, Fut>(
+pub(crate) async fn execute_http<F, Fut, E>(
     send: F,
     sleeper: &dyn Sleeper,
     model: &str,
 ) -> anyhow::Result<ApiOutcome>
 where
     F: Fn() -> Fut,
-    Fut: Future<Output = Result<RawResponse, String>>,
+    Fut: Future<Output = Result<RawResponse, E>>,
+    E: Into<SendFailure>,
+{
+    execute_http_with(send, sleeper, model, true).await
+}
+
+/// [`execute_http`], with `resend_after_send` false for [`execute_http_no_resend`].
+async fn execute_http_with<F, Fut, E>(
+    send: F,
+    sleeper: &dyn Sleeper,
+    model: &str,
+    resend_after_send: bool,
+) -> anyhow::Result<ApiOutcome>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<RawResponse, E>>,
+    E: Into<SendFailure>,
 {
     let result = drive::<RawResponse, LastAttempt, _, _>(sleeper, |_attempt| {
         let sent = send();
@@ -372,13 +388,24 @@ where
                 Ok(resp) if (200..300).contains(&resp.status) => Step::Done(resp),
                 Ok(resp) => non_success_step(resp, record),
                 Err(e) => {
-                    record.message =
-                        crate::failure::scrub_message(&e, crate::failure::MAX_RECORD_MESSAGE_CHARS);
+                    let SendFailure { message, not_sent } = e.into();
+                    record.message = crate::failure::scrub_message(
+                        &message,
+                        crate::failure::MAX_RECORD_MESSAGE_CHARS,
+                    );
+                    record.not_sent = not_sent;
+                    if !resend_after_send && !not_sent {
+                        // It may have reached the provider: never sent a second time.
+                        return Step::Stop {
+                            record,
+                            last: (None, message),
+                        };
+                    }
                     Step::Retry {
                         reason: RetryReason::Network,
                         retry_after: None,
                         record,
-                        last: (None, e),
+                        last: (None, message),
                     }
                 }
             }
@@ -409,8 +436,42 @@ where
     }
 }
 
+/// [`execute_http`] for a request that must not be sent twice (a batch submit: a second accepted
+/// submission bills a second batch). A send error is retried only when it failed before any
+/// connection was made ([`SendFailure::not_sent`]); one that may have reached the provider
+/// stops at once. HTTP answers follow the standard policy.
+pub(crate) async fn execute_http_no_resend<F, Fut, E>(
+    send: F,
+    sleeper: &dyn Sleeper,
+    model: &str,
+) -> anyhow::Result<ApiOutcome>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<RawResponse, E>>,
+    E: Into<SendFailure>,
+{
+    execute_http_with(send, sleeper, model, false).await
+}
+
 /// The boxed `send` future [`execute_http`] drives for a `reqwest` call.
-type SendFuture = Pin<Box<dyn Future<Output = Result<RawResponse, String>> + Send>>;
+type SendFuture = Pin<Box<dyn Future<Output = Result<RawResponse, SendFailure>> + Send>>;
+
+/// A send that got no HTTP answer: its message, and whether it failed before any connection to
+/// the provider was made (so the provider never saw the request).
+#[derive(Debug, Clone)]
+pub(crate) struct SendFailure {
+    pub message: String,
+    pub not_sent: bool,
+}
+
+impl From<String> for SendFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            not_sent: false,
+        }
+    }
+}
 
 /// Build the `send` closure [`execute_http`] wants from a `reqwest` request builder.
 fn reqwest_send<F>(make_request: F) -> impl Fn() -> SendFuture
@@ -437,7 +498,12 @@ where
                         request_id,
                     })
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(SendFailure {
+                    message: e.to_string(),
+                    // By kind: a connect failure (refused, DNS, connect timeout) never sent the
+                    // request. Any other send error may have.
+                    not_sent: e.is_connect(),
+                }),
             }
         })
     }
@@ -455,6 +521,18 @@ where
     execute_http(reqwest_send(make_request), sleeper, model).await
 }
 
+/// [`execute_traced`] for a request that must not be sent twice ([`execute_http_no_resend`]).
+pub(crate) async fn execute_traced_no_resend<F>(
+    make_request: F,
+    sleeper: &dyn Sleeper,
+    model: &str,
+) -> anyhow::Result<ApiOutcome>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    execute_http_no_resend(reqwest_send(make_request), sleeper, model).await
+}
+
 /// What one attempt at a STREAMED call came to.
 pub(crate) enum StreamAttempt<T> {
     /// The reply arrived (whole, or salvaged from a stream that died after delivering text).
@@ -467,8 +545,9 @@ pub(crate) enum StreamAttempt<T> {
     Interrupted(String),
     /// The provider sent an `error` event with no usable text delivered: its type and message.
     Provider { error_type: String, message: String },
-    /// The request could not be sent at all (connect, DNS, TLS).
-    Connect(String),
+    /// The request failed before any answer; `true` when it failed before a connection was
+    /// made (connect, DNS), so the provider never saw it.
+    Connect(String, bool),
 }
 
 /// What a streamed call came to once its retries ran out or it succeeded.
@@ -515,7 +594,9 @@ where
                 StreamAttempt::Done(value) => Step::Done(value),
                 StreamAttempt::Status(resp) => non_success_step(resp, record),
                 StreamAttempt::Stalled(m) => transport(RetryReason::StreamStall, m, record),
-                StreamAttempt::Interrupted(m) | StreamAttempt::Connect(m) => {
+                StreamAttempt::Interrupted(m) => transport(RetryReason::Network, m, record),
+                StreamAttempt::Connect(m, not_sent) => {
+                    record.not_sent = not_sent;
                     transport(RetryReason::Network, m, record)
                 }
                 StreamAttempt::Provider {
@@ -817,7 +898,7 @@ mod tests {
         let sleeper = RecordingSleeper::default();
         let out = execute_http(
             || async {
-                Ok(RawResponse {
+                Ok::<_, String>(RawResponse {
                     status: 529,
                     body: r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded sk-ant-api03-AAAAAAAAAAAAAAAA1234"}}"#.to_string(),
                     retry_after: Some(Duration::from_secs(900)),
@@ -1095,7 +1176,7 @@ mod tests {
             || {
                 sends.fetch_add(1, Ordering::SeqCst);
                 async {
-                    Ok(RawResponse {
+                    Ok::<_, String>(RawResponse {
                         status: 503,
                         body: "unavailable".to_string(),
                         retry_after: Some(Duration::from_secs(300)),
@@ -1129,7 +1210,7 @@ mod tests {
             let sleeper = RecordingSleeper::default();
             let _ = execute_http(
                 || async move {
-                    Ok(RawResponse {
+                    Ok::<_, String>(RawResponse {
                         status,
                         body: "slow down".to_string(),
                         retry_after: Some(Duration::from_secs(200)),
@@ -1144,6 +1225,99 @@ mod tests {
                 sleeper.waits()[0],
                 200,
                 "status {status} honours its retry-after"
+            );
+        }
+    }
+
+    // ── #582 review: a send the provider never saw, read by kind ───────────────────────────
+
+    #[tokio::test]
+    async fn a_refused_connection_is_recorded_as_never_sent() {
+        // A local port nothing listens on: the connection is refused, nothing is sent.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let sleeper = RecordingSleeper::default();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{port}/v1/messages/batches");
+        let e = execute_traced(|| client.post(&url), &sleeper, "claude-sonnet-5-5")
+            .await
+            .err()
+            .expect("nothing listens there");
+        let f = crate::failure::call_failure_of(&e).expect("a typed failure");
+        assert!(!f.attempts.is_empty());
+        assert!(
+            f.attempts.iter().all(|a| a.not_sent),
+            "every attempt was refused before a connection: {:?}",
+            f.attempts
+        );
+        assert!(crate::failure::never_reached_provider(&e));
+    }
+
+    #[tokio::test]
+    async fn a_send_that_failed_after_connecting_is_not_marked_never_sent() {
+        // A server that accepts the connection, reads the request and closes without an answer:
+        // the provider saw the request.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+                drop(sock);
+            }
+        });
+        let sleeper = RecordingSleeper::default();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{port}/v1/messages/batches");
+        let e = execute_traced(
+            || client.post(&url).body("{}"),
+            &sleeper,
+            "claude-sonnet-5-5",
+        )
+        .await
+        .err()
+        .expect("the server never answers");
+        let f = crate::failure::call_failure_of(&e).expect("a typed failure");
+        assert!(
+            f.attempts.iter().all(|a| !a.not_sent),
+            "the request reached the server: {:?}",
+            f.attempts
+        );
+        assert!(!crate::failure::never_reached_provider(&e));
+    }
+
+    #[tokio::test]
+    async fn a_send_that_may_have_been_received_is_not_resent_when_resending_could_bill_twice() {
+        // A batch submit: a failure after the request went out is not sent again; a refused
+        // connection is.
+        for (not_sent, expected_sends) in [(false, 1), (true, 4)] {
+            let sends = AtomicUsize::new(0);
+            let sleeper = RecordingSleeper::default();
+            let e = execute_http_no_resend(
+                || {
+                    sends.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        Err::<RawResponse, _>(SendFailure {
+                            message: "error sending request".to_string(),
+                            not_sent,
+                        })
+                    }
+                },
+                &sleeper,
+                "claude-sonnet-5-5",
+            )
+            .await
+            .err()
+            .expect("the provider never answered");
+            assert_eq!(
+                sends.load(Ordering::SeqCst),
+                expected_sends,
+                "not_sent={not_sent}: {e:#}"
             );
         }
     }

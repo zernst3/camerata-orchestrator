@@ -277,3 +277,129 @@ async fn a_rerun_seam_never_waits_for_the_network() {
         );
     }
 }
+
+/// A batch API whose submit fails `down` times and then accepts. `not_sent` says whether each
+/// failure happened before a connection was made (the provider never saw it) or after the
+/// request went out (a timeout after sending: the provider may have accepted the batch).
+#[derive(Default)]
+struct FailingSubmit {
+    down: usize,
+    not_sent: bool,
+    submits: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for FailingSubmit {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Ok(reply("{}"))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchApi for FailingSubmit {
+    fn has_api_key(&self) -> bool {
+        true
+    }
+    fn realtime(&self) -> &dyn LlmPort {
+        self
+    }
+    async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+        None
+    }
+    async fn submit(&self, _items: Vec<BatchItem>) -> anyhow::Result<String> {
+        let n = self.submits.fetch_add(1, Ordering::SeqCst);
+        if n < self.down {
+            let mut f = LlmCallFailure::new(
+                FailureClass::Transport,
+                "Anthropic API request failed after 3 retries: error sending request",
+            );
+            f.attempts = vec![
+                camerata_llm::failure::AttemptRecord {
+                    not_sent: self.not_sent,
+                    ..Default::default()
+                };
+                4
+            ];
+            return Err(anyhow::Error::new(f));
+        }
+        Ok(format!("msgbatch_acme_{n}"))
+    }
+    async fn poll(&self, _batch_id: &str) -> anyhow::Result<BatchStatus> {
+        Ok(BatchStatus {
+            processing_status: "ended".to_string(),
+            request_counts: BatchRequestCounts::default(),
+        })
+    }
+    async fn fetch(&self, _batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        Ok(Vec::new())
+    }
+}
+
+fn batch_api_of_seam(seam: &dyn LlmPort) -> &dyn BatchApi {
+    seam.as_any()
+        .downcast_ref::<BatchSeam>()
+        .expect("a batch seam")
+        .api()
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_submit_that_may_have_reached_the_provider_is_never_sent_again() {
+    // A timeout after the request went out: the provider may have accepted the batch and the
+    // reply was lost. Sending it again could bill a second batch nobody tracks.
+    let waits = InstantWaits::install();
+    let provider = Arc::new(FailingSubmit {
+        down: 1,
+        not_sent: false,
+        ..FailingSubmit::default()
+    });
+    let base = BatchSeam::new(provider.clone());
+    let control = control();
+    let seam = wrap(&base, control.clone());
+    let e = batch_api_of_seam(seam.as_ref())
+        .submit(Vec::new())
+        .await
+        .expect_err("the submit is not sent again");
+    assert_eq!(
+        provider.submits.load(Ordering::SeqCst),
+        1,
+        "a submit that may have been accepted was sent again"
+    );
+    assert!(waits.waits().is_empty(), "{:?}", waits.waits());
+    assert_eq!(crate::failure::classify_error(&e), FailureClass::Transport);
+    assert!(control.live_batches().is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_submit_refused_before_any_connection_waits_and_is_sent_again() {
+    let waits = InstantWaits::install();
+    let provider = Arc::new(FailingSubmit {
+        down: 2,
+        not_sent: true,
+        ..FailingSubmit::default()
+    });
+    let base = BatchSeam::new(provider.clone());
+    let control = control();
+    let seam = wrap(&base, control.clone());
+    let id = batch_api_of_seam(seam.as_ref())
+        .submit(Vec::new())
+        .await
+        .expect("the network came back");
+    assert_eq!(id, "msgbatch_acme_2");
+    assert_eq!(provider.submits.load(Ordering::SeqCst), 3);
+    assert_eq!(waits.waits(), NETWORK_WAIT_STEPS[..2].to_vec());
+    assert_eq!(control.live_batches(), vec![id]);
+}

@@ -262,12 +262,27 @@ impl BatchApi for WaitingBatchApi {
         if self.control.is_stopped() {
             return Err(self.control.refusal());
         }
-        // The transport retries a submit already (`Llm::submit_batch`); this waits longer on the
-        // same terms.
+        // A submit is waited out and sent again only while every failure provably never reached
+        // the provider (refused, DNS, connect timeout: by kind, `never_reached_provider`). A
+        // failure after the request went out (a timeout after sending, a dropped reply) may be
+        // a batch the provider accepted: sending again could bill a second batch nobody tracks,
+        // so it comes back at once.
+        let maybe_sent = std::sync::atomic::AtomicBool::new(false);
         let id = self
             .control
             .network_wait()
-            .run(|| self.inner.submit(items.clone()), &|| true)
+            .run(
+                || async {
+                    let out = self.inner.submit(items.clone()).await;
+                    if let Err(e) = &out {
+                        if !camerata_llm::failure::never_reached_provider(e) {
+                            maybe_sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    out
+                },
+                &|| !maybe_sent.load(std::sync::atomic::Ordering::SeqCst),
+            )
             .await?;
         self.control.note_batch_submitted(&id, self.inner.clone());
         // A stop that began while the submit was on its way cancels this batch too.
