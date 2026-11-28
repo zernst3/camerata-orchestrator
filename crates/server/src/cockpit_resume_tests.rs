@@ -1106,12 +1106,15 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     scan_rig_hooked(mode, agent_finder, None).await
 }
 
+/// Called with the app state and the job's id as soon as a rig's job is started.
+type StartedHook<'a> = &'a (dyn Fn(&AppState, &str) + Sync);
+
 /// [`scan_rig`], calling `started` with the job's id as soon as the job is started (before it
 /// finishes). A hooked rig makes no assumption about how the scan ends.
 async fn scan_rig_hooked(
     mode: &str,
     agent_finder: bool,
-    started: Option<&(dyn Fn(&AppState, &str) + Sync)>,
+    started: Option<StartedHook<'_>>,
 ) -> InterruptedScan {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
