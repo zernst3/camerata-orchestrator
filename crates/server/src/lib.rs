@@ -139,6 +139,8 @@ pub mod seed;
 pub mod severity_bounds;
 pub mod stage_telemetry;
 pub mod stall_sweep;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_defects;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and
 /// `docs/design/2026-07-27_product-export.md`.

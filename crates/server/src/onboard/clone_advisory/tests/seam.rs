@@ -295,6 +295,35 @@ async fn text_around_the_json_and_fences_are_tolerated() {
 }
 
 #[tokio::test]
+async fn braces_in_prose_around_the_verdict_object_do_not_hide_it() {
+    let all = discount_repo("0.2", "0.15");
+    let stub = StubJudge::new(|req, _| {
+        Ok(format!(
+            "I compared {{both copies}} first.\n```json\n{}\n```\nNote the {{rate}} differs.",
+            verdicts(&asked_ids(req), "same_decision", "the discount")
+        ))
+    });
+    let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
+    assert_eq!(stub.call_count(), 1, "a readable reply needs no repair");
+    assert_eq!(outcome.findings.len(), 2);
+    assert!(outcome.failed.is_empty());
+}
+
+#[test]
+fn the_verdict_object_is_the_first_object_with_a_verdicts_array() {
+    use super::prompt::find_verdict_object;
+    // An object without a verdicts array is skipped, never loosened into a verdict object.
+    let text = r#"{"note":"x"} then {"verdicts":[{"id":"a","verdict":"same_decision"}]}"#;
+    assert!(find_verdict_object(text).is_some());
+    assert!(find_verdict_object(r#"{"verdicts":"same_decision"}"#).is_none());
+    assert!(find_verdict_object(r#"{"note":{"verdicts":1}}"#).is_none());
+    // Braces inside a string do not unbalance the scan.
+    let tricky = r#"{"verdicts":[{"id":"a}{","verdict":"different","concept":"}"}]}"#;
+    assert!(find_verdict_object(tricky).is_some());
+    assert!(find_verdict_object("{ never closed").is_none());
+}
+
+#[tokio::test]
 async fn no_model_emits_one_not_assessed_row_per_armed_rule_with_candidates_and_no_findings() {
     // Two rules armed with candidates (single-source and naming both see the discount pair
     // under different names), the third armed with none.

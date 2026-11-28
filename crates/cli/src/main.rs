@@ -135,7 +135,7 @@ enum Command {
     Inspect {
         /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
         /// project (one scan, one report, one cache); each then needs a `--repo-name`.
-        #[arg(long, required_unless_present = "resume")]
+        #[arg(long, required_unless_present_any = ["resume", "rerun_deterministic", "recheck_saved"])]
         repo: Vec<PathBuf>,
         /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
         /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
@@ -144,7 +144,7 @@ enum Command {
         repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         /// With `--resume`, defaults to where the saved run was to write it.
-        #[arg(long, required_unless_present = "resume")]
+        #[arg(long, required_unless_present_any = ["resume", "rerun_deterministic", "recheck_saved"])]
         export: Option<PathBuf>,
         /// `api` (the Anthropic Messages API; uses the key saved in the app, or
         /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
@@ -229,7 +229,7 @@ enum Command {
         /// Who the inspection is for. Printed in the export's confidentiality line ("Confidential,
         /// prepared for <client> on <date>") on every PDF page and workbook sheet. Required: it
         /// is checked before anything is read or spent.
-        #[arg(long, value_name = "NAME", required_unless_present = "resume")]
+        #[arg(long, value_name = "NAME", required_unless_present_any = ["resume", "rerun_deterministic", "recheck_saved"])]
         client: Option<String>,
         /// Not a client engagement: the maintainer's own development. Without this flag every
         /// inspection is a client engagement, which runs only on the Anthropic API with
@@ -287,6 +287,62 @@ enum Command {
         /// else is the saved run's. A run that is already complete says so and does nothing.
         #[arg(long, value_name = "RUN-ID|latest")]
         resume: Option<String>,
+        /// Rerun the deterministic stages of a saved run on THIS build, with no model calls:
+        /// `--rerun-deterministic <RUN-ID>` or `--rerun-deterministic latest`. For a saved run
+        /// whose bookkeeping (the tool previews and their merges, the convention accounting, the
+        /// ledger and integrity checks, the collapse, the export) was wrong on the build that made
+        /// it and is fixed on this one. Every model reply comes from the run's store; the finder,
+        /// the group review, the fix text and the clone and duplicate checks keep the original
+        /// build's results and models. A reply the run does not hold refuses the whole rerun,
+        /// listing every missing one, and nothing is sent. Refuses if the models, the rules, the
+        /// questions asked of the model or the rule library differ from the saved run (a normal
+        /// `--resume` on another build is still refused). Records both builds in the run, the
+        /// ledger and the report's "How this was done". No key is needed. `--export` may be given
+        /// again; everything else is the saved run's.
+        #[arg(
+            long = "rerun-deterministic",
+            value_name = "RUN-ID|latest",
+            conflicts_with = "resume"
+        )]
+        rerun_deterministic: Option<String>,
+        /// Finish a saved, INCOMPLETE inspection on THIS build by re-checking and re-exporting from
+        /// its saved report, using every saved model result as it was saved:
+        /// `--recheck-saved <RUN-ID>` or `--recheck-saved latest`. Only what this build changed
+        /// runs: the final checks (the convention accounting, the pipeline integrity checks and
+        /// the release gate) and the export, and the one clone check (duplicate code) part per
+        /// repo that failed because the judge's reply could not be read, which is read again from
+        /// its stored reply with no model call. No tool preview, dependency audit, finder, fix
+        /// stage or group review is run. Refuses, naming the cause, if the saved report or ledger
+        /// is missing or unreadable, if the run is already complete, if the repository is not
+        /// the tree the run read, if the rules or the questions asked of the model differ, or (for
+        /// a client run) if this build has uncommitted changes. If the release gate refuses, the
+        /// command stops with its refusal and writes no export. Records both builds in the run,
+        /// the ledger and the report's "How this was done". `--export` and `--max-cost-usd` may
+        /// be given again; everything else is the saved run's. No key is needed unless
+        /// `--reask-failed-judge` makes a call.
+        #[arg(
+            long = "recheck-saved",
+            value_name = "RUN-ID|latest",
+            conflicts_with_all = ["resume", "rerun_deterministic", "plan_only"]
+        )]
+        recheck_saved: Option<String>,
+        /// With `--recheck-saved`: when a failed clone check part's stored reply cannot be read
+        /// by the current reader, ask exactly that part once more, on this build and on the clone
+        /// check model the inspection started with (from the run's record, never a default). The
+        /// parts are listed, with their count, before any call; at most 5 (or the number given as
+        /// `--reask-failed-judge=<COUNT>`) are asked, one call each, and a spend limit the calls
+        /// could pass refuses first. Without this flag a part that still cannot be settled
+        /// refuses the recheck, naming it, with nothing sent. The calls are recorded in the run,
+        /// the ledger and the report's "How this was done".
+        #[arg(
+            long = "reask-failed-judge",
+            value_name = "COUNT",
+            num_args = 0..=1,
+            default_missing_value = REASK_DEFAULT_COUNT,
+            require_equals = true,
+            requires = "recheck_saved"
+        )]
+        reask_failed_judge: Option<usize>,
         /// Print what this run would take on, then stop: per repo the files, lines and bytes
         /// admitted and the files left out by reason; per piece its files, bytes, context and
         /// checklist bytes, first request size and turn limit; the pre-flight cost projection
@@ -296,7 +352,7 @@ enum Command {
         /// same flags as the real run. Exits 0 when a real run would start, non-zero with the
         /// reason when it would refuse (a spend limit under the projection, a build with
         /// uncommitted changes on a client run).
-        #[arg(long = "plan-only", conflicts_with = "resume")]
+        #[arg(long = "plan-only", conflicts_with_all = ["resume", "rerun_deterministic", "recheck_saved"])]
         plan_only: bool,
     },
 
@@ -666,8 +722,28 @@ async fn main() -> anyhow::Result<()> {
             finder_force_pieces,
             compare_with,
             resume,
+            rerun_deterministic,
+            recheck_saved,
+            reask_failed_judge,
             plan_only,
         } => {
+            if let Some(run) = recheck_saved {
+                return report_inspect_result(
+                    inspect_cmd::run_recheck_saved(
+                        &run,
+                        &repo,
+                        export,
+                        max_cost_usd,
+                        reask_failed_judge,
+                    )
+                    .await,
+                );
+            }
+            if let Some(run) = rerun_deterministic {
+                return report_inspect_result(
+                    inspect_cmd::run_rerun_deterministic(&run, &repo, export).await,
+                );
+            }
             if let Some(run) = resume {
                 return run_resume_cmd(&run, &repo, export, max_cost_usd).await;
             }
@@ -984,6 +1060,10 @@ async fn run_resume_cmd(
 }
 
 /// Print what a run (or a resume) came to and exit with its code.
+/// The count `--reask-failed-judge` takes when none is given: the server's one default, as text
+/// (a test holds the two equal).
+const REASK_DEFAULT_COUNT: &str = "5";
+
 fn report_inspect_result(
     result: Result<inspect_cmd::InspectOutcome, inspect_cmd::InspectError>,
 ) -> anyhow::Result<()> {
@@ -1429,6 +1509,31 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn the_reask_default_is_the_servers_one_constant() {
+        assert_eq!(
+            REASK_DEFAULT_COUNT.parse::<usize>().unwrap(),
+            camerata_server::run_store::recheck::DEFAULT_MAX_REASKED_PARTS
+        );
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--recheck-saved",
+            "latest",
+            "--reask-failed-judge",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Inspect {
+                reask_failed_judge, ..
+            } => assert_eq!(
+                reask_failed_judge,
+                Some(camerata_server::run_store::recheck::DEFAULT_MAX_REASKED_PARTS)
+            ),
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+    }
+
+    #[test]
     fn inspect_takes_repeated_repos_with_one_name_each() {
         let cli = Cli::try_parse_from([
             "camerata",
@@ -1520,8 +1625,13 @@ mod cli_parse_tests {
                 finder_force_pieces,
                 compare_with,
                 resume,
+                rerun_deterministic,
+                recheck_saved,
+                reask_failed_judge,
                 plan_only,
             } => {
+                assert!(rerun_deterministic.is_none());
+                assert!(recheck_saved.is_none() && reask_failed_judge.is_none());
                 assert!(!plan_only, "a real run unless --plan-only is given");
                 assert!(exclude.is_empty(), "nothing is excluded unless agreed");
                 assert!(resume.is_none(), "a new run unless --resume is given");

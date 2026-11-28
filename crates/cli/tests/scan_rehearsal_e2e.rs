@@ -562,6 +562,34 @@ struct Model {
     calls: AtomicUsize,
 }
 
+/// A well-formed judge reply for `req`: every candidate id the batch asks about, answered with the
+/// second word of the vocabulary the system prompt lists.
+fn judge_reply(req: &LlmRequest) -> String {
+    let word = req
+        .system
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .filter_map(|l| l.strip_prefix("- \""))
+        .filter_map(|rest| rest.split('"').next())
+        .nth(1)
+        .unwrap_or("unsure")
+        .to_string();
+    let batch = req
+        .prompt
+        .split_once(camerata_server::onboard::clone_advisory::prompt::BATCH_MARKER)
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    let verdicts: Vec<Value> = batch
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .map(|id| json!({"id": id, "verdict": word, "concept": ""}))
+        .collect();
+    json!({ "verdicts": verdicts }).to_string()
+}
+
 impl Model {
     /// The model's answer to a request, as a pure function of the request.
     fn answer(&self, req: &LlmRequest, micro: u64) -> LlmResponse {
@@ -590,6 +618,17 @@ impl Model {
                 &req.prompt,
             )
             .unwrap_or_default(),
+            // The clone judge's batch: it is asked for one verdict per candidate id, and an empty
+            // `verdicts` array answers none of them (the judge turns that reply down and repairs
+            // it). The scripted judge answers every asked id with the rule's second word (the
+            // non-affirmative one: "different", "different_concept"), so no finding ships.
+            PartKind::Other
+                if req.system.as_deref().is_some_and(|s| {
+                    s.starts_with(camerata_server::onboard::clone_advisory::prompt::JUDGE_SYSTEM_PREFIX)
+                }) =>
+            {
+                judge_reply(req)
+            }
             _ => r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string(),
         };
         LlmResponse {
