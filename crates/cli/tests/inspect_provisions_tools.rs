@@ -441,3 +441,42 @@ async fn an_intel_mac_is_refused_before_any_model_call_with_one_plain_line() {
     assert!(fakes.source.fetched().is_empty(), "nothing was downloaded");
     assert!(!fakes.tooling().exists(), "nothing was installed");
 }
+
+/// A recheck with `--reask-failed-judge` may ask a model, so it is a paid run: on an Intel Mac it
+/// is refused before any model call, in the same one line as every other paid run.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_recheck_that_may_reask_is_refused_on_an_intel_mac_before_any_model_call() {
+    let state = tempfile::tempdir().unwrap();
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+    let fakes = FakeTools::new();
+    let pins = fakes.env.clone();
+    let intel = ToolEnv::for_machine("macos", "x86_64", fakes.tooling(), fakes.source.clone())
+        .with_pins(move |a| pins.pins(a));
+    let llm = Scripted::new(&intel);
+    let err = camerata::inspect_cmd::recheck::recheck_saved_inspect(
+        "latest",
+        &[],
+        None,
+        None,
+        Some(1),
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            resume: None,
+            llm: Some(&llm),
+            preflight_sink: &|_| {},
+            tools: Some(&intel),
+        },
+    )
+    .await
+    .expect_err("refused");
+    assert_eq!(
+        err.to_string(),
+        camerata_server::pinned_tools::platform::INTEL_MAC_REFUSAL
+    );
+    assert_eq!(
+        llm.calls.load(Ordering::SeqCst),
+        0,
+        "no model may be called"
+    );
+}

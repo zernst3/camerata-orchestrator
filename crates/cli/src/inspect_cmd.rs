@@ -1004,6 +1004,20 @@ pub struct Seams<'a> {
     pub tools: Option<&'a camerata_server::pinned_tools::ToolEnv>,
 }
 
+/// The one line a paid run refuses with on a machine Camerata does not run on (an Intel Mac: the
+/// owner's ruling on #587), from the run's tool environment or, when it has none, this machine.
+pub fn machine_refusal(
+    tools: Option<&camerata_server::pinned_tools::ToolEnv>,
+) -> Option<&'static str> {
+    match tools {
+        Some(tools) => tools.machine_refusal(),
+        None => camerata_server::pinned_tools::platform::machine_refusal(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        ),
+    }
+}
+
 /// The tool list's heading in the pre-start output and in `--plan-only`.
 pub const TOOLS_HEADING: &str = "== TOOLS ==";
 
