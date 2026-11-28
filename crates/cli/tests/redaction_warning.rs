@@ -4,7 +4,7 @@
 //! operator's environment: it can neither switch redaction off nor stay silent about it.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 const VAR: &str = "CAMERATA_FEATURE_MODEL_PROMPT_REDACTION";
 const WARNING: &str = "model-prompt redaction is OFF";
