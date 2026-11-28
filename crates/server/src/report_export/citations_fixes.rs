@@ -617,20 +617,99 @@ pub(crate) fn resolve_deviation_fix(
 /// data, `json/inspection.json`, the datasets and the workbook, and the held-for-review routing): a
 /// consistency deviation row resolves through [`resolve_deviation_fix`], every other row stays
 /// strict, so one row never has a fix in one artifact and none in another.
-pub(crate) fn resolve_fix_for_row(
+/// The kind-aware fix for the export surfaces, which know the project's chosen option of
+/// every rule (`chosen_options`, keyed by upper case rule id): a rule merged into the row gets the
+/// remediation of the option the project selected for it, else its default, as the row's own fix
+/// resolves.
+pub(crate) fn resolve_fix_for_row_chosen(
     rule_id: &str,
     corpus: Option<&camerata_rules::RuleSet>,
     finding: &Finding,
     chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    if matches!(
+    let own = if matches!(
         finding.kind,
         Some(camerata_api_types::audit::FindingKind::Deviation(_))
     ) {
         resolve_deviation_fix(rule_id, corpus, finding, chosen_option)
     } else {
         resolve_fix(rule_id, corpus, finding, chosen_option)
+    };
+    let merged = merged_rule_fixes(rule_id, corpus, finding, chosen_options);
+    if merged.is_empty() {
+        return own;
     }
+    Some(
+        own.into_iter()
+            .chain(merged)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
+/// One rule folded into a row under a rule id of its own, with the fix text it contributes.
+pub(crate) struct MergedFix {
+    pub rule_id: String,
+    /// The rule's title, which is how client text names it (never the rule id).
+    pub title: String,
+    pub text: String,
+}
+
+/// The fix text of every rule the collapse folded into this row (`flagged_by`) under a rule id of
+/// its own: the rule's remediation resolved the way the row's own fix is ([`resolve_fix_inner`]):
+/// the option the project selected, and when that option has no remediation the rule's default
+/// option. A rule with no such text is left out here; the release check refuses the export and
+/// names it. Rows from an external tool are covered by the rule they enforce, which is the row's
+/// own. Pure over the stored row and the library, so a saved run gets it with no model call.
+pub(crate) fn merged_rule_fix_parts(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> Vec<MergedFix> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for b in &finding.flagged_by {
+        if b.tool.is_some()
+            || b.rule_id.eq_ignore_ascii_case(rule_id)
+            || seen.iter().any(|s| s.eq_ignore_ascii_case(&b.rule_id))
+        {
+            continue;
+        }
+        seen.push(b.rule_id.clone());
+        let Some(rule) = corpus_rule_for(&b.rule_id, corpus) else {
+            continue;
+        };
+        // The folded row's own evaluated option was not kept; the project's selection stands.
+        let mut at = finding.clone();
+        at.path.clone_from(&b.path);
+        at.evaluated_option_id = None;
+        let chosen = chosen_options
+            .get(&b.rule_id.to_ascii_uppercase())
+            .map(String::as_str);
+        let Some(text) = resolve_fix_inner(&b.rule_id, corpus, &at, chosen, true) else {
+            continue;
+        };
+        out.push(MergedFix {
+            rule_id: b.rule_id.clone(),
+            title: rule.title.clone(),
+            text,
+        });
+    }
+    out
+}
+
+fn merged_rule_fixes(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    merged_rule_fix_parts(rule_id, corpus, finding, chosen_options)
+        .into_iter()
+        .map(|m| format!("Also flagged as {}: {}", m.title, m.text))
+        .collect()
 }
 
 pub(crate) fn resolve_fix_inner(
@@ -676,18 +755,26 @@ pub(crate) fn resolve_fix_inner(
 /// still ships a usable fix.
 ///
 /// Deliberately does NOT, by itself, treat "the rule id has no corpus entry at all" as missing
-/// a fix — see [`is_action_row_missing_a_fix`], the actual bucket-routing gate, for why that
+/// a fix. See [`is_action_row_missing_a_fix_with`], the actual bucket-routing gate, for why that
 /// case is scoped out separately rather than folded in here.
-pub(crate) fn has_any_fix(
+pub(crate) fn has_any_fix_with(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> bool {
     finding
         .fix_specific
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty())
-        || resolve_fix_for_row(&finding.rule_id, corpus, finding, chosen_option).is_some()
+        || resolve_fix_for_row_chosen(
+            &finding.rule_id,
+            corpus,
+            finding,
+            chosen_option,
+            chosen_options,
+        )
+        .is_some()
 }
 
 // ── P4 (2026-09-29): floor findings get finding-level treatment ────────────────────

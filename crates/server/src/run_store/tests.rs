@@ -347,6 +347,7 @@ async fn a_content_failure_sets_aside_the_replies_of_its_stage_and_nothing_else(
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -391,6 +392,7 @@ async fn a_rejected_reply_of_a_failed_stage_is_asked_again_on_the_resume() {
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -712,6 +714,7 @@ fn finish_marks_failed_parts_failed_and_not_run_parts_pending() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         not_run: vec![FinishNotRun {
             repo: "acme/api".to_string(),
@@ -812,6 +815,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         attempt: 1,
         engine_version: engine_version(),
         pin: None,
+        reruns: Vec::new(),
         project_key: project.to_string(),
         repos: vec![RepoRecord {
             name: "a/b".to_string(),
@@ -1670,6 +1674,7 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         incomplete_reasons: vec!["a part failed".to_string()],
         ..FinishOutcome::default()
@@ -1755,6 +1760,7 @@ fn the_listing_tells_live_interrupted_incomplete_and_complete_apart() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         ..FinishOutcome::default()
     });
@@ -2001,6 +2007,7 @@ fn a_group_review_pass_name_maps_to_the_group_review_part() {
             class: "content".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         incomplete_reasons: vec!["x".to_string()],
         ..FinishOutcome::default()
@@ -2076,6 +2083,7 @@ async fn one_failed_rule_group_does_not_set_aside_every_stage2_reply_of_the_repo
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -2275,6 +2283,7 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
         kind,
         repo,
         files,
+        owner: None,
         entries,
     };
     let dir = store.dir().join("calls");
@@ -2523,6 +2532,7 @@ fn a_cut_temporary_file_is_never_read_as_a_record() {
         kind: PartKind::Other,
         repo: String::new(),
         files: Vec::new(),
+        owner: None,
         entries: Default::default(),
     };
     write_atomic(
@@ -3642,4 +3652,244 @@ fn a_client_inspection_does_not_start_on_a_dirty_or_commitless_build() {
         engine_pin::client_start_refusal(false, &build_with(None, false)),
         None
     );
+}
+
+// ---- a rerun of the deterministic stages on another build (#588) ----------------------------
+
+/// A saved run on the test build, and the pin of a "newer build" `c...` with the same rules.
+fn rerun_fixture() -> (
+    tempfile::TempDir,
+    camerata_test_env::EnvGuard,
+    tempfile::TempDir,
+    RunRecord,
+    engine_pin::EnginePin,
+    Vec<(String, std::path::PathBuf)>,
+) {
+    let (s, g, repo, record) = pinned_record();
+    let newer = engine_pin::EnginePin {
+        build: build_with(Some(&"c".repeat(40)), false),
+        ..record.pin.clone().unwrap()
+    };
+    let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+    (s, g, repo, record, newer, sources)
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rerun_on_a_newer_build_opens_the_run_and_records_both_builds_while_a_resume_stays_refused() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let (store, text) =
+        open_for_rerun(&record.run_id, &sources, &key(), &models(), &newer, true).unwrap();
+    assert!(text.contains("No model is asked"), "{text}");
+    assert!(store.rerun_misses().is_some(), "the store is a rerun's");
+    assert!(
+        store.record().reruns.is_empty(),
+        "not recorded until the rerun ends"
+    );
+    assert!(store.commit_rerun().is_some());
+    let saved = store.record();
+    assert_eq!(saved.reruns.len(), 1);
+    assert_eq!(saved.reruns[0].model_build.commit, Some("a".repeat(40)));
+    assert_eq!(
+        saved.reruns[0].deterministic_build.commit,
+        Some("c".repeat(40))
+    );
+    assert_eq!(
+        saved.pin.as_ref().unwrap().build.commit,
+        Some("a".repeat(40)),
+        "the model work stays pinned to the build that made it"
+    );
+    drop(store);
+    let on_disk = read_record(&record.run_id).unwrap();
+    assert_eq!(on_disk.reruns.len(), 1, "the rerun is saved with the run");
+    // A normal resume on that newer build is refused, unchanged.
+    let result = open_for_resume(&record.run_id, &sources, &key(), &models(), &newer);
+    assert!(
+        matches!(&result, Err(RunStoreError::Refused(m)) if m.contains("must finish it")),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rerun_is_refused_when_the_rule_library_changed_and_the_cause_is_named() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let changed = engine_pin::EnginePin {
+        corpus_version: "a-different-rule-library-digest".to_string(),
+        ..newer
+    };
+    let result = open_for_rerun(&record.run_id, &sources, &key(), &models(), &changed, false);
+    let Err(RunStoreError::Refused(m)) = result else {
+        panic!("a changed rule library must refuse the rerun");
+    };
+    assert!(m.contains("rule library changed"), "{m}");
+    assert!(
+        m.contains("finder"),
+        "names the prompt it would change: {m}"
+    );
+    assert!(read_record(&record.run_id).unwrap().reruns.is_empty());
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rerun_is_refused_when_the_questions_asked_of_the_model_changed() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let mut changed = newer;
+    changed.build.prompt_schema += 1;
+    let result = open_for_rerun(&record.run_id, &sources, &key(), &models(), &changed, false);
+    let Err(RunStoreError::Refused(m)) = result else {
+        panic!("a changed prompt schema must refuse the rerun");
+    };
+    assert!(
+        m.contains("questions Camerata asks the model changed"),
+        "{m}"
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_client_rerun_is_refused_on_a_build_that_cannot_be_named_exactly() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let dirty = engine_pin::EnginePin {
+        build: build_with(Some(&"c".repeat(40)), true),
+        ..newer
+    };
+    let result = open_for_rerun(&record.run_id, &sources, &key(), &models(), &dirty, true);
+    assert!(
+        matches!(&result, Err(RunStoreError::Refused(m)) if m.contains("not committed")),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_rerun_answers_from_the_store_and_a_missing_reply_is_a_named_miss_with_no_call() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let first = new_run(&repo);
+        let model = Scripted::new();
+        {
+            let j = JournalLlm::new(&model, first.clone());
+            j.complete(ask("stored one")).await.unwrap();
+        }
+        assert_eq!(model.calls(), 1);
+        let id = first.run_id();
+        drop(first);
+        let newer = engine_pin::EnginePin {
+            build: build_with(Some(&"c".repeat(40)), false),
+            ..read_record(&id).unwrap().pin.unwrap()
+        };
+        let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+        let (store, _) = open_for_rerun(&id, &sources, &key(), &models(), &newer, false).unwrap();
+        let j = JournalLlm::new(&model, store.clone());
+        let replayed = j.complete(ask("stored one")).await.unwrap();
+        assert!(replayed.text.contains("stored one"));
+        let missing = j.complete(ask("never stored")).await;
+        assert!(missing.is_err(), "a reply the store lacks fails the call");
+        assert_eq!(
+            model.calls(),
+            1,
+            "the model behind the journal was never reached by the rerun"
+        );
+        let misses = store.rerun_misses().unwrap();
+        assert_eq!(misses.list().len(), 1, "{:?}", misses.list());
+        let refusal = misses.refusal().expect("a refusal naming the miss");
+        assert!(refusal.contains("other model calls reply"), "{refusal}");
+        assert!(refusal.contains("Nothing was sent"), "{refusal}");
+        assert!(
+            !runs_dir()
+                .join(&id)
+                .join("calls")
+                .read_dir()
+                .unwrap()
+                .any(|e| {
+                    let text = std::fs::read_to_string(e.unwrap().path()).unwrap();
+                    text.contains("never stored")
+                }),
+            "a miss stores nothing"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_store_only_provider_never_sends_a_completion_or_a_batch_and_names_each_miss() {
+    use crate::ai_audit::BatchApi;
+    let misses = store_only::StoreOnlyMisses::new();
+    assert_eq!(misses.refusal(), None, "no miss, no refusal");
+    let provider = store_only::StoreOnlyLlm::new(misses.clone(), true);
+    assert!(provider.has_api_key(), "keeps the batch path the run took");
+    assert!(provider.complete(ask("one")).await.is_err());
+    assert!(provider.submit(Vec::new()).await.is_err());
+    assert!(provider.poll("msgbatch_1").await.is_err());
+    assert!(provider
+        .fetch("msgbatch_1", crate::llm::CacheTtl::OneHour)
+        .await
+        .is_err());
+    assert!(provider.cancel_batch("msgbatch_1").await.is_ok());
+    let list = misses.list();
+    assert_eq!(list.len(), 4, "{list:?}");
+    let refusal = misses.refusal().unwrap();
+    assert!(refusal.contains("4 model reply(ies)"), "{refusal}");
+    assert!(refusal.contains("msgbatch_1"), "{refusal}");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_rerun_serves_the_good_reply_before_a_bad_one_stored_under_the_same_key() {
+    seeded(async {
+        struct BadThenGood(AtomicUsize);
+        #[async_trait::async_trait]
+        impl LlmPort for BadThenGood {
+            async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(response(
+                    if n == 0 {
+                        "no json at all"
+                    } else {
+                        r#"{"ok":1}"#
+                    },
+                    0.01,
+                ))
+            }
+            async fn complete_streaming(
+                &self,
+                req: LlmRequest,
+                _d: &mut (dyn for<'a> FnMut(&'a str) + Send),
+            ) -> anyhow::Result<LlmResponse> {
+                self.complete(req).await
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let first = new_run(&repo);
+        let model = BadThenGood(AtomicUsize::new(0));
+        {
+            let j = JournalLlm::new(&model, first.clone());
+            assert_eq!(j.complete(ask("k")).await.unwrap().text, "no json at all");
+            assert_eq!(j.complete(ask("k")).await.unwrap().text, r#"{"ok":1}"#);
+        }
+        let id = first.run_id();
+        drop(first);
+        let newer = engine_pin::EnginePin {
+            build: build_with(Some(&"c".repeat(40)), false),
+            ..read_record(&id).unwrap().pin.unwrap()
+        };
+        let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+        let (store, _) = open_for_rerun(&id, &sources, &key(), &models(), &newer, false).unwrap();
+        let j = JournalLlm::new(&model, store);
+        assert_eq!(
+            j.complete(ask("k")).await.unwrap().text,
+            r#"{"ok":1}"#,
+            "the resume's order: the good reply first"
+        );
+        assert_eq!(model.0.load(Ordering::SeqCst), 2, "no call");
+    })
+    .await;
 }

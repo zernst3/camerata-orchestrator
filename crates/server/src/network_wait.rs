@@ -51,6 +51,17 @@ pub fn run_model_seam<'a>(
     }
 }
 
+/// The model seam of a deterministic rerun (#588): the store-only seam, journaled into the run's
+/// store and NOT wrapped in the network wait. A rerun asks no model, so a miss is a refusal to
+/// report at once; waiting minutes for a network nobody uses would only hide it. `None` when
+/// the run has no store (the caller then uses `base` as it is).
+pub fn rerun_model_seam<'a>(
+    base: &'a dyn LlmPort,
+    store: Option<Arc<RunStore>>,
+) -> Option<Box<dyn LlmPort + 'a>> {
+    store.map(|store| crate::run_store::journal::wrap(base, store))
+}
+
 /// Put the wait around a borrowed seam. A seam that carries a [`BatchApi`] (a [`BatchSeam`], or
 /// the real client) becomes a [`BatchSeam`] over a [`WaitingBatchApi`]; any other seam becomes a
 /// [`WaitingLlm`].

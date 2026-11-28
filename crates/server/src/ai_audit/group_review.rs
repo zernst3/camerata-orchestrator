@@ -2507,6 +2507,10 @@ pub async fn review_scan_report(
             "{STAGE_GROUP_REVIEW}: not started, because this inspection is not complete ({why}); \
              a resume runs it once every repository has finished"
         )]);
+        // The report leaves this stage in the shape a run gives it (keys and the tree built from
+        // the rows, deterministic and with no model call), so the ledger saved before the seal
+        // agrees with the sealed report's (#588's recheck compares the two).
+        report.assign_site_keys();
         return None;
     }
     let model = controls.group_review_model_for();

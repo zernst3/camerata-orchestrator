@@ -45,9 +45,14 @@ fn a_resume_runs_the_pipeline_on_the_arguments_the_run_saved() {
     );
     // The pipeline a resume runs is the one whose export passes the repo folders.
     assert!(
-        body_of("pub async fn run_inspect_pipeline_controlled(").contains(
+        body_of("pub async fn run_inspect_pipeline_controlled(")
+            .contains("run_inspect_pipeline_as("),
+        "the controlled pipeline must be the one pipeline"
+    );
+    assert!(
+        body_of("async fn run_inspect_pipeline_as(").contains(
             "&args.repo_dirs(),\n    )\n    .await\n    {\n        Ok(released) => released,"
         ),
-        "the controlled pipeline must pass the run's repo folders to release_product_export"
+        "the pipeline must pass the run's repo folders to release_product_export"
     );
 }

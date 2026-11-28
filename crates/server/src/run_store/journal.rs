@@ -227,8 +227,34 @@ pub struct CallFile {
     /// The file paths framed in the prompt, for matching a failed pass to the calls over its files.
     #[serde(default)]
     pub files: Vec<String>,
+    /// The stage that owns the call when it records its own rejected replies at the point of
+    /// rejection ([`reject_reply`]). `None` for every other call and for a file written before
+    /// this existed (those keep the blanket set-aside of [`quarantine_rejected`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<CallOwner>,
     /// By occurrence (0 is the first time the request was asked).
     pub entries: BTreeMap<usize, CallEntry>,
+}
+
+/// A stage that records its own rejected replies, so no other stage's failure may set its calls
+/// aside as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallOwner {
+    /// The clone judge (`onboard::clone_advisory`).
+    CloneJudge,
+}
+
+impl CallOwner {
+    /// The owner of a request, from its system prompt.
+    fn of(req: &LlmRequest) -> Option<Self> {
+        req.system
+            .as_deref()
+            .is_some_and(|s| {
+                s.starts_with(crate::onboard::clone_advisory::prompt::JUDGE_SYSTEM_PREFIX)
+            })
+            .then_some(Self::CloneJudge)
+    }
 }
 
 fn call_path(dir: &Path, key: &str) -> std::path::PathBuf {
@@ -404,15 +430,23 @@ pub(crate) fn entry_replays(entry: &CallEntry, kind: PartKind) -> bool {
     if replays_on_resume(entry.status, kind) {
         return true;
     }
-    // `Other` (the clone judge, the deep lenses) has no parser a resume can run: the request that
-    // would say which shape the reply should have is not stored. An unusable `Other` reply is
-    // always asked again.
-    entry.status == EntryStatus::Unusable
-        && kind != PartKind::Other
-        && entry
-            .response
-            .as_ref()
-            .is_some_and(|stored| reply_is_good(kind, &stored.replayed()))
+    // `Other` (the clone judge, the deep lenses) has no per-request parser a resume can run: the
+    // request that would say which shape the reply should have is not stored. What can be said
+    // is whether the reply holds a verdict object, the clone judge's shape. An unusable `Other`
+    // reply the judge's parser reads is good (so it is not paid for twice when the parser was
+    // fixed since); any other unusable `Other` reply is always asked again.
+    if entry.status != EntryStatus::Unusable {
+        return false;
+    }
+    let Some(stored) = entry.response.as_ref() else {
+        return false;
+    };
+    let reply = stored.replayed();
+    if kind == PartKind::Other {
+        return !reply.truncated
+            && crate::onboard::clone_advisory::prompt::find_verdict_object(&reply.text).is_some();
+    }
+    reply_is_good(kind, &reply)
 }
 
 /// True when a reply is one a resume may return again: finished, with a JSON object that parses.
@@ -424,6 +458,14 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
     let parses = !resp.truncated
         && crate::ai_audit::extract_json_object(&resp.text)
             .is_some_and(|json| serde_json::from_str::<serde_json::Value>(json).is_ok());
+    // A clone judge reply with braces in prose around its verdict object does not parse as one
+    // span but is read by the judge's own parser; the other `Other` calls have no such shape.
+    if kind == PartKind::Other {
+        return !resp.truncated
+            && (parses
+                || crate::onboard::clone_advisory::prompt::find_verdict_object(&resp.text)
+                    .is_some());
+    }
     if !parses {
         return false;
     }
@@ -450,6 +492,26 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
 enum Planned {
     Replay(Box<LlmResponse>),
     Fresh(FreshCall),
+    /// A rerun (#588) holds no stored reply for the request and may not ask a model: the miss is
+    /// recorded in the run's list and the call fails. Nothing is stored and no part is started.
+    Missing,
+}
+
+/// How a missing reply is named in a rerun's refusal: the stage, the repo and the files its
+/// request framed.
+pub(crate) fn describe_missing(kind: PartKind, repo: &str, files: &[String]) -> String {
+    let mut out = format!("{} reply", kind.label());
+    if !repo.is_empty() {
+        out.push_str(&format!(" for {repo}"));
+    }
+    match files {
+        [] => {}
+        [one] => out.push_str(&format!(" (file {one})")),
+        [first, rest @ ..] => {
+            out.push_str(&format!(" (file {first} and {} more)", rest.len()));
+        }
+    }
+    out
 }
 
 struct FreshCall {
@@ -461,6 +523,54 @@ struct FreshCall {
     kind: PartKind,
     repo: String,
     files: Vec<String>,
+    owner: Option<CallOwner>,
+}
+
+/// The slots of `file` a request is answered from, in the order they answer. A resume answers
+/// from the good replies only. A rerun answers the same way and falls back to a reply the run
+/// stored but a resume would ask again (rejected, unusable) only when the request has no good one,
+/// so a bad first attempt never comes before a good later one.
+fn replayable_slots(file: &CallFile, rerun: bool) -> Vec<usize> {
+    let kind = file.kind;
+    let good: Vec<usize> = file
+        .entries
+        .iter()
+        .filter(|(_, e)| entry_replays(e, kind) && e.response.is_some())
+        .map(|(s, _)| *s)
+        .collect();
+    if rerun && good.is_empty() {
+        return file
+            .entries
+            .iter()
+            .filter(|(_, e)| e.response.is_some())
+            .map(|(s, _)| *s)
+            .collect();
+    }
+    good
+}
+
+/// What a stage sees when a rerun has no stored reply for its request.
+pub(crate) fn missing_reply_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "this is a rerun of the deterministic stages: it answers only from the run's stored \
+         replies and never asks a model, and this reply is not stored"
+    )
+}
+
+/// Every stored reply under the request digest `key` in the run folder `dir`, oldest first,
+/// whatever became of it (a reply a stage turned down is still the model's reply). A reply that
+/// was cut off at the output limit is left out. Nothing is changed: this reads the folder and
+/// takes no part in the run's own bookkeeping.
+pub fn stored_reply_texts(dir: &Path, key: &str) -> Vec<String> {
+    let Some(file) = load_call_file(dir, key) else {
+        return Vec::new();
+    };
+    file.entries
+        .values()
+        .filter_map(|e| e.response.as_ref())
+        .filter(|r| !r.truncated)
+        .map(|r| r.text.clone())
+        .collect()
 }
 
 fn load_call_file(dir: &Path, key: &str) -> Option<CallFile> {
@@ -486,22 +596,25 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 kind,
                 repo: repo.clone(),
                 files: files.clone(),
+                owner: CallOwner::of(req),
                 entries: BTreeMap::new(),
             })
         });
         // The idx-th ask is answered by the idx-th good reply, in the order they were stored.
         let file_kind = file.kind;
-        let good_slot = file
-            .entries
-            .iter()
-            .filter(|(_, e)| entry_replays(e, file_kind) && e.response.is_some())
-            .map(|(slot, _)| *slot)
-            .nth(idx);
+        // A rerun keeps the model work as the saved run made it: every stored reply is the answer,
+        // whatever the stage made of it (a reply the stage turned down is turned down again, the
+        // way it was). Only a call that never got a reply is missing. A resume asks those again.
+        let rerun = store.rerun_misses().is_some();
+        let good_slot = replayable_slots(file, rerun).into_iter().nth(idx);
         let good = good_slot.and_then(|slot| {
             // A refused reply the current parser accepts is a good reply from here on: stored as
             // one, so the run's accounting (a later set-aside, the counts) agrees with the replay.
+            // A rerun changes nothing it stored.
             let entry = file.entries.get_mut(&slot)?;
-            if entry.status == EntryStatus::Unusable && !replays_on_resume(entry.status, file_kind)
+            if !rerun
+                && entry.status == EntryStatus::Unusable
+                && !replays_on_resume(entry.status, file_kind)
             {
                 entry.status = EntryStatus::Done;
                 entry.reason = None;
@@ -523,6 +636,12 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 Planned::Replay(Box::new(replay))
             }
             None => {
+                // A rerun answers from the store alone: a missing reply is recorded by name
+                // and the call fails before anything is stored or started.
+                if let Some(misses) = store.rerun_misses() {
+                    misses.record(describe_missing(kind, &repo, &files));
+                    return Planned::Missing;
+                }
                 // A fresh call is stored in the next free slot of the file, never over an
                 // existing entry (a good one at a later slot must stay).
                 let next = st
@@ -539,6 +658,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                     kind,
                     repo,
                     files,
+                    owner: CallOwner::of(req),
                 })
             }
         }
@@ -567,15 +687,12 @@ fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
             kind,
             repo: repo.clone(),
             files: files.clone(),
+            owner: CallOwner::of(&req),
             entries: BTreeMap::new(),
         })
     });
-    let file_kind = file.kind;
-    file.entries
-        .values()
-        .filter(|e| entry_replays(e, file_kind) && e.response.is_some())
-        .nth(idx)
-        .is_some()
+    let rerun = store.rerun_misses().is_some();
+    replayable_slots(file, rerun).get(idx).is_some()
 }
 
 impl FreshCall {
@@ -604,6 +721,7 @@ fn record_entry(store: &RunStore, call: &FreshCall, entry: CallEntry) {
             kind: call.kind,
             repo: call.repo.clone(),
             files: call.files.clone(),
+            owner: call.owner,
             entries: BTreeMap::new(),
         });
     file.entries
@@ -693,6 +811,10 @@ const MAX_REASON_CHARS: usize = 1_500;
 /// key) instead of paying for the whole reply again. A reply that was already unusable keeps
 /// its status and gains the reason after the one it has. No reply is touched except that one.
 pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str, whole: bool) {
+    // A rerun keeps the saved run's replies exactly as they are stored.
+    if store.rerun_misses().is_some() {
+        return;
+    }
     let reason = crate::failure::scrub_message(reason, MAX_REASON_CHARS);
     let dir = store.dir().to_path_buf();
     let mut st = store.lock_state();
@@ -739,6 +861,7 @@ impl LlmPort for JournalLlm<'_> {
         let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.complete(req).await;
                 after_call(&self.store, call, &result);
@@ -759,6 +882,7 @@ impl LlmPort for JournalLlm<'_> {
                 on_delta(&resp.text);
                 Ok(*resp)
             }
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.complete_streaming(req, on_delta).await;
                 after_call(&self.store, call, &result);
@@ -795,6 +919,7 @@ impl LlmPort for JournalRealtime {
         let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.realtime().complete(req).await;
                 after_call(&self.store, call, &result);
@@ -815,6 +940,7 @@ impl LlmPort for JournalRealtime {
                 on_delta(&resp.text);
                 Ok(*resp)
             }
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self
                     .inner
@@ -1275,9 +1401,9 @@ fn all_call_files(store: &RunStore) -> Vec<CallFile> {
 /// pass that failed for a CONTENT reason (the reply parsed but held nothing usable) is the case:
 /// its replies are marked rejected. A scan pass names the files it did not review, so only the
 /// calls over those files are set aside; every other stage is set aside as a whole for the repo,
-/// with the failed part named as the reason. The fix and detail stages are NOT set aside here:
-/// each of their replies was marked at the point of rejection ([`reject_reply`]), with its
-/// reason, and a reply with an accepted entry in it stays good.
+/// with the failed part named as the reason. The fix and detail stages, and the clone judge, are
+/// NOT set aside here: each of their replies was marked at the point of rejection
+/// ([`reject_reply`]), with its reason, and a reply with an accepted entry in it stays good.
 pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) {
     let rejected: Vec<&FinishFailure> = failures
         .iter()
@@ -1298,7 +1424,12 @@ pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) 
             continue;
         }
         let hit = rejected.iter().find(|f| {
-            PartKind::of_pass_name(&f.pass) == file.kind
+            // A stage that records each rejected reply itself keeps the replies that parsed, and
+            // its calls are never set aside by another stage's failure. (A file written before
+            // owners were recorded has none and keeps the blanket set-aside.)
+            !(file.kind == PartKind::Other
+                && (f.per_reply_rejections || file.owner == Some(CallOwner::CloneJudge)))
+                && PartKind::of_pass_name(&f.pass) == file.kind
                 && (f.repo.is_empty() || file.repo.is_empty() || f.repo == file.repo)
                 && (file.kind != PartKind::Scan
                     || f.files.is_empty()

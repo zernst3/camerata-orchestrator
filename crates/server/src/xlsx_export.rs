@@ -83,9 +83,9 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
     category_for, category_for_finding, citation_for_finding, classify, client_headline_and_detail,
-    effective_bucket, effort_hours_bounds, finding_key, hedge_confidence, is_hedged,
-    normalize_severity, provenance_tier_rank, resolve_citation, resolve_effort,
-    sanitize_report_findings, title_for_finding, Disposition, ReportOptions, ReviewedReport,
+    effort_hours_bounds, finding_key, hedge_confidence, is_hedged, normalize_severity,
+    provenance_tier_rank, resolve_citation, resolve_effort, sanitize_report_findings,
+    title_for_finding, Disposition, ReportOptions, ReviewedReport,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -176,6 +176,11 @@ pub struct FindingRow {
     /// kept as demotions of this row. A Fix lists them as rules of its own.
     #[serde(skip)]
     also_match_ids: Vec<String>,
+    /// The rule ids of the rules folded into this row under a rule of their own whose standard fix
+    /// text the row's `fix` carries (#586). The release check reads this, not the prose. Absent
+    /// when the row has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fix_merged_rules: Vec<String>,
     status: String,
     snippet: String,
     detail: String,
@@ -202,7 +207,7 @@ pub struct FindingRow {
     /// `fix` with its code-span backticks intact (not in the wire contract). Skipped.
     #[serde(skip)]
     fix_raw: Option<String>,
-    /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row`]), with this
+    /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row_chosen`]), with this
     /// finding's placeholder tokens already substituted — SECONDARY context now that
     /// `fix_specific` above is the primary fix. `None` — rendered as a blank cell / JSON
     /// `null`, never fabricated and never `directive` — when the rule's default option has no
@@ -574,11 +579,12 @@ fn partition_rows_for(
         // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
         // R1-3: kind-aware, so a deviation row falls back to the rule's default option's
         // remediation here exactly as in the PDF data.
-        let fix_raw = crate::report_export::resolve_fix_for_row(
+        let fix_raw = crate::report_export::resolve_fix_for_row_chosen(
             &f.rule_id,
             corpus,
             f,
             chosen_option_for_rule,
+            chosen_options,
         )
         .map(|s| crate::report_export::fix_text::prepare(&s));
         let fix = fix_raw
@@ -610,13 +616,14 @@ fn partition_rows_for(
             // gate here to hold it out of an action tier). C5-8 extends this same shared call
             // with a "has a fix" check, so `chosen_option_for_rule` (already computed above for
             // `fix`/`headline`/`detail`) is threaded through here too.
-            let bucket = effective_bucket(
+            let bucket = crate::report_export::effective_bucket_with(
                 f,
                 disposition,
                 &severity,
                 corpus,
                 report.test_file_count,
                 chosen_option_for_rule,
+                chosen_options,
             );
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
             // A merged row exports with a pointer to the row it was merged into.
@@ -634,6 +641,7 @@ fn partition_rows_for(
                 corpus,
                 report.test_file_count,
                 chosen_option_for_rule,
+                chosen_options,
                 bucket,
             )
             .map(str::to_string);
@@ -677,6 +685,15 @@ fn partition_rows_for(
             also_legacy: crate::report_export::also_matches_titles(&f.also_matches, corpus)
                 .join(", "),
             also_match_ids: f.also_matches.clone(),
+            fix_merged_rules: crate::report_export::merged_rule_fix_parts(
+                &f.rule_id,
+                corpus,
+                f,
+                chosen_options,
+            )
+            .into_iter()
+            .map(|m| m.rule_id)
+            .collect(),
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
@@ -6028,6 +6045,51 @@ mod tests {
             shared.contains("src/orders.rs:12"),
             "the workbook names the collapsed source's own line"
         );
+    }
+
+    /// #586 check 1: a finding the collapse folded into a row of another rule is still listed in
+    /// the workbook and in the data the PDF is drawn from, under its OWN rule id and location.
+    #[test]
+    fn a_row_merged_into_another_rule_is_listed_with_its_own_rule_and_location() {
+        let mut floor = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        floor.snippet = "let q = format!(\"SELECT {}\", id);".to_string();
+        let merged_rule = "camerata.security.sql-string-concat-python";
+        let mut tool = finding(merged_rule, "src/orders.rs", 12, "high");
+        tool.snippet = floor.snippet.clone();
+        tool.preview = true;
+        tool.preview_tool = Some("semgrep".to_string());
+        let collapsed = crate::review_tree::collapse_identical(
+            vec![floor, tool],
+            &crate::review_tree::ToolMap::builtin(),
+        );
+        assert_eq!(collapsed.rows.len(), 1);
+        assert_ne!(
+            collapsed.rows[0].rule_id, merged_rule,
+            "the survivor is the other rule"
+        );
+        let report = report_with(collapsed.rows, vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let reviewed = crate::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        );
+        let json = crate::report_export::build_report_json(&reviewed, None, &empty_opts());
+        let wire = serde_json::to_string(&json).unwrap();
+        assert!(
+            wire.contains(merged_rule),
+            "the PDF data names the merged rule: {wire}"
+        );
+        assert!(wire.contains("src/orders.rs"), "and its location");
+        let export = build_findings_export(&reviewed, None, &json, &HashMap::new());
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["flagged_by"][0]["rule_id"], merged_rule);
+        assert_eq!(row["flagged_by"][0]["line"], 12);
+        let xlsx = build_workbook(&reviewed, None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains(merged_rule),
+            "the workbook names the merged rule"
+        );
+        assert!(shared.contains("src/orders.rs:12"), "and its own line");
     }
 
     /// req_c6: a rule that FIRED and was merged away as a group member must never render

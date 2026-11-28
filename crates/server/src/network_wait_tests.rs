@@ -198,7 +198,21 @@ async fn the_journaled_run_seam_keeps_the_batch_path() {
     let _waits = InstantWaits::install();
     let state = tempfile::tempdir().unwrap();
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
-    let store = crate::run_store::RunStore::create(crate::run_store::NewRun {
+    let store = new_store();
+    let flaky = Arc::new(Flaky::default());
+    let base = BatchSeam::new(flaky);
+    let control = control();
+    let seam = run_model_seam(&base, Some(store.clone()), control.clone());
+    assert!(
+        seam.as_any().downcast_ref::<BatchSeam>().is_some(),
+        "journal, then wait: still a batch seam"
+    );
+    assert_eq!(control.run_id(), Some(store.run_id()));
+}
+
+/// A run folder in the state directory the caller set.
+fn new_store() -> Arc<crate::run_store::RunStore> {
+    crate::run_store::RunStore::create(crate::run_store::NewRun {
         project_key: "acme-project".to_string(),
         repos: Vec::new(),
         models: crate::run_store::ModelsRecord {
@@ -221,14 +235,45 @@ async fn the_journaled_run_seam_keeps_the_batch_path() {
         project_id: None,
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
     })
-    .expect("a run folder");
-    let flaky = Arc::new(Flaky::default());
-    let base = BatchSeam::new(flaky);
-    let control = control();
-    let seam = run_model_seam(&base, Some(store.clone()), control.clone());
-    assert!(
-        seam.as_any().downcast_ref::<BatchSeam>().is_some(),
-        "journal, then wait: still a batch seam"
-    );
-    assert_eq!(control.run_id(), Some(store.run_id()));
+    .expect("a run folder")
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_rerun_seam_never_waits_for_the_network() {
+    // A rerun (#588) answers only from the run's store; a miss is reported at once, and a
+    // failure the seam passes through is never waited out, with or without a store.
+    let waits = InstantWaits::install();
+    let state = tempfile::tempdir().unwrap();
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+    for store in [None, Some(new_store())] {
+        let flaky = Flaky {
+            down: usize::MAX,
+            ..Flaky::default()
+        };
+        let journaled = rerun_model_seam(&flaky, store.clone());
+        let seam: &dyn LlmPort = journaled.as_deref().unwrap_or(&flaky);
+        let e = crate::prompt_frame::with_seed(
+            Some([7u8; crate::prompt_frame::NONCE_BYTES]),
+            seam.complete(LlmRequest::new("a question the run never stored")),
+        )
+        .await
+        .expect_err("the network is down");
+        assert!(
+            waits.waits().is_empty(),
+            "a rerun never sleeps: {:?}",
+            waits.waits()
+        );
+        assert_eq!(
+            flaky.sends.load(Ordering::SeqCst),
+            1,
+            "sent once, never again"
+        );
+        assert_eq!(crate::failure::classify_error(&e), FailureClass::Transport);
+        assert_eq!(
+            journaled.is_some(),
+            store.is_some(),
+            "journaled when there is a store"
+        );
+    }
 }

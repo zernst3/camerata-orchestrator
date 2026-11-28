@@ -51,10 +51,10 @@ pub use archive::{
 pub use consistency::{
     client_readme_problems, compare_csv_to_json, count_reconciliation_problems, counts_problems,
     csv_formula_problems, dataset_parity_problems, dataset_set_problems, fix_archive_problems,
-    fix_report_problems, marking_problems, package_stem, parse_readme_provenance,
-    patterns_clean_cell_problems, patterns_section_problems, pdf_count_reconciliation_problems,
-    pdf_marking_problems, place_archive_problems, row_parity, verify_manifest,
-    verify_readme_provenance, ReadmeProvenance,
+    fix_report_problems, marking_problems, merged_rule_fix_problems, package_stem,
+    parse_readme_provenance, patterns_clean_cell_problems, patterns_section_problems,
+    pdf_count_reconciliation_problems, pdf_marking_problems, place_archive_problems, row_parity,
+    verify_manifest, verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -484,6 +484,7 @@ fn audit_zip_with_home(
     // One fix per row, and one row per place: the same check, so the README's list is unchanged.
     let mut fix_and_place = fix_archive_problems(&entries);
     fix_and_place.extend(place_archive_problems(&entries));
+    fix_and_place.extend(merged_rule_fix_problems(&entries));
     report.record(CheckId::FixParity, fix_and_place);
     report.record(
         CheckId::Content,
@@ -963,6 +964,9 @@ mod merged_site_tests;
 
 #[cfg(test)]
 mod fix_label_tests;
+
+#[cfg(test)]
+mod merged_fix_tests;
 
 #[cfg(test)]
 mod junk_content_tests;

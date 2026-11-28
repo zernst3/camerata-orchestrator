@@ -1207,6 +1207,14 @@ impl ScanReport {
     /// not inspected. Files left out as scope (vendored, generated, binary, over the size limit)
     /// are not failures and are not counted here.
     pub fn incomplete_reasons(&self) -> Vec<String> {
+        self.incomplete_reasons_over(|_| true)
+    }
+
+    /// [`Self::incomplete_reasons`], counting only the failed parts `counts` keeps.
+    fn incomplete_reasons_over(
+        &self,
+        counts: impl Fn(&crate::ai_audit::FailedPass) -> bool,
+    ) -> Vec<String> {
         use crate::ai_audit::FailureClass;
         let mut out: Vec<String> = Vec::new();
         if let Some(e) = &self.ai_error {
@@ -1230,7 +1238,11 @@ impl ScanReport {
             ));
         }
         // A disclosed limit of the scope (a tool not run by policy) is not a failed part.
-        let parts = || self.failed_passes.iter().filter(|f| !f.scope_note);
+        let parts = || {
+            self.failed_passes
+                .iter()
+                .filter(|f| !f.scope_note && counts(f))
+        };
         let did_not_run = parts()
             .filter(|f| matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
             .count();
@@ -1290,7 +1302,13 @@ impl ScanReport {
     /// named on its own although `incomplete_reasons` already counts it: the stage must never
     /// start after a stop, whatever a later change to that list does.
     pub fn cross_repo_stage_refusal(&self) -> Option<String> {
-        let reasons = self.incomplete_reasons();
+        // A pipeline integrity disclosure is the final checks' finding about the run's own
+        // bookkeeping, not missing work: every repository's findings are there, and a recheck on
+        // a newer build replaces it (#588). It does not hold back a stage that spans repos.
+        let reasons = self.incomplete_reasons_over(|f| {
+            !f.pass
+                .starts_with(crate::scan_ledger::INTEGRITY_PASS_PREFIX)
+        });
         if !reasons.is_empty() {
             return Some(reasons.join("; "));
         }
@@ -3990,6 +4008,8 @@ pub async fn audit_repos_with_llm_controlled(
         &report.findings,
         &report.discarded,
     );
+    #[cfg(any(test, feature = "test-support"))]
+    let lost_finder_rows = crate::test_defects::lost_finder_rows(lost_finder_rows);
     report.conventions = all_conventions;
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
@@ -4012,24 +4032,10 @@ pub async fn audit_repos_with_llm_controlled(
     // ("N rules could not be mechanically checked...") directly from the ledger instead of
     // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
-    if !lost_finder_rows.is_empty() {
-        all_failed_passes.push(crate::ai_audit::FailedPass {
-            repo: repo_label.clone(),
-            pass: "pipeline integrity (convention accounting)".to_string(),
-            reason: format!(
-                "{} finder row(s) counted for rules with options are in neither the final rows nor \
-                 the rows set aside (first: {} at {}:{})",
-                lost_finder_rows.len(),
-                lost_finder_rows[0].0,
-                lost_finder_rows[0].1,
-                lost_finder_rows[0].2,
-            ),
-            files_not_reviewed: 0,
-            class: crate::ai_audit::FailureClass::Content,
-            files: Vec::new(),
-            attempts: Vec::new(),
-            scope_note: false,
-        });
+    if let Some(failure) =
+        crate::scan_ledger::convention_accounting_failure(&repo_label, &lost_finder_rows)
+    {
+        all_failed_passes.push(failure);
     }
     for stage in pipeline_ledger.stages() {
         // A stage that ran over one repo is disclosed against that repo, not the whole project.

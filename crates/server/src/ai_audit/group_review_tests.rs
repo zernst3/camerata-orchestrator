@@ -3488,3 +3488,88 @@ async fn the_group_reviewer_does_not_start_on_an_incomplete_or_stopped_run() {
     assert!(ran.is_some());
     assert!(!llm.calls().is_empty());
 }
+
+#[tokio::test]
+async fn a_group_reviewer_that_does_not_start_still_leaves_the_tree_and_its_ledger_blocks() {
+    // The ledger file is saved before the report is sealed, and the seal builds the tree. The
+    // group reviewer always builds it first (deterministic, no model call), so the two agree;
+    // a reviewer that does not start must leave the report in the same shape (found by the
+    // recheck's ledger comparison, #588).
+    let controls = crate::cost_cap::RunControls::default();
+    let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
+    let mut report = report_of(&[(SQL, 3)]);
+    report.failed_passes.push(crate::ai_audit::FailedPass {
+        repo: "acme/app".to_string(),
+        pass: "clone-candidate judgment".to_string(),
+        reason: "the clone judge's reply could not be read".to_string(),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    });
+    report.tree = None;
+    let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
+    let ran = review_scan_report(
+        &mut report,
+        &llm,
+        &controls,
+        &rules,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(ran.is_none());
+    assert!(llm.calls().is_empty());
+    assert!(
+        report.ledger.fix_merge().is_some(),
+        "the tree's ledger blocks are recorded although the reviewer did not start"
+    );
+    assert!(report.tree.is_some());
+}
+
+#[tokio::test]
+async fn a_pipeline_integrity_disclosure_alone_does_not_hold_back_the_group_reviewer() {
+    // A pipeline integrity disclosure is the final bookkeeping check's finding about the run's
+    // own accounting (a recheck on a newer build replaces it, #588): every repository's work is
+    // there, so the stages that span repositories still run.
+    let controls = crate::cost_cap::RunControls::default();
+    let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
+    let mut report = report_of(&[(SQL, 3)]);
+    report.failed_passes.push(crate::ai_audit::FailedPass {
+        repo: "acme/app".to_string(),
+        pass: crate::scan_ledger::integrity_pass_name("convention accounting"),
+        reason: "the convention accounting lost a row".to_string(),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    });
+    assert!(
+        !report.incomplete_reasons().is_empty(),
+        "the run is still incomplete"
+    );
+    let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
+    let ran = review_scan_report(
+        &mut report,
+        &llm,
+        &controls,
+        &rules,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        ran.is_some(),
+        "the group reviewer was held back by a bookkeeping disclosure: {:?}",
+        report.ledger.runner_notes()
+    );
+    assert!(!llm.calls().is_empty());
+}

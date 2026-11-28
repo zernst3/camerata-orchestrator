@@ -573,3 +573,133 @@ async fn an_unrelated_row_at_the_same_place_does_not_mask_a_lost_finder_row() {
     let lost = block.check_finder_rows_kept(&extras.conventions, &kept, &[]);
     assert_eq!(lost.len(), 1, "the loss is not masked: {lost:?}");
 }
+
+/// #586: the scan's later collapse (`collapse-identical`, over the finder rows and the other
+/// tiers together) folds a finder row into another row at the same place and keeps it in the
+/// survivor's `flagged_by`. A finder row counted for a rule with options that was folded that way
+/// is merged, not lost: the convention check must account for it, and the merge count of the
+/// collapse must equal the number of finder rows that left the final rows.
+#[tokio::test]
+async fn a_finder_row_folded_into_another_row_by_the_collapse_is_accounted_for_as_merged() {
+    let (rows, _, _, failed, _, extras) = hearth(
+        json!({
+            "rule": PAR, "answer": "problems", "problems": [1, 2],
+            "options": [
+                {"id": "seq", "count": 4, "places": []},
+                {"id": "par", "count": 1, "places": []}
+            ]
+        }),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let finder: Vec<crate::onboard::Finding> = finder_rows(&rows).into_iter().cloned().collect();
+    assert!(finder.len() >= 3, "several places: {finder:?}");
+    // A row of an external tool at the places of the first two finder rows: it enforces the same
+    // native rule under its own id, and as a security row it outranks the finder row, so the
+    // finder row is the one folded into it (and the survivor is under another rule id).
+    let mut selectors: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut all: Vec<crate::onboard::Finding> = Vec::new();
+    for (i, f) in finder.iter().take(2).enumerate() {
+        let tool_rule = format!("SEC-ACME-TOOL-{i}");
+        selectors
+            .entry(f.rule_id.clone())
+            .or_default()
+            .push(tool_rule.to_ascii_lowercase());
+        let mut twin = f.clone();
+        twin.captures.clear();
+        twin.located = true;
+        twin.rule_id = tool_rule;
+        twin.preview_tool = Some("acme-linter".to_string());
+        all.push(twin);
+    }
+    all.extend(finder.iter().cloned());
+    let in_rows = all.len();
+    let collapse = crate::review_tree::collapse_identical(
+        all,
+        &crate::review_tree::ToolMap::from_selectors(Some(&selectors)),
+    );
+    let merged = collapse.collapsed.len();
+    assert!(merged >= 1, "anti-vacuity: the collapse folded rows");
+    assert_eq!(
+        collapse.rows.len() + merged,
+        in_rows,
+        "the stage reconciles"
+    );
+    let kept_finder = collapse
+        .rows
+        .iter()
+        .filter(|f| {
+            f.captures
+                .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+        })
+        .count();
+    assert_eq!(
+        finder.len() - kept_finder,
+        merged,
+        "every folded row was a finder row of the records"
+    );
+    let mut block =
+        crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &collapse.rows);
+    let lost = block.check_finder_rows_kept(&extras.conventions, &collapse.rows, &[]);
+    assert!(
+        lost.is_empty(),
+        "{merged} row(s) merged by the collapse must not read as lost: {lost:?}"
+    );
+    assert!(block.reconciles(), "{block:?}");
+}
+
+/// #586 review: only a FINAL row's `flagged_by` accounts for a folded finder row. A row folded into
+/// a survivor that is itself set aside is not accepted through the survivor's `flagged_by`.
+#[tokio::test]
+async fn a_finder_row_folded_into_a_set_aside_row_is_not_accounted_for_through_its_flagged_by() {
+    let (rows, _, _, failed, _, extras) = hearth(
+        json!({
+            "rule": PAR, "answer": "problems", "problems": [1, 2],
+            "options": [
+                {"id": "seq", "count": 4, "places": []},
+                {"id": "par", "count": 1, "places": []}
+            ]
+        }),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let finder: Vec<crate::onboard::Finding> = finder_rows(&rows).into_iter().cloned().collect();
+    let mut selectors: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut all: Vec<crate::onboard::Finding> = Vec::new();
+    let f = &finder[0];
+    selectors
+        .entry(f.rule_id.clone())
+        .or_default()
+        .push("sec-acme-tool-0".to_string());
+    let mut twin = f.clone();
+    twin.captures.clear();
+    twin.located = true;
+    twin.rule_id = "SEC-ACME-TOOL-0".to_string();
+    twin.preview_tool = Some("acme-linter".to_string());
+    all.push(twin);
+    all.extend(finder.iter().cloned());
+    let collapse = crate::review_tree::collapse_identical(
+        all,
+        &crate::review_tree::ToolMap::from_selectors(Some(&selectors)),
+    );
+    let (set_aside, kept): (Vec<_>, Vec<_>) = collapse
+        .rows
+        .into_iter()
+        .partition(|r| !r.flagged_by.is_empty());
+    assert_eq!(
+        set_aside.len(),
+        1,
+        "anti-vacuity: one survivor holds the fold"
+    );
+    let mut block = crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &kept);
+    let lost = block.check_finder_rows_kept(&extras.conventions, &kept, &set_aside);
+    assert_eq!(
+        lost.len(),
+        1,
+        "the folded row is not accounted for through a set-aside survivor: {lost:?}"
+    );
+}
