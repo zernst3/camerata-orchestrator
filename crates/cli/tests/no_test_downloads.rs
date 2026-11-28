@@ -172,4 +172,9 @@ fn the_rehearsal_runs_offline_on_fixture_tools() {
         text.contains("FakeTools"),
         "the rehearsal hands in a fixture tool source, so its previews run offline"
     );
+    assert!(
+        text.contains("the ruff preview ran on the fake ruff")
+            && text.contains("the eslint preview ran on the fake Node.js"),
+        "the rehearsal asserts its ruff and eslint previews ran on the fixture tools"
+    );
 }

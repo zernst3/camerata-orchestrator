@@ -1504,6 +1504,28 @@ async fn rehearse(scale: Scale, faults: Faults) {
     // ---- Attempt A: the 429 burst and the slow batch, then the credit runs out ----
     let a_began = Instant::now();
     let a = rig.start(&scale).await;
+    // The previews really ran, offline, on the fixture tools (#587): never turned into not-run
+    // notes for want of a tool.
+    {
+        use camerata_server::pinned_tools::fixtures::FakeTools;
+        use camerata_server::pinned_tools::Artifact;
+        let ruff = FakeTools::runs_of(&rig.tools.entry(Artifact::Ruff));
+        let eslint = FakeTools::recorded(&rig.tools.entry(Artifact::Node), "eslint-runs");
+        assert!(!ruff.is_empty(), "the ruff preview ran on the fake ruff");
+        assert!(
+            eslint.lines().count() > 0,
+            "the eslint preview ran on the fake Node.js"
+        );
+        assert!(
+            rig.tools
+                .source
+                .fetched()
+                .iter()
+                .all(|u| u.starts_with("https://fixture.invalid/")),
+            "only the fixture source was asked: {:?}",
+            rig.tools.source.fetched()
+        );
+    }
     eprintln!(
         "[rehearsal:{}] attempt A took {:.1}s: outage stop {}, incomplete {:?}",
         scale.name,
