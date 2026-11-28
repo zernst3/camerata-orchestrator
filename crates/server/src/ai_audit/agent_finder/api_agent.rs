@@ -449,10 +449,11 @@ impl ApiPieceAgent {
                         else {
                             unreachable!("matched above")
                         };
-                        // A call that timed out may still have been billed and nothing came back to
-                        // price it from: it counts once, at the request's cost ceiling. A failure
-                        // that never reached the model counts nothing.
-                        if e.to_ascii_lowercase().contains("timed out") {
+                        // A call whose reply timed out may still have been billed and nothing came
+                        // back to price it from: it counts once, at the request's cost ceiling. A
+                        // failure that never reached the model (a connect time-out, a refused or
+                        // dropped connection) counts nothing. By the error's kind, never its text.
+                        if reply_timeout {
                             self.count_timed_out_call(body, attempt_started.elapsed());
                         }
                         (

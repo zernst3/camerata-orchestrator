@@ -2391,8 +2391,11 @@ fn the_command_line_transport_does_not_serve_client_text_and_says_why() {
 
 // ─── a call that timed out may have been billed ──────────────────────────────────────────────
 
-fn network_timeout() -> Reply {
-    Err(AnthropicPostError::Network(
+/// A request that was sent and whose reply timed out: what the driver gives for a time-out past
+/// connecting (`post_anthropic_body`), the one kind that may have been billed. (A connect
+/// time-out is `Network` and never reached the model.)
+fn reply_timeout() -> Reply {
+    Err(AnthropicPostError::ReplyTimeout(
         "Anthropic API request failed: error sending request: operation timed out".to_string(),
     ))
 }
@@ -2409,7 +2412,7 @@ async fn spend_after(script: Vec<Reply>) -> (f64, Vec<Value>) {
 #[tokio::test]
 async fn a_timed_out_call_is_counted_once_at_the_request_ceiling_and_then_retried() {
     let (baseline, _) = spend_after(vec![text_reply("done")]).await;
-    let (with_timeout, bodies) = spend_after(vec![network_timeout(), text_reply("done")]).await;
+    let (with_timeout, bodies) = spend_after(vec![reply_timeout(), text_reply("done")]).await;
     assert_eq!(bodies.len(), 2, "the timeout is retried");
     let ceiling = crate::api_agent_driver::request_ceiling_usd_for_body(MODEL, &bodies[0])
         .expect("the finder model is priced");
@@ -2439,7 +2442,7 @@ async fn a_call_that_never_reached_the_model_counts_nothing() {
 #[tokio::test]
 async fn a_timed_out_call_carries_the_time_it_waited_into_the_stage_figures() {
     let wire = ScriptedWire::slow(
-        vec![network_timeout(), text_reply("done")],
+        vec![reply_timeout(), text_reply("done")],
         Duration::from_millis(40),
     );
     let meter = Arc::new(UsageMeter::default());
@@ -2962,4 +2965,43 @@ async fn a_network_drop_past_the_whole_wait_stops_the_run_at_once() {
         trigger.class,
         camerata_llm::failure::FailureClass::Transport
     );
+}
+
+#[tokio::test]
+async fn only_a_reply_time_out_is_counted_as_spend_a_connect_time_out_never_is() {
+    // A connect time-out never reached the model: nothing was billed, so nothing is metered.
+    // Read by the error's kind, not by "timed out" in its text.
+    let meter = Arc::new(UsageMeter::default());
+    let wire = ScriptedWire::new(
+        (0..(4 + NETWORK_WAIT_STEPS.len()))
+            .map(|_| {
+                Err(AnthropicPostError::Network(
+                    "connect: operation timed out".into(),
+                ))
+            })
+            .collect(),
+    );
+    let (agent, _) = metered(&wire, &meter);
+    let _ = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(
+        meter.snapshot().calls,
+        0,
+        "a connect time-out was metered as a billed call: {:?}",
+        meter.snapshot()
+    );
+
+    // A reply that timed out may have been billed: each counts once, at the request's ceiling.
+    let meter = Arc::new(UsageMeter::default());
+    let wire = ScriptedWire::new(
+        (0..4)
+            .map(|_| {
+                Err(AnthropicPostError::ReplyTimeout(
+                    "operation timed out".into(),
+                ))
+            })
+            .collect(),
+    );
+    let (agent, _) = metered(&wire, &meter);
+    let _ = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(meter.snapshot().calls, 4, "{:?}", meter.snapshot());
 }
