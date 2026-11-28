@@ -112,10 +112,18 @@ pub(super) enum Admission<'a> {
 impl UsageMeter {
     /// A meter for a run that executes under `controls`.
     pub fn with_controls(controls: crate::cost_cap::RunControls) -> Self {
-        Self {
+        let meter = Self {
             controls,
             ..Self::default()
+        };
+        // A run's outage stop ends every network wait and refuses every later send on the run's
+        // control (#582): a call that is still waiting must not send after the run stopped.
+        if let Some(control) = crate::operator_stop::current_run_control() {
+            meter
+                .health
+                .on_trip(Box::new(move || control.note_outage_stop()));
         }
+        meter
     }
 
     /// The batch runner's record of the prefixes it has warmed this run.

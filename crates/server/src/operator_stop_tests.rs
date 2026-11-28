@@ -320,3 +320,48 @@ async fn a_batch_accepted_as_the_run_stops_is_cancelled_too() {
     );
     assert!(control.live_batches().is_empty());
 }
+
+#[tokio::test]
+async fn a_meter_made_inside_the_run_links_its_outage_stop_to_the_run_control() {
+    let control = Arc::new(RunControl::new());
+    let meter = with_run_control(control.clone(), async {
+        crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::default())
+    })
+    .await;
+    assert!(!control.refuses_sends());
+    // The outage stop trips: every wait ends, no send leaves, nothing is cancelled.
+    meter.health().note_failure(
+        FailureClass::AuthOrBilling,
+        "Anthropic API HTTP 401: invalid x-api-key",
+    );
+    assert!(meter.outage_stopped());
+    assert!(
+        control.refuses_sends(),
+        "the stop reached the run's control"
+    );
+    assert!(control.network_wait().is_stopped());
+    assert!(
+        !control.is_stopped(),
+        "an outage stop is not the operator's stop"
+    );
+    let e = control.refusal();
+    assert_eq!(crate::failure::classify_error(&e), FailureClass::OutageStop);
+    assert!(e.to_string().contains("could not be reached"), "{e:#}");
+
+    // A meter made outside any run links to nothing.
+    let alone = crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::default());
+    alone
+        .health()
+        .note_failure(FailureClass::AuthOrBilling, "Anthropic API HTTP 401");
+    assert!(alone.outage_stopped());
+}
+
+#[test]
+fn a_hook_added_after_the_trip_runs_at_once() {
+    let health = crate::run_health::RunHealth::default();
+    health.note_failure(FailureClass::AuthOrBilling, "Anthropic API HTTP 401");
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r = ran.clone();
+    health.on_trip(Box::new(move || r.store(true, Ordering::SeqCst)));
+    assert!(ran.load(Ordering::SeqCst));
+}

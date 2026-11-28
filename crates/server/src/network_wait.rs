@@ -122,7 +122,7 @@ async fn complete_waiting(
     control: &RunControl,
     req: LlmRequest,
 ) -> anyhow::Result<LlmResponse> {
-    if control.is_stopped() {
+    if control.refuses_sends() {
         return Err(control.refusal());
     }
     control
@@ -137,7 +137,7 @@ async fn complete_streaming_waiting(
     req: LlmRequest,
     on_delta: &mut (dyn for<'b> FnMut(&'b str) + Send),
 ) -> anyhow::Result<LlmResponse> {
-    if control.is_stopped() {
+    if control.refuses_sends() {
         return Err(control.refusal());
     }
     let wait = control.network_wait();
@@ -259,7 +259,7 @@ impl BatchApi for WaitingBatchApi {
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
         // No batch is submitted once the run is stopped: it would run and bill with nobody to
         // read it.
-        if self.control.is_stopped() {
+        if self.control.refuses_sends() {
             return Err(self.control.refusal());
         }
         // A submit is waited out and sent again only while every failure provably never reached

@@ -1038,15 +1038,24 @@ pub async fn run_inspect_pipeline_controlled(
 ) -> Result<InspectOutcome, InspectError> {
     // Boxed: the pipeline is one very large future, and callers (a test thread, the command line)
     // hold this one on a small stack. The box keeps theirs a pointer.
-    Box::pin(run_inspect_pipeline_as(
+    // The pipeline is boxed before it is handed on, so only the box moves.
+    let pipeline = Box::pin(run_inspect_pipeline_as(
         args,
         has_api_key,
         creds,
         seams,
         false,
-        control,
+        control.clone(),
+    ));
+    let out = Box::pin(camerata_server::operator_stop::with_run_control(
+        control.clone(),
+        pipeline,
     ))
-    .await
+    .await;
+    // The run's folder is let go when the pipeline ends, whoever still holds the control, so a
+    // resume (even in this same process) can open it.
+    control.release_store();
+    out
 }
 
 /// The one pipeline, as a new run or a resume (`rerun` false) or as a rerun of a saved run's

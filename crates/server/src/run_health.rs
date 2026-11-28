@@ -140,6 +140,8 @@ pub struct RunHealth {
     /// When a real model call last succeeded (wall clock, compared with the start of a call whose
     /// network wait ran out: [`Self::note_failed_error`]).
     last_success: Mutex<Option<std::time::Instant>>,
+    /// Called once, when the run first stops ([`Self::on_trip`]).
+    trip_hooks: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
     clock: Clock,
 }
 
@@ -171,6 +173,7 @@ impl RunHealth {
             trigger: Mutex::new(None),
             successes: std::sync::atomic::AtomicU64::new(0),
             last_success: Mutex::new(None),
+            trip_hooks: Mutex::new(Vec::new()),
             clock,
         }
     }
@@ -338,7 +341,38 @@ impl RunHealth {
                 at: crate::client_source::records::now_rfc3339(),
             });
         }
-        self.stopped.store(true, Ordering::SeqCst);
+        let first = !self.stopped.swap(true, Ordering::SeqCst);
+        if first {
+            let hooks = std::mem::take(
+                &mut *self
+                    .trip_hooks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            for hook in hooks {
+                hook();
+            }
+        }
+    }
+
+    /// Call `hook` when the run first stops (the outage stop, an auth or billing stop, a rate
+    /// limit that would not clear), or at once if it already has.
+    pub fn on_trip(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        if self.is_stopped() {
+            hook();
+            return;
+        }
+        let mut hooks = self
+            .trip_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Checked again under the lock: a trip between the check above and here took the list.
+        if self.is_stopped() {
+            drop(hooks);
+            hook();
+            return;
+        }
+        hooks.push(hook);
     }
 
     /// The clause that says why the run stopped ([`OutageTrigger::phrase`]); the plain

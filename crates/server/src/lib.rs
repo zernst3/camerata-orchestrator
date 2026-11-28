@@ -3398,32 +3398,37 @@ pub(crate) async fn start_audit_job(
                     return;
                 }
             };
-            let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
-                run_store.as_ref().map(|s| s.checkpoint_dir()),
-                crate::prompt_frame::with_seed(
-                    token_seed,
-                    crate::onboard::audit_repos_with_llm_controlled(
-                        model_seam,
-                        &sources,
-                        &selected,
-                        notes,
-                        model.as_deref(),
-                        calibration_model.as_deref(),
-                        mode,
-                        thorough,
-                        Some((&transcripts, SCAN_AUDIT_KEY)),
-                        Some((&body_jobs, &body_jid)),
-                        prior.as_ref(),
-                        deep,
-                        soc2_enabled,
-                        run_ai_review,
-                        run_deterministic,
-                        backend_resolution,
-                        corpus.as_ref(),
-                        &chosen_options,
-                        run_controls,
+            // The run's control is in scope, so the meters the audit makes link the run's outage
+            // stop to it: a call that is waiting out the network never sends after the stop.
+            let audit = Box::pin(crate::operator_stop::with_run_control(
+                run_control.clone(),
+                Box::pin(crate::checkpoint::with_run_checkpoints(
+                    run_store.as_ref().map(|s| s.checkpoint_dir()),
+                    crate::prompt_frame::with_seed(
+                        token_seed,
+                        crate::onboard::audit_repos_with_llm_controlled(
+                            model_seam,
+                            &sources,
+                            &selected,
+                            notes,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            mode,
+                            thorough,
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
+                            Some((&body_jobs, &body_jid)),
+                            prior.as_ref(),
+                            deep,
+                            soc2_enabled,
+                            run_ai_review,
+                            run_deterministic,
+                            backend_resolution,
+                            corpus.as_ref(),
+                            &chosen_options,
+                            run_controls,
+                        ),
                     ),
-                ),
+                )),
             ));
             let (mut report, mut manifest) =
                 crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
@@ -3576,34 +3581,37 @@ pub(crate) async fn start_audit_job(
                     .collect();
                 // With the run's own delimiter seed in scope, like the audit above, so a resumed
                 // run asks the group reviewer the same questions and its stored replies match.
-                crate::checkpoint::with_run_checkpoints(
-                    run_store.as_ref().map(|s| s.checkpoint_dir()),
-                    crate::prompt_frame::with_seed(token_seed, async {
-                        crate::ai_audit::group_review::review_scan_report(
-                            &mut report,
-                            model_seam,
-                            &review_controls,
-                            &rules,
-                            llm_backend == crate::llm::Backend::Cli,
-                            mode == crate::ai_audit::ScanMode::Batch,
-                            Some((&body_jobs, &body_jid)),
-                            Some((&transcripts, SCAN_AUDIT_KEY)),
-                            corpus.as_ref(),
-                        )
-                        .await;
-                        // The possible-duplicate check reads the Fix ids the group reviewer
-                        // just made; a failure of it is a note, never a failed part.
-                        crate::possible_duplicate::check::check_possible_duplicates(
-                            &mut report,
-                            model_seam,
-                            &review_controls,
-                            llm_backend == crate::llm::Backend::Cli,
-                            mode == crate::ai_audit::ScanMode::Batch,
-                            Some((&body_jobs, &body_jid)),
-                            Some((&transcripts, SCAN_AUDIT_KEY)),
-                        )
-                        .await;
-                    }),
+                crate::operator_stop::with_run_control(
+                    run_control.clone(),
+                    Box::pin(crate::checkpoint::with_run_checkpoints(
+                        run_store.as_ref().map(|s| s.checkpoint_dir()),
+                        crate::prompt_frame::with_seed(token_seed, async {
+                            crate::ai_audit::group_review::review_scan_report(
+                                &mut report,
+                                model_seam,
+                                &review_controls,
+                                &rules,
+                                llm_backend == crate::llm::Backend::Cli,
+                                mode == crate::ai_audit::ScanMode::Batch,
+                                Some((&body_jobs, &body_jid)),
+                                Some((&transcripts, SCAN_AUDIT_KEY)),
+                                corpus.as_ref(),
+                            )
+                            .await;
+                            // The possible-duplicate check reads the Fix ids the group reviewer
+                            // just made; a failure of it is a note, never a failed part.
+                            crate::possible_duplicate::check::check_possible_duplicates(
+                                &mut report,
+                                model_seam,
+                                &review_controls,
+                                llm_backend == crate::llm::Backend::Cli,
+                                mode == crate::ai_audit::ScanMode::Batch,
+                                Some((&body_jobs, &body_jid)),
+                                Some((&transcripts, SCAN_AUDIT_KEY)),
+                            )
+                            .await;
+                        }),
+                    )),
                 )
                 .await;
             }

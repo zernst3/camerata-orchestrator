@@ -38,6 +38,10 @@ pub const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 /// What a refused send says, once the run was stopped.
 pub const STOPPED_TEXT: &str = "the operator stopped this inspection before this part was sent";
 
+/// What a part refused after the run's outage stop says.
+pub const OUTAGE_TEXT: &str =
+    "the run stopped because the model provider could not be reached, so this part was not sent";
+
 /// A batch the stop asked the provider to cancel and could not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UncancelledBatch {
@@ -62,6 +66,8 @@ pub struct StopReport {
 pub struct RunControl {
     wait: NetworkWait,
     stopped: AtomicBool,
+    /// Set once the run's outage stop tripped ([`Self::note_outage_stop`]).
+    outage: AtomicBool,
     /// Live batches, by id, with the API that accepted each (to cancel it through).
     live: Mutex<Vec<(String, Arc<dyn BatchApi>)>>,
     /// The run's operator ledger file, once the run knows it: the stop's failure report goes
@@ -96,9 +102,27 @@ impl RunControl {
         self.stopped.load(Ordering::SeqCst)
     }
 
-    /// The error a send gets once the run is stopped: class `OutageStop`, never tried.
+    /// The run's outage stop tripped (the run's health record, #582): every network wait ends at
+    /// its next step and no further request is sent. Unlike [`Self::stop`], nothing is cancelled:
+    /// a batch the provider is running still finishes, and a resume reads it.
+    pub fn note_outage_stop(&self) {
+        self.outage.store(true, Ordering::SeqCst);
+        self.wait.stop();
+    }
+
+    /// True once the run sends nothing more: the operator stopped it, or its outage stop tripped.
+    pub fn refuses_sends(&self) -> bool {
+        self.is_stopped() || self.outage.load(Ordering::SeqCst)
+    }
+
+    /// The error a send gets once the run sends nothing more: class `OutageStop`, never tried.
     pub fn refusal(&self) -> anyhow::Error {
-        anyhow::Error::new(LlmCallFailure::new(FailureClass::OutageStop, STOPPED_TEXT))
+        let text = if self.is_stopped() {
+            STOPPED_TEXT
+        } else {
+            OUTAGE_TEXT
+        };
+        anyhow::Error::new(LlmCallFailure::new(FailureClass::OutageStop, text))
     }
 
     /// The ids of the batches the provider accepted and has not finished, sorted.
@@ -257,6 +281,27 @@ pub async fn run_until_stopped<T>(
         out = &mut run => Ended::Finished(out),
         () = &mut stop => Ended::Stopped(control.stop().await),
     }
+}
+
+tokio::task_local! {
+    /// The run control of the run this task belongs to ([`with_run_control`]).
+    static RUN_CONTROL: Arc<RunControl>;
+}
+
+/// Run `fut` as part of the run `control` controls: a meter made inside it links the run's
+/// outage stop to `control` ([`crate::ai_audit::UsageMeter::with_controls`]), so a call waiting
+/// out the network never sends after the run stopped. Scoped to this task, like the run's
+/// checkpoint folder and prompt seed.
+pub async fn with_run_control<F: std::future::Future>(
+    control: Arc<RunControl>,
+    fut: F,
+) -> F::Output {
+    RUN_CONTROL.scope(control, fut).await
+}
+
+/// The control of the run this task belongs to, inside [`with_run_control`].
+pub fn current_run_control() -> Option<Arc<RunControl>> {
+    RUN_CONTROL.try_with(Arc::clone).ok()
 }
 
 /// How often [`stop_on_cancel`] looks at the app's cancel flag.

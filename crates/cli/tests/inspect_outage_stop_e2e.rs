@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camerata::inspect_cmd::{
-    resume_inspect, run_inspect_pipeline_with, InspectArgs, InspectError, InspectOutcome, Seams,
-    EXIT_OUTAGE_STOPPED,
+    resume_inspect, run_inspect_pipeline_controlled, InspectArgs, InspectError, InspectOutcome,
+    Seams, EXIT_OUTAGE_STOPPED,
 };
 use camerata_server::cost_cap::FailureClass;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse, ProjectBackend};
@@ -73,6 +73,7 @@ impl Drop for ClockGuard {
 enum Stage {
     Finder,
     Fix,
+    CloneJudge,
     GroupReview,
     DuplicateCheck,
     Other,
@@ -88,6 +89,10 @@ fn stage_of(req: &LlmRequest) -> Stage {
         Stage::Fix
     } else if system.starts_with("You are a senior software architect performing a CONFORMANCE") {
         Stage::Finder
+    } else if system
+        .starts_with(camerata_server::onboard::clone_advisory::prompt::JUDGE_SYSTEM_PREFIX)
+    {
+        Stage::CloneJudge
     } else {
         Stage::Other
     }
@@ -108,6 +113,10 @@ struct Provider {
     started_at: Mutex<Option<u64>>,
     /// Every request: its stage and whether it was answered.
     calls: Mutex<Vec<(Stage, bool)>>,
+    /// The run's control, when the test hands it one: a request that arrives once it refuses
+    /// sends (an operator or outage stop) is counted in `after_stop`.
+    control: Mutex<Option<Arc<camerata_server::operator_stop::RunControl>>>,
+    after_stop: std::sync::atomic::AtomicUsize,
 }
 
 impl Provider {
@@ -117,7 +126,18 @@ impl Provider {
             fault,
             started_at: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
+            control: Mutex::new(None),
+            after_stop: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn watch(&self, control: &Arc<camerata_server::operator_stop::RunControl>) {
+        *self.control.lock().unwrap() = Some(control.clone());
+    }
+
+    /// Requests of any kind that reached the provider after the run's stop.
+    fn after_stop(&self) -> usize {
+        self.after_stop.load(Ordering::SeqCst)
     }
 
     fn calls_of(&self, stage: Stage) -> usize {
@@ -139,6 +159,15 @@ impl Provider {
     }
 
     fn respond(&self, req: &LlmRequest) -> anyhow::Result<LlmResponse> {
+        if self
+            .control
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|c| c.refuses_sends())
+        {
+            self.after_stop.fetch_add(1, Ordering::SeqCst);
+        }
         let stage = stage_of(req);
         let now = self.clock.secs.load(Ordering::SeqCst);
         let failure = match self.fault {
@@ -174,14 +203,18 @@ impl Provider {
             f.retryable = class == FailureClass::Transport;
             return Err(anyhow::Error::new(f));
         }
-        let text = camerata_server::ai_audit::group_review::stand_in_reply(
-            req.system.as_deref(),
-            &req.prompt,
-        )
-        .unwrap_or_else(|| {
+        let text = if stage == Stage::CloneJudge {
+            clone_verdicts(&req.prompt)
+        } else {
+            camerata_server::ai_audit::group_review::stand_in_reply(
+                req.system.as_deref(),
+                &req.prompt,
+            )
+            .unwrap_or_else(|| {
             r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string()
-        });
+            })
+        };
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
@@ -219,6 +252,22 @@ impl LlmPort for Provider {
     }
 }
 
+/// The clone judge's answer: "unsure" for every candidate the request frames (an undecided
+/// candidate is not reported, so the check completes and adds no row).
+fn clone_verdicts(prompt: &str) -> String {
+    let verdicts: Vec<serde_json::Value> = prompt
+        .lines()
+        .filter(|l| l.starts_with("<<<UNTRUSTED "))
+        .filter_map(|l| l.split("\"candidate ").nth(1))
+        .filter_map(|rest| rest.split('"').next())
+        .map(|id| serde_json::json!({"id": id, "verdict": "unsure", "concept": ""}))
+        .collect();
+    serde_json::json!({ "verdicts": verdicts }).to_string()
+}
+
+/// Two copies of one pricing decision: the clone check's candidates.
+const DECISION: &str = "pub fn FUNC(order: &Order, user: &User) -> f64 {\n    let base = order.subtotal * order.quantity as f64;\n    if user.is_premium {\n        let discount = base * RATE;\n        return base - discount;\n    }\n    if base > 100.0 && order.coupon.is_some() {\n        return base - 10.0;\n    }\n    base + order.shipping\n}\n";
+
 // ── The runs ─────────────────────────────────────────────────────────────────────────────────
 
 fn copy(src: &Path, dest: &Path) {
@@ -234,10 +283,22 @@ fn copy(src: &Path, dest: &Path) {
     }
 }
 
-fn stage_fixture(dest: &Path) {
+fn stage_fixture(dest: &Path, clones: bool) {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/tests/fixtures/e2e_report_repo");
     copy(&root, dest);
+    if clones {
+        for (file, func, rate) in [
+            ("src/pricing.rs", "apply_discount", "0.2"),
+            ("src/quote.rs", "quote_total", "0.15"),
+        ] {
+            std::fs::write(
+                dest.join(file),
+                DECISION.replace("FUNC", func).replace("RATE", rate),
+            )
+            .unwrap();
+        }
+    }
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["config", "user.email", "outage-e2e@camerata.local"],
@@ -265,13 +326,18 @@ struct Workspace {
 
 impl Workspace {
     fn new(repos: usize) -> Self {
+        Self::with(repos, false)
+    }
+
+    /// `repos` fixture repos, each holding two copies of one decision when `clones` is set.
+    fn with(repos: usize, clones: bool) -> Self {
         let state = tempfile::tempdir().unwrap();
         let state_env = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
         let dep_env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let repos = (0..repos)
             .map(|_| {
                 let r = tempfile::tempdir().unwrap();
-                stage_fixture(r.path());
+                stage_fixture(r.path(), clones);
                 r
             })
             .collect();
@@ -326,8 +392,41 @@ impl Workspace {
     }
 
     async fn run(&self, llm: &Provider, export: &Path) -> Result<InspectOutcome, InspectError> {
-        run_inspect_pipeline_with(
-            self.args(export),
+        self.run_args(llm, self.args(export)).await
+    }
+
+    /// A run with `args`, on a run control the provider watches: a request that reaches the
+    /// provider once the run stopped is counted ([`Provider::after_stop`]). An outage stop must
+    /// have reached the control by the end: the provider's count is only as good as that.
+    async fn run_args(
+        &self,
+        llm: &Provider,
+        args: InspectArgs,
+    ) -> Result<InspectOutcome, InspectError> {
+        let control = Arc::new(camerata_server::operator_stop::RunControl::new());
+        llm.watch(&control);
+        let out = self.run_on(llm, args, control.clone()).await;
+        let stopped = match &out {
+            Ok(o) => o.outage_stopped(),
+            Err(e) => e.exit_code() == EXIT_OUTAGE_STOPPED,
+        };
+        if stopped {
+            assert!(
+                control.refuses_sends(),
+                "the outage stop never reached the run's control: waiting calls could still send"
+            );
+        }
+        out
+    }
+
+    async fn run_on(
+        &self,
+        llm: &Provider,
+        args: InspectArgs,
+        control: Arc<camerata_server::operator_stop::RunControl>,
+    ) -> Result<InspectOutcome, InspectError> {
+        run_inspect_pipeline_controlled(
+            args,
             true,
             &camerata_server::credentials::MemoryCredentialStore::new(),
             Seams {
@@ -335,6 +434,7 @@ impl Workspace {
                 llm: Some(llm),
                 preflight_sink: &|_| {},
             },
+            control,
         )
         .await
     }
@@ -399,9 +499,10 @@ fn typst(test: &str) -> bool {
 
 /// An uninterrupted run over `repos` fixture repos: its findings and how many group review calls
 /// it made.
-async fn reference(repos: usize) -> (Vec<String>, usize) {
+/// (Over fixture repos that hold clone candidates when `clones` is set.)
+async fn reference_with(repos: usize, clones: bool) -> (Vec<String>, usize) {
     let clock = ClockGuard::install();
-    let ws = Workspace::new(repos);
+    let ws = Workspace::with(repos, clones);
     let llm = Provider::new(&clock, None);
     let export = ws.export("reference.zip");
     let outcome = ws
@@ -420,12 +521,16 @@ async fn reference(repos: usize) -> (Vec<String>, usize) {
 // ── A short drop costs minutes ───────────────────────────────────────────────────────────────
 
 async fn a_short_drop_waits_and_finishes_like_an_uninterrupted_run(from: Stage, test: &str) {
+    a_short_drop_case(from, test, false).await;
+}
+
+async fn a_short_drop_case(from: Stage, test: &str, clones: bool) {
     if !typst(test) {
         return;
     }
-    let (want, _) = reference(1).await;
+    let (want, _) = reference_with(1, clones).await;
     let clock = ClockGuard::install();
-    let ws = Workspace::new(1);
+    let ws = Workspace::with(1, clones);
     // Three minutes: far past the transport's own retries, well inside the network wait.
     let llm = Provider::new(&clock, Some(Fault::Drop { from, secs: 180 }));
     let export = ws.export("short.zip");
@@ -473,16 +578,31 @@ async fn a_short_drop_during_the_fix_stage_costs_minutes_not_the_run() {
     .await;
 }
 
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_short_drop_during_the_clone_check_costs_minutes_not_the_run() {
+    a_short_drop_case(
+        Stage::CloneJudge,
+        "a_short_drop_during_the_clone_check",
+        true,
+    )
+    .await;
+}
+
 // ── A long drop stops the run, and no later stage starts ─────────────────────────────────────
 
 async fn a_long_drop_stops_the_run_and_a_resume_reviews_every_repo_once(from: Stage, test: &str) {
+    a_long_drop_case(from, test, false).await;
+}
+
+async fn a_long_drop_case(from: Stage, test: &str, clones: bool) {
     if !typst(test) {
         return;
     }
-    let (want, want_group_calls) = reference(2).await;
+    let (want, want_group_calls) = reference_with(2, clones).await;
     assert!(want_group_calls > 0, "the reference run had a group review");
     let clock = ClockGuard::install();
-    let ws = Workspace::new(2);
+    let ws = Workspace::with(2, clones);
     // A day: past any wait.
     let down = Provider::new(
         &clock,
@@ -498,6 +618,12 @@ async fn a_long_drop_stops_the_run_and_a_resume_reviews_every_repo_once(from: St
         .expect("an internal export is written");
     assert!(outcome.outage_stopped(), "{:?}", outcome.incomplete_reasons);
     assert_eq!(outcome.exit_code(), EXIT_OUTAGE_STOPPED);
+    assert!(down.calls_of(from) > 0, "the drop reached the stage");
+    assert_eq!(
+        down.after_stop(),
+        0,
+        "a model request of some kind reached the provider after the outage stop"
+    );
     assert!(
         clock.now() >= camerata_server::network_wait::NETWORK_WAIT_TOTAL.as_secs(),
         "the run waited the whole network wait before stopping: {} s",
@@ -539,6 +665,17 @@ async fn a_long_drop_stops_the_run_and_a_resume_reviews_every_repo_once(from: St
         "the resume runs exactly one group review, over every repo"
     );
     assert_eq!(findings_of(&resumed_export), want);
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_long_drop_during_the_clone_check_stops_the_run_before_the_group_review() {
+    a_long_drop_case(
+        Stage::CloneJudge,
+        "a_long_drop_during_the_clone_check",
+        true,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -596,9 +733,42 @@ async fn after_an_outage_stop_the_internal_export_makes_no_model_call() {
     // came from a stage after the scan.
     assert_eq!(llm.calls_of(Stage::GroupReview), 0);
     assert_eq!(llm.calls_of(Stage::DuplicateCheck), 0);
+    assert_eq!(
+        llm.after_stop(),
+        0,
+        "a model request of some kind reached the provider after the outage stop"
+    );
     assert!(answered_before_stop > 0);
     assert!(export.exists());
     assert!(zip_entry(&export, "README.txt").contains("INTERNAL INCOMPLETE"));
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn after_an_outage_stop_a_client_export_is_refused() {
+    if !typst("after_an_outage_stop_a_client_export") {
+        return;
+    }
+    let clock = ClockGuard::install();
+    let ws = Workspace::new(1);
+    let llm = Provider::new(
+        &clock,
+        Some(Fault::Drop {
+            from: Stage::Fix,
+            secs: 24 * 3600,
+        }),
+    );
+    let export = ws.export("client.zip");
+    let mut args = ws.args(&export);
+    args.client_engagement = true;
+    let err = ws
+        .run_args(&llm, args)
+        .await
+        .expect_err("a client export of a stopped run is refused");
+    assert_eq!(err.exit_code(), EXIT_OUTAGE_STOPPED, "{err}");
+    assert!(!export.exists(), "no package was written for the client");
+    assert_eq!(llm.calls_of(Stage::GroupReview), 0);
+    assert_eq!(llm.after_stop(), 0);
 }
 
 // ── An auth stop never waits ─────────────────────────────────────────────────────────────────
