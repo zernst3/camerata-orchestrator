@@ -48,7 +48,7 @@ The sheets are in reading order and in four colour groups. Every table has its h
 
 **Start (dark tabs)**
 
-1. **Start here.** The title, who it was prepared for and by, a linked list of every sheet with its row count, the scorecard by area and the facts of the inspection.
+1. **Start here.** The title, who it was prepared for and by, a linked list of every sheet with its row count, the scorecard by area and the facts of the inspection, among them every model stage of the run and the model it ran on (the same list as the PDF's How this was done).
 2. **Glossary.** What every word and column in the workbook means.
 
 **What to fix (red tabs)**
@@ -92,7 +92,7 @@ The PDF is a summary. Its outline has fifteen sections, in this order:
 11. **Dependencies.** The most serious dependency advisories, at most five, with the rest on the Dependencies sheet.
 12. **Next steps.**
 13. **Where the details are.** Which sheet answers which question, using the exact tab names.
-14. **How this was done and its limits.** The method and what it cannot show.
+14. **How this was done and its limits.** The method and what it cannot show, with every model stage the run used and the model each ran on, read from the run's own record.
 15. **Disclaimer.** The report is an assessment and not a certification, warranty or guarantee.
 
 A report that no human reviewer has signed off carries a draft banner on every page.

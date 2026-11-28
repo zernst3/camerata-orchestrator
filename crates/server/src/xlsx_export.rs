@@ -2562,6 +2562,7 @@ pub fn build_workbook_with_counts(
         }
     }
     let fmts = Formats::new();
+    let model_stages = crate::report_export::model_stages(report);
 
     sheets::write_start_here(
         &mut wb,
@@ -2578,6 +2579,7 @@ pub fn build_workbook_with_counts(
                 report_counts.rows.not_checked,
                 multi_repo,
             ),
+            model_stages: &model_stages,
             possible_false_positives: opts.internal.then(|| possible_false_positive_counts(&rows)),
             possible_duplicates: opts.internal.then(|| possible_duplicate_counts(&rows)),
         },

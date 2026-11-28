@@ -772,3 +772,30 @@ async fn a_duplicate_check_batch_submitted_before_a_stop_is_fetched_by_a_real_ti
     );
     assert!(hinted(&r, "src/c.rs"), "its answers were applied");
 }
+
+/// #584: a run saved before the client report's model stage record existed, whose duplicate check
+/// a newer build runs: the report names the check's model instead of "model not recorded", and
+/// the run's other stages stay as the older run's.
+#[tokio::test]
+async fn the_duplicate_check_of_an_older_run_names_its_model_in_the_client_report() {
+    let mut r = report();
+    r.provenance.audit_model = Some("acme-old-scan-model".to_string());
+    assert!(r.ledger.model_stages().is_none(), "the older format");
+    let llm = Script::new(c_same_d_different);
+    let mut controls = RunControls::default();
+    controls.review.dup_check_model = "acme-dup-model".to_string();
+    check_possible_duplicates(&mut r, &llm, &controls, false, false, None, None).await;
+    let record = r.ledger.model_stages().expect("the check is recorded");
+    assert!(record.partial);
+    let listed = crate::report_export::model_stages(&r);
+    let lines: Vec<&str> = listed.stages.iter().map(|s| s.line.as_str()).collect();
+    assert!(
+        lines.contains(&"Duplicate check: acme-dup-model, live."),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"Finder: acme-old-scan-model."), "{lines:?}");
+    assert_eq!(
+        listed.note.as_deref(),
+        Some(crate::report_export::model_stages::OLDER_RUN_NOTE)
+    );
+}

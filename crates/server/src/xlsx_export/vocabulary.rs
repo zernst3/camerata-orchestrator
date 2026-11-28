@@ -481,6 +481,9 @@ pub const P_FILES_SCANNED: &str = "Files scanned";
 pub const P_FILE_TYPES: &str = "File types inspected";
 pub const P_CODE_VOLUME: &str = "Code volume";
 pub const P_GENERATED: &str = "Generated";
+/// The Start here line over the model stages, one row per stage below it (#584). The PDF's
+/// "How this was done" prints the same heading.
+pub const P_MODELS_BY_STAGE: &str = "Inspection models by stage";
 pub const P_WHAT_WE_CHECKED: &str = "What we checked";
 /// Set only on an inspection finished by a recheck of its saved run: which build did what.
 pub const P_HOW_THIS_WAS_DONE: &str = "How this was done";

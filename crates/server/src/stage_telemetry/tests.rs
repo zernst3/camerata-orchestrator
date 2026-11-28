@@ -558,3 +558,34 @@ fn the_table_shows_the_cache_hit_share_column() {
         .unwrap_or_else(|| panic!("no total row in:\n{table}"));
     assert!(total_row.trim_end().ends_with("44.4%"), "{total_row}");
 }
+
+/// #584: each call is counted as batch (a Message Batches row) or live, and the counts survive a
+/// save. A record written before the field existed loads with none.
+#[test]
+fn each_stage_counts_its_calls_by_mode() {
+    let meter = StageMeter::default();
+    let mut batch = resp(10, 1, 0, 0, None);
+    batch.backend = "api/batch".to_string();
+    meter.record(Stage::ScanPass, &batch);
+    meter.record(Stage::ScanPass, &batch);
+    meter.record(Stage::ScanPass, &resp(10, 1, 0, 0, None));
+    let mut cli = resp(10, 1, 0, 0, None);
+    cli.backend = "cli".to_string();
+    meter.record(Stage::Calibration, &cli);
+    let t = meter.snapshot(0);
+    let saved = serde_json::to_value(&t).unwrap();
+    assert_eq!(saved["stages"][0]["usage"]["modes"]["batch"], 2);
+    assert_eq!(saved["stages"][0]["usage"]["modes"]["live"], 1);
+    assert_eq!(saved["stages"][1]["usage"]["modes"]["live"], 1);
+    assert_eq!(saved["stages"][1]["usage"]["modes"].get("batch"), None);
+    let total = serde_json::to_value(t.total()).unwrap();
+    assert_eq!(total["modes"]["live"], 2, "the total sums the modes");
+
+    let mut older = saved;
+    older["stages"][0]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("modes");
+    let back: StageTelemetry = serde_json::from_value(older).unwrap();
+    assert!(back.stages[0].usage.modes.is_empty());
+}

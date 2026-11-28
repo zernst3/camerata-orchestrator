@@ -120,6 +120,11 @@ pub struct StageUsage {
     /// written before this existed.
     #[serde(default)]
     pub models: BTreeMap<String, u64>,
+    /// Calls per mode: `batch` for a Message Batches row (backend `api/batch`), `live` for every
+    /// other call. Sums to `calls`. Empty for a record written before this existed, which is how
+    /// the client report tells "mode not recorded" from a stage that ran live.
+    #[serde(default)]
+    pub modes: BTreeMap<String, u64>,
     /// Sum of the calls' `elapsed_ms`: the time the stage's calls were in flight, added up. With
     /// calls running in parallel this exceeds the stage's wall-clock span (see
     /// `first_call_unix_ms` / `last_call_unix_ms`). A call with no timing (a record replayed from
@@ -170,12 +175,41 @@ pub fn now_unix_ms() -> u64 {
 /// backend reports it (the API does), else the requested id marked `(requested)` (the CLI
 /// backend echoes the id it was asked for and never says what served the call).
 fn model_key(r: &LlmResponse) -> String {
-    if r.backend == "cli" {
-        format!("{} (requested)", r.model)
+    model_key_of(&r.model, &r.backend)
+}
+
+/// [`model_key`] for a call known by its model id and backend name: the one naming every record of
+/// a call's model uses, so a call counted outside [`StageMeter`] (a recheck's re-asked part) is
+/// named as the meter names it.
+pub fn model_key_of(model: &str, backend: &str) -> String {
+    if backend == "cli" {
+        format!("{model} (requested)")
     } else {
-        r.model.clone()
+        model.to_string()
     }
 }
+
+/// The key a call is counted under in [`StageUsage::modes`]: `batch` for a Message Batches row,
+/// `live` for every other call.
+fn mode_key(r: &LlmResponse) -> &'static str {
+    mode_key_of(&r.backend)
+}
+
+/// [`mode_key`] for a call known by its backend name.
+pub fn mode_key_of(backend: &str) -> &'static str {
+    if backend == BATCH_BACKEND {
+        MODE_BATCH
+    } else {
+        MODE_LIVE
+    }
+}
+
+/// The backend name a Message Batches row carries (`camerata_llm`'s batch parser).
+const BATCH_BACKEND: &str = "api/batch";
+/// [`StageUsage::modes`] key of a Message Batches call.
+pub const MODE_BATCH: &str = "batch";
+/// [`StageUsage::modes`] key of every other call.
+pub const MODE_LIVE: &str = "live";
 
 impl StageUsage {
     /// The share of billed input tokens that were cache reads: `cache_read_input_tokens /
@@ -210,6 +244,7 @@ impl StageUsage {
             self.cost_reported_calls += 1;
         }
         *self.models.entry(model_key(r)).or_default() += 1;
+        *self.modes.entry(mode_key(r).to_string()).or_default() += 1;
         if let Some(ms) = r.elapsed_ms {
             self.busy_ms = self.busy_ms.saturating_add(ms);
             let started = ended_unix_ms.saturating_sub(ms);
@@ -246,6 +281,9 @@ impl StageUsage {
         self.wasted_cost_usd += other.wasted_cost_usd;
         for (model, calls) in &other.models {
             *self.models.entry(model.clone()).or_default() += calls;
+        }
+        for (mode, calls) in &other.modes {
+            *self.modes.entry(mode.clone()).or_default() += calls;
         }
         self.busy_ms = self.busy_ms.saturating_add(other.busy_ms);
         self.wasted_busy_ms = self.wasted_busy_ms.saturating_add(other.wasted_busy_ms);

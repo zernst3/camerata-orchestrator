@@ -838,9 +838,24 @@ fn shipped_template_cover_table_omits_audit_and_calibration_model() {
     let cover_section = &template[cover_start..cover_end];
     assert!(!cover_section.contains("Audit model"));
     assert!(!cover_section.contains("Calibration model"));
+    // #584: the single "Inspection model:" line became the list of every model stage, still in
+    // Methodology (the engine version and the backend are in manifest.json).
+    let methodology = &template[template
+        .find("── 14. How this was done")
+        .expect("methodology section marker")..];
     assert!(
-        template.contains("Inspection model:"),
-        "the inspection model line must still render, in Methodology (the engine version and the backend are in manifest.json)"
+        methodology.contains(crate::xlsx_export::vocabulary::P_MODELS_BY_STAGE),
+        "the model stages heading must render in Methodology"
+    );
+    assert!(
+        methodology.contains("d.cover.model_stages.stages")
+            && methodology.contains("stage.line")
+            && methodology.contains("d.cover.model_stages.note"),
+        "Methodology must print every stage's line and the note under the list"
+    );
+    assert!(
+        !methodology.contains("d.cover.audit_model"),
+        "Methodology must not print the single main model any more"
     );
 }
 

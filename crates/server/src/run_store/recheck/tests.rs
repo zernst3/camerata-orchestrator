@@ -47,6 +47,8 @@ struct Counting {
     calls: AtomicUsize,
     models: std::sync::Mutex<Vec<String>>,
     reply: Box<dyn Fn(&LlmRequest) -> String + Send + Sync>,
+    /// The backend name its replies carry (`stub` unless a test needs another).
+    backend: &'static str,
 }
 
 impl Counting {
@@ -59,6 +61,7 @@ impl Counting {
             calls: AtomicUsize::new(0),
             models: std::sync::Mutex::new(Vec::new()),
             reply: Box::new(reply),
+            backend: "stub",
         }
     }
 
@@ -78,7 +81,7 @@ impl LlmPort for Counting {
             elapsed_ms: None,
             text: (self.reply)(&req),
             model: req.model.clone(),
-            backend: "stub".to_string(),
+            backend: self.backend.to_string(),
             cost_usd: Some(0.001),
             input_tokens: Some(100),
             output_tokens: Some(10),
@@ -1180,4 +1183,139 @@ async fn the_flag_path_works_through_a_batch_seam() {
     .expect("the one call goes through the seam");
     assert_eq!(shim.0.calls(), 1);
     assert_eq!(clone_rows(&done.report).len(), 2);
+}
+
+// ── #584 review round 1: the re-asked clone check part in the client report's model list ──────
+
+/// Give the saved run's report and ledger file a model stage record, as a run saved by a build
+/// with the record has: the finder and the first build's two clone check calls.
+fn with_model_stage_record(saved: &Saved, judge_model: &str) {
+    use crate::stage_telemetry::{Stage, StageMeter};
+    let meter = StageMeter::default();
+    let call = |model: &str| LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
+        elapsed_ms: None,
+        text: String::new(),
+        model: model.to_string(),
+        backend: "api".to_string(),
+        cost_usd: Some(0.001),
+        input_tokens: Some(100),
+        output_tokens: Some(10),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        or_cache_discount: None,
+        truncated: false,
+    };
+    meter.record(Stage::Finder, &call("acme-finder-model"));
+    meter.record(Stage::CloneJudge, &call(judge_model));
+    meter.record(Stage::CloneJudge, &call(judge_model));
+    let record = crate::stage_models::RecordedStageModels::from_telemetry(&meter.snapshot(0));
+    let report_path = crate::run_store::runs_dir()
+        .join(&saved.run_id)
+        .join(REPORT_FILE);
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    report["ledger"]["model_stages"] = serde_json::to_value(&record).unwrap();
+    std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+    std::fs::write(
+        &saved.ledger_file,
+        serde_json::to_vec(&report["ledger"]).unwrap(),
+    )
+    .unwrap();
+}
+
+fn clone_check_line(report: &ScanReport) -> Option<String> {
+    crate::report_export::model_stages(report)
+        .stages
+        .into_iter()
+        .find(|s| s.stage == "clone_check")
+        .map(|s| s.line)
+}
+
+/// A run saved with the record: the re-asked call is added to the clone check, on the run's own
+/// model, live, and the client list names it.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_re_asked_clone_check_part_is_added_to_the_runs_model_stages() {
+    let saved = saved_run(UNREADABLE).await;
+    let run_model = read_record(&saved.run_id)
+        .unwrap()
+        .pin
+        .unwrap()
+        .clone_judge_model;
+    with_model_stage_record(&saved, &run_model);
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    let done = recheck(&saved, ReaskFlag::Allow { max_parts: 5 }, &llm)
+        .await
+        .expect("the recheck completes");
+    assert_eq!(llm.calls(), 1);
+    let record = done
+        .report
+        .ledger
+        .model_stages()
+        .expect("the record is kept");
+    let clone = record
+        .stage(crate::stage_telemetry::Stage::CloneJudge)
+        .expect("the clone check is recorded");
+    assert_eq!(clone.models.get(&run_model).copied(), Some(3), "{clone:?}");
+    assert_eq!(clone.modes.get("live").copied(), Some(3), "{clone:?}");
+    assert!(
+        record
+            .stage(crate::stage_telemetry::Stage::Finder)
+            .is_some(),
+        "the other stages are kept"
+    );
+    assert_eq!(
+        clone_check_line(&done.report),
+        Some(format!("Clone check: {run_model}, live."))
+    );
+}
+
+/// A run saved before the record existed: the re-asked part starts a partial record, so the
+/// clone check names the model it ran on this build and the rest stays the older run's.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_re_asked_clone_check_part_on_an_older_run_is_listed_with_its_model() {
+    let saved = saved_run(UNREADABLE).await;
+    let run_model = read_record(&saved.run_id)
+        .unwrap()
+        .pin
+        .unwrap()
+        .clone_judge_model;
+    let mut llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    llm.backend = "cli";
+    let done = recheck(&saved, ReaskFlag::Allow { max_parts: 5 }, &llm)
+        .await
+        .expect("the recheck completes");
+    let record = done
+        .report
+        .ledger
+        .model_stages()
+        .expect("the re-asked part is recorded");
+    assert!(record.partial, "the run predates the record");
+    let key = format!("{run_model} (requested)");
+    assert_eq!(
+        record
+            .stage(crate::stage_telemetry::Stage::CloneJudge)
+            .and_then(|s| s.models.get(&key).copied()),
+        Some(1)
+    );
+    assert_eq!(
+        clone_check_line(&done.report),
+        Some(format!("Clone check: {key}, live."))
+    );
+    // The operator telemetry names the call the same way.
+    let telemetry = done.report.ledger.stage_telemetry().expect("telemetry");
+    let judge = telemetry
+        .stages
+        .iter()
+        .find(|r| r.stage == crate::stage_telemetry::Stage::CloneJudge)
+        .unwrap();
+    assert_eq!(
+        judge.usage.models.get(&key).copied(),
+        Some(1),
+        "{:?}",
+        judge.usage.models
+    );
 }

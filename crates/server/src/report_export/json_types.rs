@@ -108,6 +108,10 @@ pub struct CoverJson {
     pub audited_refs: Vec<AuditedRefJson>,
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
+    /// Every model stage the run used and the model each ran on, from the run's own record
+    /// ([`super::model_stages()`]). The PDF's "How this was done" prints it, the workbook's
+    /// Start here prints the same list and `json/inspection.json`'s `provenance` carries it.
+    pub model_stages: super::ModelStagesJson,
     /// The model backend (`api` / `cli`) and provider that ran the inspection, e.g.
     /// `api (anthropic)`, from [`ReportOptions::model`]. `None` when the caller recorded none.
     pub model_backend: Option<String>,

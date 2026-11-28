@@ -793,9 +793,12 @@ pub fn run_integrity_checks(report: &mut ScanReport) {
 }
 
 /// Put what the asked calls cost on the run's usage and on the ledger's clone judge stage, so a
-/// call made on this build is never invisible to either.
+/// call made on this build is never invisible to either, and add the calls to the clone check of
+/// the run's model stage record (#584), so the client report names the model they ran on.
 fn add_spend(report: &mut ScanReport, spent: &[redo::SpentCall]) {
-    use crate::stage_telemetry::{Stage, StageRecord, StageTelemetry, StageUsage};
+    use crate::stage_telemetry::{
+        mode_key_of, model_key_of, Stage, StageRecord, StageTelemetry, StageUsage,
+    };
     if spent.is_empty() {
         return;
     }
@@ -826,7 +829,15 @@ fn add_spend(report: &mut ScanReport, spent: &[redo::SpentCall]) {
             }
             None => usage.cost_complete = false,
         }
-        *stage.models.entry(call.model.clone()).or_insert(0) += 1;
+        // Named as the stage meter names a call, so a CLI call carries `(requested)` here too.
+        *stage
+            .models
+            .entry(model_key_of(&call.model, &call.backend))
+            .or_insert(0) += 1;
+        *stage
+            .modes
+            .entry(mode_key_of(&call.backend).to_string())
+            .or_insert(0) += 1;
     }
     report.actual_usage = Some(usage);
     let mut telemetry: StageTelemetry =
@@ -845,16 +856,35 @@ fn add_spend(report: &mut ScanReport, spent: &[redo::SpentCall]) {
             u.cache_creation_input_tokens += stage.cache_creation_input_tokens;
             u.cost_usd += stage.cost_usd;
             u.cost_reported_calls += stage.cost_reported_calls;
-            for (m, n) in stage.models {
-                *u.models.entry(m).or_insert(0) += n;
+            for (m, n) in &stage.models {
+                *u.models.entry(m.clone()).or_insert(0) += n;
+            }
+            for (m, n) in &stage.modes {
+                *u.modes.entry(m.clone()).or_insert(0) += n;
             }
         }
         None => telemetry.stages.push(StageRecord {
             stage: Stage::CloneJudge,
-            usage: stage,
+            usage: stage.clone(),
         }),
     }
     report.ledger.record_stage_telemetry(telemetry);
+    // The client-facing record: ADD the calls (the first build's clone check calls stay counted).
+    // A run saved before the record existed starts a partial one.
+    let mut stages = report
+        .ledger
+        .model_stages()
+        .cloned()
+        .unwrap_or_else(crate::stage_models::RecordedStageModels::partial);
+    for call in spent {
+        stages.add_calls(
+            Stage::CloneJudge,
+            &model_key_of(&call.model, &call.backend),
+            mode_key_of(&call.backend),
+            1,
+        );
+    }
+    report.ledger.record_model_stages(stages);
 }
 
 #[cfg(test)]
