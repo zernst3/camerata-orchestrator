@@ -312,6 +312,9 @@ enum Row {
     Missing,
     /// Failed but billed: a model refusal.
     Refused,
+    /// Never ran, nothing billed: the batch was canceled or expired first (the Message Batches
+    /// result type stands in as the row's error).
+    NotRun(&'static str),
 }
 
 type RowScript = dyn Fn(usize, &str) -> Row + Send + Sync;
@@ -571,6 +574,7 @@ impl BatchApi for Api {
                         Some(row(Some(reply), None))
                     }
                     Row::Errored => Some(row(None, Some("overloaded"))),
+                    Row::NotRun(word) => Some(row(None, Some(word))),
                     Row::Missing => None,
                     Row::Refused => Some(BatchResultRow {
                         billed: Some(reply_for("")),
@@ -3328,4 +3332,34 @@ async fn a_failed_warm_call_does_not_block_the_prefix_for_the_next_submission() 
             ids(&["item-004", "item-005"])
         ]
     );
+}
+
+/// A row its batch never ran (canceled at the provider, or expired) is never sent again by the
+/// stage itself while the process lives: the run folder keeps it as a row to send on the resume,
+/// and a second send now would be billed once now and once more by that resume.
+#[tokio::test(start_paused = true)]
+async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_itself() {
+    for word in ["canceled", "expired"] {
+        let api = Api::new().rows(move |_, _| Row::NotRun(word));
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let c = ctx(&api.realtime, Some(&api));
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        assert_eq!(
+            api.submit_calls.load(Ordering::SeqCst),
+            1,
+            "{word}: the stage submitted rows that never ran again"
+        );
+        assert_eq!(
+            api.realtime.call_count(),
+            0,
+            "{word}: the stage sent rows that never ran again in real time"
+        );
+        assert_eq!(out.failed.len(), 2, "{word}");
+        for f in &out.failed {
+            assert!(
+                !f.class.is_retried_at_end(),
+                "{word}: the end-of-run second try would send it again: {f:?}"
+            );
+        }
+    }
 }

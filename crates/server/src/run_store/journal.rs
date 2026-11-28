@@ -976,10 +976,6 @@ struct StoredRow {
     billed: Option<StoredResponse>,
 }
 
-/// The error text of a batch row the provider never ran because its batch was cancelled: the
-/// Message Batches result type, which stands in when the row carries no message.
-const CANCELED_ROW: &str = "canceled";
-
 impl StoredRow {
     fn of(row: &BatchResultRow) -> Self {
         Self {
@@ -1032,15 +1028,17 @@ impl StoredRow {
     /// pay for it twice or duplicate a batch that may be running. What a row was billed stays in
     /// the stored spend ([`stored_spend`]).
     ///
-    /// One more row never ran: a row of a batch that was CANCELLED (the operator's stop, #583),
-    /// which the provider answers as `canceled`, nothing billed. The stop ended the attempt, so
-    /// the stage never sent it again; without this a resume would answer the item from the
-    /// cancelled batch for ever and the run could never complete.
+    /// One more kind of row never ran: a row of a batch that was CANCELED (the operator's stop,
+    /// #583, or a cancel at the provider) or that EXPIRED first, which the provider answers as
+    /// `canceled` or `expired`, nothing billed ([`camerata_llm::failure::is_unrun_batch_row`]).
+    /// The stage never sends such a row again while the run lives (that would be billed once then
+    /// and once more here); without this a resume would answer the item from that batch for ever
+    /// and the run could never complete.
     fn needs_resend(&self) -> bool {
         self.response.is_none()
             && self.billed.is_none()
             && self.error.as_deref().is_some_and(|e| {
-                e.trim() == CANCELED_ROW
+                camerata_llm::failure::is_unrun_batch_row(e)
                     || camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
             })
     }
@@ -1644,5 +1642,32 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
         usd,
         stored_usd,
         basis,
+    }
+}
+
+#[cfg(test)]
+mod unrun_row_tests {
+    use super::StoredRow;
+
+    fn row(error: &str) -> StoredRow {
+        StoredRow {
+            custom_id: "acme-1".to_string(),
+            response: None,
+            error: Some(error.to_string()),
+            billed: None,
+        }
+    }
+
+    #[test]
+    fn a_canceled_or_an_expired_row_is_sent_again_on_the_resume_and_nothing_else_is() {
+        assert!(row("canceled").needs_resend());
+        assert!(
+            row("expired").needs_resend(),
+            "an expired batch never ran the row"
+        );
+        assert!(row(" expired\n").needs_resend());
+        // The stage already dealt with any other failure in its attempt.
+        assert!(!row("overloaded_error: Overloaded").needs_resend());
+        assert!(!row("the row expired somewhere in its text").needs_resend());
     }
 }

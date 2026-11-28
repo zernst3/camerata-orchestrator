@@ -304,6 +304,13 @@ pub fn call_failure_of(e: &anyhow::Error) -> Option<&LlmCallFailure> {
     e.downcast_ref::<LlmCallFailure>()
 }
 
+/// Whether a Message Batches result row's error says its batch never ran the row: the batch was
+/// canceled or expired first (the API's result type stands in as the error), so nothing was
+/// billed. Such a row is sent again by a resume, never a second time while the run lives.
+pub fn is_unrun_batch_row(error: &str) -> bool {
+    matches!(error.trim(), "canceled" | "expired")
+}
+
 /// Whether the call that failed with `e` provably never reached the provider: every attempt it
 /// made failed before a connection was made (a typed trail whose every record is
 /// [`AttemptRecord::not_sent`]), or the error is a `reqwest` connect failure. A timeout after the

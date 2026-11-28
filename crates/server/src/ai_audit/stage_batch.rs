@@ -1529,6 +1529,29 @@ fn settle_rows<S: StageItems>(
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
                     report_progress(ctx, stage, book);
+                } else if camerata_llm::failure::is_unrun_batch_row(&error) {
+                    // The batch never ran this row (canceled or expired first), nothing billed.
+                    // The run folder keeps it as a row the resume sends; sending it again now,
+                    // in a batch or in real time, would be billed twice. It is a part that did
+                    // not run when the run was stopped, else a failed part with its reason.
+                    let stopped =
+                        cancel_requested(ctx) || ctx.meter.is_some_and(UsageMeter::outage_stopped);
+                    let class = if stopped {
+                        FailureClass::OutageStop
+                    } else {
+                        FailureClass::Content
+                    };
+                    book.fail(
+                        &work.id,
+                        class,
+                        &format!(
+                            "the batch was {} before this item ran; nothing was billed, and a \
+                             resume sends it",
+                            error.trim()
+                        ),
+                        None,
+                    );
+                    report_progress(ctx, stage, book);
                 } else if stop_run_on_billing_row(ctx.meter, &error) {
                     // The account or the credential was refused: waiting or sending again fixes
                     // neither. The run stopped now (run health), not a round later, and the item
