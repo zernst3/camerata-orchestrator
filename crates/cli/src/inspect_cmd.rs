@@ -2221,6 +2221,7 @@ pub async fn run_rerun_deterministic(
             resume: None,
             llm: None,
             preflight_sink: &|text| print!("{text}"),
+            tools: None,
         },
     )
     .await

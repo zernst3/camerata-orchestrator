@@ -110,6 +110,10 @@ pub async fn ensure_semgrep(env: &ToolEnv) -> Result<PathBuf, ProvisionError> {
         return Ok(bin);
     }
     let python = env.ensure(Artifact::Python).await?;
+    // pip would reach PyPI: offline, a missing semgrep is a refusal.
+    if env.source.offline() {
+        return Err(super::fetch::offline("semgrep", &env.tooling));
+    }
     tool_provisioning::refuse_real_tooling_in_test_process(&env.tooling, "semgrep")?;
     let _lock = tool_provisioning::acquire_provision_lock(
         &env.tooling,

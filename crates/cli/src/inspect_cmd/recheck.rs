@@ -40,6 +40,7 @@ pub async fn run_recheck_saved(
             resume: None,
             llm: None,
             preflight_sink: &|text| print!("{text}"),
+            tools: None,
         },
     )
     .await

@@ -83,6 +83,18 @@ pub enum ProvisionError {
     #[error("provisioning install failed for {tool}: {detail}")]
     InstallFailed { tool: &'static str, detail: String },
 
+    /// The tool is not installed and Camerata is offline ([`crate::pinned_tools::OFFLINE_ENV`]):
+    /// nothing was downloaded.
+    #[error(
+        "{tool} is not installed in {folder} and Camerata is offline ({env}=1), so nothing was \
+         downloaded"
+    )]
+    Offline {
+        tool: &'static str,
+        folder: String,
+        env: &'static str,
+    },
+
     /// An I/O error while creating directories, copying files, or probing.
     #[error("I/O error during provisioning: {0}")]
     Io(#[from] std::io::Error),
@@ -99,13 +111,24 @@ pub enum ProvisionError {
 
 // ─── root tooling dir ────────────────────────────────────────────────────────
 
-/// The root of the Camerata-managed tool environment:
-/// `<data_dir>/camerata/tooling/`.  Returns `None` when `dirs::data_dir()`
-/// can't be resolved (unusual; same condition under which the other stores
-/// fall back to in-memory).
+/// The root of the Camerata-managed tool environment: [`TOOLING_DIR_ENV`] when it is set, else
+/// `<data_dir>/camerata/tooling/`. Returns `None` when neither resolves (unusual; same condition
+/// under which the other stores fall back to in-memory).
 pub fn tooling_dir() -> Option<PathBuf> {
+    match std::env::var_os(TOOLING_DIR_ENV) {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => default_tooling_dir(),
+    }
+}
+
+/// The per-user tooling folder, ignoring [`TOOLING_DIR_ENV`]: the shared tree the test-process
+/// guard protects ([`refuse_real_tooling_in_test_process`]).
+pub fn default_tooling_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("camerata").join("tooling"))
 }
+
+/// The environment variable that points the tooling folder somewhere else (a test, a sandbox).
+pub const TOOLING_DIR_ENV: &str = "CAMERATA_TOOLING_DIR";
 
 // ─── shared-workspace protection ─────────────────────────────────────────────
 //
@@ -182,7 +205,7 @@ pub(crate) fn refuse_real_tooling_in_test_process(
     tool: &'static str,
 ) -> Result<(), ProvisionError> {
     let exe = std::env::current_exe().ok();
-    if test_process_may_not_write(tooling, tooling_dir().as_deref(), exe.as_deref()) {
+    if test_process_may_not_write(tooling, default_tooling_dir().as_deref(), exe.as_deref()) {
         return Err(ProvisionError::RealToolingProtected { tool });
     }
     Ok(())
@@ -669,6 +692,9 @@ pub(crate) async fn ensure_eslint_with(
         return Ok(bin);
     }
 
+    if npm.offline {
+        return Err(crate::pinned_tools::fetch::offline("eslint", tooling));
+    }
     refuse_real_tooling_in_test_process(tooling, "eslint")?;
 
     if !npm.answers_version().await {
@@ -697,6 +723,9 @@ pub struct NpmCommand {
     pub prefix: Vec<OsString>,
     /// The `PATH` npm and everything it starts get. `None` only for a test fake.
     pub path_env: Option<OsString>,
+    /// True when Camerata is offline: npm would reach its registry, so a missing eslint tree is a
+    /// refusal instead.
+    pub offline: bool,
 }
 
 impl NpmCommand {
@@ -706,6 +735,7 @@ impl NpmCommand {
             launcher: program.into(),
             prefix: Vec::new(),
             path_env: None,
+            offline: false,
         }
     }
 

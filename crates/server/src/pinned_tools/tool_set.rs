@@ -22,6 +22,24 @@ pub struct RequiredTools {
     pub dep_audit: bool,
 }
 
+impl RequiredTools {
+    /// This tool set without what the test-isolation variables switch off.
+    ///
+    /// `CAMERATA_DISABLE_DEP_AUDIT` and `CAMERATA_DISABLE_SEMGREP` already stop their passes at
+    /// scan time; the tool set honours them too, so a run that will not use osv-scanner or semgrep
+    /// never provisions them (and a test that sets them never reaches a download for them).
+    pub fn without_disabled(mut self) -> Self {
+        let set = |var: &str| std::env::var(var).is_ok_and(|v| !v.is_empty());
+        if set(crate::dep_audit::DISABLE_ENV_VAR) {
+            self.dep_audit = false;
+        }
+        if set(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR) {
+            self.scan_tools.remove(&ScanTool::Semgrep);
+        }
+        self
+    }
+}
+
 /// One thing Camerata installs (or, for clippy, one thing it does not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Component {
@@ -184,10 +202,10 @@ pub fn required_tool_set(
         dep_audit: dep_audit && !sources.is_empty(),
     };
     let Some(set) = corpus else {
-        return required;
+        return required.without_disabled();
     };
     if preview_rules.is_empty() {
-        return required;
+        return required.without_disabled();
     }
     let lookup = |id: &str| set.get_by_id(id);
     for (spec, dir) in sources {
@@ -207,7 +225,7 @@ pub fn required_tool_set(
         let (by_tool, _) = crate::scan_tools::group_by_tool(&for_repo, &lookup, Some(&languages));
         required.scan_tools.extend(by_tool.keys().copied());
     }
-    required
+    required.without_disabled()
 }
 
 /// Every component `required` needs, each with the tools it is for, in a stable order.

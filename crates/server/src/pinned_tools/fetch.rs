@@ -20,6 +20,30 @@ use crate::tool_provisioning::{self, ProvisionError};
 pub trait ArtifactSource: Send + Sync {
     /// The complete file at `url`. `Err` carries a reason an operator can act on.
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
+
+    /// True when this source downloads nothing ([`OfflineSource`]): a missing tool is then a
+    /// refusal before any install step runs (npm and pip would otherwise reach their registries).
+    fn offline(&self) -> bool {
+        false
+    }
+}
+
+/// The source when Camerata is offline ([`super::OFFLINE_ENV`]): it never downloads.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OfflineSource;
+
+#[async_trait::async_trait]
+impl ArtifactSource for OfflineSource {
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        Err(format!(
+            "Camerata is offline ({}=1), so {url} was not downloaded",
+            super::OFFLINE_ENV
+        ))
+    }
+
+    fn offline(&self) -> bool {
+        true
+    }
 }
 
 /// The product's source: HTTPS from the project's official release location only.
@@ -33,15 +57,29 @@ pub struct OfficialReleaseSource {
     /// on-demand first-run harness sets it, for a machine whose network re-signs TLS through a
     /// proxy; the product never does.
     extra_roots_pem: Option<Vec<u8>>,
+    /// Set only by [`OfficialReleaseSource::for_the_first_run_harness`]: the one test allowed to
+    /// download.
+    harness: bool,
 }
 
 impl OfficialReleaseSource {
-    /// The source with `pem` (one or more PEM certificates) also trusted.
-    pub fn with_extra_roots(pem: Vec<u8>) -> Self {
+    /// The source the on-demand first-run harness uses: the only one a cargo test binary may
+    /// download through. `pem` (one or more PEM certificates) is also trusted, for a network that
+    /// re-signs TLS through a proxy.
+    pub fn for_the_first_run_harness(pem: Option<Vec<u8>>) -> Self {
         Self {
-            extra_roots_pem: Some(pem),
+            extra_roots_pem: pem,
+            harness: true,
         }
     }
+}
+
+/// True when this process is a cargo test binary: it may not download (no test reaches the
+/// internet; a test hands in a fixture source).
+fn in_a_test_process() -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| crate::tool_provisioning::is_cargo_test_binary(&exe))
 }
 
 /// The official release location of every artifact Camerata downloads.
@@ -62,6 +100,12 @@ impl ArtifactSource for OfficialReleaseSource {
         if !is_official_url(url) {
             return Err(format!(
                 "refusing to download {url}: it is not an official release location"
+            ));
+        }
+        if !self.harness && in_a_test_process() {
+            return Err(format!(
+                "refusing to download {url} from a test process: a test serves its tools from a \
+                 fixture source"
             ));
         }
         // Both timeouts are bounds, not estimates: the largest artifact (Node) is about 50 MB,
@@ -194,6 +238,9 @@ pub async fn ensure_artifact(
             tool: artifact.name,
             platform: platform.label(),
         })?;
+    if source.offline() {
+        return Err(offline(artifact.name, tooling));
+    }
     tool_provisioning::refuse_real_tooling_in_test_process(tooling, artifact.name)?;
     let _lock = tool_provisioning::acquire_provision_lock(
         tooling,
@@ -232,6 +279,15 @@ pub async fn ensure_artifact(
     }
     published?;
     Ok(dir)
+}
+
+/// The refusal for `tool` missing from `tooling` while Camerata is offline.
+pub fn offline(tool: &'static str, tooling: &Path) -> ProvisionError {
+    ProvisionError::Offline {
+        tool,
+        folder: tooling.display().to_string(),
+        env: super::OFFLINE_ENV,
+    }
 }
 
 /// Unpack (or write) the verified bytes into `staging`, check the listed files, write the marker.

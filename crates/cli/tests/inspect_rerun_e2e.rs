@@ -373,6 +373,7 @@ async fn saved_run_full(accepted_fixes: bool, clones: bool) -> Saved {
                     resume: None,
                     llm: Some(&llm),
                     preflight_sink: &|_| {},
+                    tools: None,
                 },
             ),
         ))
@@ -435,6 +436,7 @@ async fn rerun(saved: &Saved) -> Rerun {
                 resume: None,
                 llm: Some(&llm),
                 preflight_sink: &|_| {},
+                tools: None,
             },
         ),
     ))
@@ -664,6 +666,7 @@ fn a_normal_resume_on_a_different_build_is_still_refused() {
                 resume: None,
                 llm: Some(&llm),
                 preflight_sink: &|_| {},
+                tools: None,
             },
         )
         .await
@@ -768,6 +771,7 @@ fn a_refused_rerun_then_a_resume_on_the_original_build_claims_no_rerun() {
                     resume: None,
                     llm: Some(&llm),
                     preflight_sink: &|_| {},
+                    tools: None,
                 },
             ),
         ))
@@ -856,6 +860,7 @@ async fn recheck(
             resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| {},
+            tools: None,
         },
     ))
     .await;

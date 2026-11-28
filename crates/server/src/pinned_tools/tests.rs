@@ -465,10 +465,8 @@ async fn real_first_run_provision() {
     let dir = tempfile::tempdir().expect("a temporary tooling folder");
     // A network that re-signs TLS through a proxy (a cloud sandbox) names its CA in
     // SSL_CERT_FILE; on a Mac on an ordinary network this is unset and changes nothing.
-    let source = match std::env::var_os("SSL_CERT_FILE").map(std::fs::read) {
-        Some(Ok(pem)) => OfficialReleaseSource::with_extra_roots(pem),
-        _ => OfficialReleaseSource::default(),
-    };
+    let pem = std::env::var_os("SSL_CERT_FILE").and_then(|f| std::fs::read(f).ok());
+    let source = OfficialReleaseSource::for_the_first_run_harness(pem);
     let env = ToolEnv::new(
         dir.path().join("tooling"),
         Platform::current(),
@@ -527,4 +525,77 @@ async fn real_first_run_provision() {
     if semgrep::semgrep_unavailable_reason(&env).is_none() {
         assert!(run(&semgrep_bin(&env.tooling), &[version]).contains(pins::SEMGREP_VERSION));
     }
+}
+
+// ── review round 1: no test path downloads (#587) ────────────────────────────────────────────
+
+#[test]
+#[serial_test::serial(process_env)]
+fn the_tooling_folder_can_be_pointed_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let _over =
+        camerata_test_env::EnvGuard::set(crate::tool_provisioning::TOOLING_DIR_ENV, dir.path());
+    assert_eq!(
+        crate::tool_provisioning::tooling_dir().as_deref(),
+        Some(dir.path())
+    );
+    let env = ToolEnv::product().expect("an environment");
+    assert_eq!(env.tooling, dir.path());
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn offline_a_missing_tool_is_a_clear_refusal_and_nothing_is_downloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let _over =
+        camerata_test_env::EnvGuard::set(crate::tool_provisioning::TOOLING_DIR_ENV, dir.path());
+    let _offline = camerata_test_env::EnvGuard::set(OFFLINE_ENV, "1");
+    let env = ToolEnv::product().expect("an environment");
+    let err = env.ensure_ruff().await.expect_err("refused offline");
+    assert!(
+        matches!(err, ProvisionError::Offline { tool: "ruff", .. }),
+        "{err:?}"
+    );
+    let text = err.to_string();
+    assert!(text.contains("CAMERATA_OFFLINE=1"), "{text}");
+    assert!(text.contains("nothing was downloaded"), "{text}");
+    let refusal = provision_tool_set(&env, &needs(&[ScanTool::Ruff], false), false)
+        .await
+        .expect_err("an internal run is refused too");
+    assert!(refusal.reason.contains("offline"), "{}", refusal.reason);
+}
+
+/// The fetcher that reaches the internet refuses outright in a cargo test binary, so no test,
+/// whatever it forgets to set, can download: it must hand in a fixture source.
+#[tokio::test]
+async fn a_test_process_cannot_reach_the_official_fetcher() {
+    let url = pins::pins(Artifact::Ruff).pins[0].url;
+    let err = OfficialReleaseSource::default()
+        .fetch(url)
+        .await
+        .expect_err("refused");
+    assert!(err.contains("test process"), "{err}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn the_disable_variables_take_their_tools_out_of_the_tool_set() {
+    let repo = tempfile::tempdir().unwrap();
+    let sources = vec![("acme/one".to_string(), repo.path().to_path_buf())];
+    let scope = crate::onboard::scope::ScanScope::none();
+    {
+        let _off = camerata_test_env::EnvGuard::set(crate::dep_audit::DISABLE_ENV_VAR, "1");
+        assert!(!required_tool_set(&sources, &[], None, &scope, true).dep_audit);
+    }
+    {
+        let _on = camerata_test_env::EnvGuard::remove(crate::dep_audit::DISABLE_ENV_VAR);
+        assert!(required_tool_set(&sources, &[], None, &scope, true).dep_audit);
+    }
+    let _semgrep_off =
+        camerata_test_env::EnvGuard::set(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+    let without = needs(&[ScanTool::Ruff, ScanTool::Semgrep], false).without_disabled();
+    assert_eq!(
+        without.scan_tools.into_iter().collect::<Vec<_>>(),
+        vec![ScanTool::Ruff]
+    );
 }

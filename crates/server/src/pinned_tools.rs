@@ -47,7 +47,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use fetch::{ArtifactSource, OfficialReleaseSource};
+pub use fetch::{ArtifactSource, OfficialReleaseSource, OfflineSource};
 pub use pins::Artifact;
 pub use platform::Platform;
 pub use semgrep::{ensure_semgrep, semgrep_bin, semgrep_is_installed, SEMGREP_REQUIREMENTS};
@@ -57,6 +57,15 @@ pub use tool_set::{
 };
 
 use crate::tool_provisioning::ProvisionError;
+
+/// The environment variable that makes Camerata offline: a tool that is not installed is a
+/// refusal, never a download. Every test that starts the `camerata` binary sets it.
+pub const OFFLINE_ENV: &str = "CAMERATA_OFFLINE";
+
+/// True when [`OFFLINE_ENV`] is set to anything but empty or `0`.
+pub fn offline_requested() -> bool {
+    std::env::var_os(OFFLINE_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
 
 /// The operating system's base folders a tool may find OS utilities in. Never a folder a
 /// package manager installs tools into (no `/usr/local/bin`, no `/opt/homebrew/bin`).
@@ -120,11 +129,12 @@ impl ToolEnv {
         let tooling = crate::tool_provisioning::tooling_dir().ok_or_else(|| {
             "could not resolve Camerata's data folder for the tooling folder".to_string()
         })?;
-        Ok(Self::new(
-            tooling,
-            Platform::current(),
-            Arc::new(OfficialReleaseSource::default()),
-        ))
+        let source: Arc<dyn ArtifactSource> = if offline_requested() {
+            Arc::new(fetch::OfflineSource)
+        } else {
+            Arc::new(OfficialReleaseSource::default())
+        };
+        Ok(Self::new(tooling, Platform::current(), source))
     }
 
     /// The platform, or the refusal for a machine Camerata does not provision for.
@@ -211,6 +221,7 @@ impl ToolEnv {
             launcher: node.node.clone().into_os_string(),
             prefix: vec![node.npm_cli.clone().into_os_string()],
             path_env: Some(self.child_path()),
+            offline: self.source.offline(),
         }
     }
 }
