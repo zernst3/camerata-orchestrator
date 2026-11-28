@@ -783,6 +783,14 @@ fn report_progress<Id: Clone + Ord>(ctx: &StageCtx<'_>, stage: Stage, book: &Boo
 
 // ── cancel ──────────────────────────────────────────────────────────────────────────────────────
 
+/// True once the run sends nothing more: the job was canceled, the run's outage stop tripped, or
+/// the run's control refuses sends (the operator's stop, #583).
+fn run_stopped(ctx: &StageCtx<'_>) -> bool {
+    cancel_requested(ctx)
+        || ctx.meter.is_some_and(UsageMeter::outage_stopped)
+        || crate::operator_stop::current_run_control().is_some_and(|c| c.refuses_sends())
+}
+
 /// True once the job this stage runs for has been cancelled. A run with no job is never cancelled.
 fn cancel_requested(ctx: &StageCtx<'_>) -> bool {
     ctx.job
@@ -1476,6 +1484,9 @@ impl<'a> Repricer<'a> {
 struct BatchOrigin<'a> {
     batch_id: &'a str,
     ttl: CacheTtl,
+    /// True for a batch an earlier process submitted (a resume reading it back), false for one
+    /// this process submitted.
+    earlier_process: bool,
 }
 
 /// Deal with every row of one fetched batch. `members` lists the batch's items as
@@ -1490,7 +1501,11 @@ fn settle_rows<S: StageItems>(
     members: Vec<(String, Work<S::Id>)>,
     origin: &BatchOrigin<'_>,
 ) -> Vec<Work<S::Id>> {
-    let BatchOrigin { batch_id, ttl } = *origin;
+    let BatchOrigin {
+        batch_id,
+        ttl,
+        earlier_process,
+    } = *origin;
     let mut by_id: HashMap<String, BatchResultRow> =
         rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
     let mut repricer = Repricer::new(ctx.model, ttl);
@@ -1528,6 +1543,29 @@ fn settle_rows<S: StageItems>(
                 }
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
+                    report_progress(ctx, stage, book);
+                } else if camerata_llm::failure::is_unrun_batch_row(&error) && !earlier_process {
+                    // The batch this process submitted never ran this row (canceled or expired
+                    // first, nothing billed). Only a resume sends it: the run folder keeps the
+                    // row, and a send now (in a batch, in real time or by a caller's later round)
+                    // would be billed once now and once more by that resume. The item is held
+                    // on the batch, so no round and no second try sends it. A resume that reads
+                    // such a batch back (`earlier_process`) sends the row once, as below.
+                    let class = if run_stopped(ctx) {
+                        FailureClass::OutageStop
+                    } else {
+                        FailureClass::Transport
+                    };
+                    book.fail(
+                        &work.id,
+                        class,
+                        &format!(
+                            "batch {batch_id} was {} before this item ran; nothing was billed, \
+                             and a resume sends it",
+                            error.trim()
+                        ),
+                        Some(batch_id.to_string()),
+                    );
                     report_progress(ctx, stage, book);
                 } else if stop_run_on_billing_row(ctx.meter, &error) {
                     // The account or the credential was refused: waiting or sending again fixes
@@ -1618,15 +1656,22 @@ fn projected_input_usd<Id>(ctx: &StageCtx<'_>, sub: &[Work<Id>]) -> Option<f64> 
     Some(total)
 }
 
-/// Clear the submission intent: the submit ended (its id is saved, or it failed or was cancelled
-/// and nothing was accepted).
-fn clear_submit_intent(ctx: &StageCtx<'_>) {
+/// Clear the submission intent `nonce`: the submit ended (its id is saved, or it failed or was
+/// cancelled and nothing was accepted). Any other intent on file stays: one whose submit may
+/// have been accepted with its reply lost is kept for the resume to disclose.
+fn clear_submit_intent(ctx: &StageCtx<'_>, nonce: &str) {
     if let Some(cp) = ctx.checkpoint {
-        if let Err(e) = cp.save_intents(&[]) {
+        let mut intents = cp.intents();
+        intents.retain(|i| i.nonce != nonce);
+        if let Err(e) = cp.save_intents(&intents) {
             checkpoint_trouble(ctx, "submit intent", &e);
         }
     }
 }
+
+/// The stand-in for the id of a batch whose submit may have been accepted while its reply was
+/// lost: the items it holds are not sent again (see [`FailedItem::live_batch`]).
+pub(crate) const UNCONFIRMED_BATCH: &str = "(id never returned: the submit's reply was lost)";
 
 /// Resume, between the halves: a submission intent no saved batch carries the nonce of is a
 /// batch that may have been accepted by the provider while its id was never saved (the process
@@ -1645,10 +1690,10 @@ fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
     for intent in intents.iter().filter(|i| !saved.contains(&i.nonce)) {
         let note = format!(
             "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the \
-             earlier process stopped after asking the provider to accept it and before saving \
-             its id, so it cannot be polled or cancelled from here, and what it was charged, \
-             if anything, is not in this ledger. Check the Anthropic console. The items of it \
-             that have no result were submitted again.",
+             earlier process stopped, or the provider's reply was lost, after asking the provider \
+             to accept it and before its id was saved, so it cannot be polled or cancelled from \
+             here, and what it was charged, if anything, is not in this ledger. Check the \
+             Anthropic console. The items of it that have no result were submitted again.",
             intent.items.len(),
             stage.label()
         );
@@ -1680,6 +1725,44 @@ fn batch_is_gone(e: &anyhow::Error) -> bool {
     }
     let text = format!("{e:#}");
     text.contains("HTTP 404") || text.contains("HTTP 410") || text.contains("not_found_error")
+}
+
+/// The rows of a resumed batch that answer no question this run asks (#582): never absorbed, but
+/// paid for. Each is metered at the batch price, so its cost is in the ledger and counts toward
+/// the spend limit, and is marked wasted, since nothing used it. A row that failed unbilled cost
+/// nothing and is skipped.
+fn meter_stale_rows(
+    stage: Stage,
+    ctx: &StageCtx<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    rows: Vec<BatchResultRow>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let n = rows.len();
+    let mut repricer = Repricer::new(ctx.model, ttl);
+    for row in rows {
+        let Some(mut resp) = row.response.or(row.billed) else {
+            continue;
+        };
+        repricer.apply(&mut resp);
+        if let Some(m) = ctx.meter {
+            m.record_stage(stage, &resp);
+            m.record_wasted(stage, &resp);
+        }
+    }
+    repricer.note(ctx.meter);
+    let note = format!(
+        "Batch {batch_id} held {n} item(s) this run no longer asks (their questions changed \
+         since the batch was submitted). Their replies were set aside unused; what they cost is \
+         counted in this ledger and toward the spend limit."
+    );
+    eprintln!("[camerata-server] {note}");
+    if let Some(m) = ctx.meter {
+        m.record_note(note);
+    }
 }
 
 /// Resume, second half: batches an earlier process submitted and did not settle are polled and
@@ -1728,6 +1811,15 @@ where
                 ))
             })
             .collect();
+        // The items of this batch that answer no question this run asks: the question changed
+        // since it was submitted (an item's key names its question), so a reply to it is never
+        // absorbed. It was still paid for, so it is metered when the batch is fetched (#582).
+        let stale: std::collections::HashSet<String> = record
+            .items
+            .iter()
+            .filter(|(_, key)| !by_key.contains_key(key.as_str()))
+            .map(|(cid, _)| cid.clone())
+            .collect();
         let ttl = ttl_from_name(&record.ttl);
         let rctx = round_ctx(stage, ctx, api);
         let progress = PollProgress {
@@ -1754,9 +1846,13 @@ where
         .await
         {
             Ok(rows) => {
+                let (stale_rows, rows): (Vec<BatchResultRow>, Vec<BatchResultRow>) =
+                    rows.into_iter().partition(|r| stale.contains(&r.custom_id));
+                meter_stale_rows(stage, ctx, &record.batch_id, ttl, stale_rows);
                 let origin = BatchOrigin {
                     batch_id: &record.batch_id,
                     ttl,
+                    earlier_process: true,
                 };
                 for work in settle_rows(stage, s, ctx, book, rows, members, &origin) {
                     out.insert(work.id.clone(), work);
@@ -2570,7 +2666,11 @@ where
                     .map(|(cid, w)| (cid.clone(), w.id.to_string()))
                     .collect(),
             };
-            if let Err(e) = cp.save_intents(&[intent]) {
+            // Added to what is on file: an intent kept from an earlier submit of this stage whose
+            // reply was lost must survive this one.
+            let mut intents = cp.intents();
+            intents.push(intent);
+            if let Err(e) = cp.save_intents(&intents) {
                 checkpoint_trouble(ctx, "submit intent", &e);
             }
         }
@@ -2622,13 +2722,54 @@ where
         let batch_id = match submitted {
             Ok(id) => id,
             Err(e) if e.is::<JobCancelled>() => {
-                clear_submit_intent(ctx);
+                clear_submit_intent(ctx, &nonce);
                 book.cancelled = true;
                 break;
             }
+            Err(e)
+                if classify_pass_error(&e) == FailureClass::Transport
+                    && !camerata_llm::failure::never_reached_provider(&e) =>
+            {
+                // The request may have reached the provider and been accepted, with only the
+                // reply lost (a time-out after sending, a dropped connection, a 5xx): the batch
+                // may be running and billed. Sending the items again could bill them twice, so
+                // they are held, never sent again here, and the intent stays on file with their
+                // custom ids: a resume discloses the possibly orphaned batch.
+                let why = disclosable_error(&format!("{e:#}"));
+                let note = format!(
+                    "A batch of {} item(s) of the {} stage may have been accepted by the provider \
+                     although its reply was lost ({why}); its items were not sent again, since a \
+                     second submission could bill them twice. Check the Anthropic console. \
+                     Custom ids: {}.",
+                    sub.len(),
+                    stage.label(),
+                    sub_cids.join(", ")
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                let reason = format!(
+                    "the batch submission may have been accepted by the provider although its \
+                     reply was lost ({why}); it was not sent again, so it cannot be billed twice"
+                );
+                let attempts = failure::attempts_of(&e);
+                for w in sub {
+                    book.note_attempts(&w.id, attempts.clone());
+                    book.fail(
+                        &w.id,
+                        FailureClass::Transport,
+                        &reason,
+                        Some(UNCONFIRMED_BATCH.to_string()),
+                    );
+                    report_progress(ctx, stage, book);
+                }
+                continue;
+            }
             Err(e) => {
-                // Nothing was accepted, so nothing can be running: safe to send again.
-                clear_submit_intent(ctx);
+                // Nothing was accepted (the request provably never reached the provider, or the
+                // provider refused it), so nothing can be running: safe to send again.
+                clear_submit_intent(ctx, &nonce);
                 let class = classify_pass_error(&e);
                 let attempts = failure::attempts_of(&e);
                 let reason = format!(
@@ -2672,7 +2813,7 @@ where
                 })
                 .collect(),
             settled: false,
-            nonce: Some(nonce),
+            nonce: Some(nonce.clone()),
         };
         let mut records = ctx
             .checkpoint
@@ -2682,7 +2823,7 @@ where
         if let Some(cp) = ctx.checkpoint {
             match cp.save_batches(&records) {
                 // The id is on file: the intent has done its job.
-                Ok(()) => clear_submit_intent(ctx),
+                Ok(()) => clear_submit_intent(ctx, &nonce),
                 Err(e) => checkpoint_trouble(ctx, "batch list", &e),
             }
         }
@@ -2729,6 +2870,7 @@ where
                 let origin = BatchOrigin {
                     batch_id: &batch_id,
                     ttl,
+                    earlier_process: false,
                 };
                 follow.extend(settle_rows(stage, s, ctx, book, rows, members, &origin));
                 record.settled = true;

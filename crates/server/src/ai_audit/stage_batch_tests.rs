@@ -312,6 +312,9 @@ enum Row {
     Missing,
     /// Failed but billed: a model refusal.
     Refused,
+    /// Never ran, nothing billed: the batch was canceled or expired first (the Message Batches
+    /// result type stands in as the row's error).
+    NotRun(&'static str),
 }
 
 type RowScript = dyn Fn(usize, &str) -> Row + Send + Sync;
@@ -344,6 +347,9 @@ struct Api {
     realtime_calls_at_submit: Mutex<Vec<usize>>,
     /// Batch rows report a read of the cached prefix.
     rows_read_cache: bool,
+    /// The submission with this index is accepted (the provider holds the batch) and its reply is
+    /// lost: the caller gets a time-out after sending.
+    lose_reply_of: Option<usize>,
 }
 
 impl Api {
@@ -366,7 +372,14 @@ impl Api {
             kill_after_accepting: false,
             realtime_calls_at_submit: Mutex::new(Vec::new()),
             rows_read_cache: false,
+            lose_reply_of: None,
         }
+    }
+
+    /// The `n`th submission is accepted and its reply lost on the way back.
+    fn losing_the_reply_of(mut self, n: usize) -> Self {
+        self.lose_reply_of = Some(n);
+        self
     }
 
     /// Every batch row reports reading the shared prefix from the cache.
@@ -504,6 +517,17 @@ impl BatchApi for Api {
         if self.kill_after_accepting {
             panic!("simulated kill: the process died after the provider accepted batch {id}");
         }
+        if self.lose_reply_of == Some(call) {
+            let mut f = LlmCallFailure::new(
+                FailureClass::Transport,
+                "Anthropic API request failed after 3 retries: operation timed out",
+            );
+            f.attempts = vec![camerata_llm::failure::AttemptRecord {
+                message: "operation timed out".to_string(),
+                ..Default::default()
+            }];
+            return Err(anyhow::Error::new(f));
+        }
         Ok(id)
     }
     async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
@@ -571,6 +595,7 @@ impl BatchApi for Api {
                         Some(row(Some(reply), None))
                     }
                     Row::Errored => Some(row(None, Some("overloaded"))),
+                    Row::NotRun(word) => Some(row(None, Some(word))),
                     Row::Missing => None,
                     Row::Refused => Some(BatchResultRow {
                         billed: Some(reply_for("")),
@@ -1127,6 +1152,65 @@ async fn resume_writes_usage_for_absorbed_items_so_the_ledger_is_never_zero() {
     assert_eq!(out.resumed.len(), 5);
     assert_eq!(stage.absorb_calls, 0);
     assert_eq!(meter.snapshot().calls, 5, "the usage is still written");
+}
+
+/// #582: a batch an earlier process submitted is fetched on resume, and the items of it this run
+/// no longer asks for (the questions changed, so no chunk key matches) are not absorbed. They were
+/// still paid for: every fetched row counts toward the ledger and the spend limit, matched or not.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_batch_whose_items_no_longer_match_is_metered_in_full_and_absorbs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3", "a4"];
+
+    // Process 1: one batch of four is accepted and its results cannot be fetched.
+    let api = Api::new().failing_fetch();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.failed.len(), 4);
+    let records = cp.batches();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].settled);
+
+    // Process 2, real time: every question changed. An item's key names its question (the group
+    // reviewer's key is the digest of its prompt), so here the stage asks under new keys: the
+    // batch is fetched by id but none of its rows answers a question this run asks.
+    let api = Api::new().knowing(&records[0]);
+    let meter = UsageMeter::default();
+    let now = ["b1", "b2", "b3", "b4"];
+    let mut stage = Scripted::new(&now);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 4 },
+        &c,
+    )
+    .await;
+    assert_eq!(*api.fetched.lock().unwrap(), vec!["msgbatch_0".to_string()]);
+    assert!(
+        out.resumed.is_empty(),
+        "a stale row was absorbed: {:?}",
+        out.resumed
+    );
+    assert_eq!(sorted(out.absorbed), ids(&now), "every item is asked again");
+    assert_eq!(api.realtime.call_count(), 4);
+    let usage = meter.snapshot();
+    // Four real-time replies and the four stale rows, each 100 in and 10 out.
+    assert_eq!(
+        usage.calls, 8,
+        "the stale rows are not in the ledger: {usage:?}"
+    );
+    assert_eq!(usage.input_tokens, 800);
+    assert!(
+        usage.cost_usd > 4.0 * 0.02,
+        "the stale rows do not count toward the spend limit: {}",
+        usage.cost_usd
+    );
 }
 
 // ── liveness ────────────────────────────────────────────────────────────────────────────────────
@@ -3269,4 +3353,234 @@ async fn a_failed_warm_call_does_not_block_the_prefix_for_the_next_submission() 
             ids(&["item-004", "item-005"])
         ]
     );
+}
+
+/// A row its batch never ran (canceled at the provider, or expired) is never sent again by the
+/// process that submitted the batch, whether or not the run is stopped: the run folder keeps it
+/// as a row the resume sends, and a send now would be billed once now and once more by that
+/// resume.
+#[tokio::test(start_paused = true)]
+async fn a_canceled_or_expired_row_is_never_sent_again_by_the_process_that_submitted_it() {
+    for word in ["canceled", "expired"] {
+        let control = Arc::new(crate::operator_stop::RunControl::new());
+        control.note_outage_stop();
+        let api = Api::new().rows(move |_, _| Row::NotRun(word));
+        let out = crate::operator_stop::with_run_control(control, async {
+            let mut stage = Scripted::new(&["a1", "a2"]);
+            let c = ctx(&api.realtime, Some(&api));
+            run_stage(STAGE, &mut stage, StageMode::Batch, &c).await
+        })
+        .await;
+        assert_eq!(
+            api.submit_calls.load(Ordering::SeqCst),
+            1,
+            "{word}: the stage submitted rows that never ran again"
+        );
+        assert_eq!(
+            api.realtime.call_count(),
+            0,
+            "{word}: the stage sent rows that never ran again in real time"
+        );
+        assert_eq!(out.failed.len(), 2, "{word}");
+        for f in &out.failed {
+            assert_eq!(f.class, FailureClass::OutageStop, "{word}: {f:?}");
+        }
+
+        // Not stopped: still never sent again by this process, in a batch, in real time or by a
+        // later round (the items are held): only a resume sends a row its batch never ran.
+        let api = Api::new().rows(move |round, _| {
+            if round == 0 {
+                Row::NotRun(word)
+            } else {
+                Row::Ok
+            }
+        });
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let c = ctx(&api.realtime, Some(&api));
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        assert_eq!(
+            api.submit_calls.load(Ordering::SeqCst),
+            1,
+            "{word}: the process that submitted the batch sent its never-run rows again"
+        );
+        assert_eq!(api.realtime.call_count(), 0, "{word}");
+        assert_eq!(out.failed.len(), 2, "{word}");
+        for f in &out.failed {
+            assert!(
+                f.live_batch.is_some(),
+                "{word}: held from later rounds: {f:?}"
+            );
+        }
+    }
+}
+
+/// The resume is the one that sends a row its batch never ran: it reads the batch an earlier
+/// process submitted, finds the rows canceled or expired, sends them once and finishes.
+#[tokio::test(start_paused = true)]
+async fn a_resume_sends_the_rows_an_earlier_processs_batch_never_ran_once() {
+    for word in ["canceled", "expired"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        // Process 1: the batch is accepted and the process ends before its results are read.
+        let api = Api::new().failing_fetch();
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let mut c = ctx(&api.realtime, Some(&api));
+        c.checkpoint = Some(&cp);
+        let _ = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        let records = cp.batches();
+        assert_eq!(records.len(), 1);
+
+        // Process 2, the resume: the earlier batch never ran its rows (canceled or expired).
+        let api = Api::new().knowing(&records[0]).rows(move |round, _| {
+            if round == 0 {
+                Row::NotRun(word)
+            } else {
+                Row::Ok
+            }
+        });
+        // This process's own batches are numbered after the earlier one.
+        api.batches.lock().unwrap().push(Vec::new());
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let mut c = ctx(&api.realtime, Some(&api));
+        c.checkpoint = Some(&cp);
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        assert!(out.failed.is_empty(), "{word}: {:?}", out.failed);
+        assert_eq!(
+            api.submit_calls.load(Ordering::SeqCst),
+            1,
+            "{word}: the resume sends the never-run rows once"
+        );
+    }
+}
+
+/// A submit the provider accepted whose reply was lost (a time-out after sending) may be running
+/// and billed: the items are never sent again in this process, in a batch or in real time. They
+/// are held (no second try), and the submit's intent stays on file with their custom ids, so a
+/// resume reports the possibly orphaned batch. Exactly one batch reaches the provider.
+#[tokio::test(start_paused = true)]
+async fn a_submit_whose_reply_is_lost_after_acceptance_leaves_exactly_one_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let api = Api::new().losing_the_reply_of(0);
+    let mut stage = Scripted::new(&["a1", "a2"]);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(
+        api.batches.lock().unwrap().len(),
+        1,
+        "a second batch was submitted for items the provider may already be running"
+    );
+    assert_eq!(
+        api.realtime.call_count(),
+        0,
+        "the items were sent again in real time"
+    );
+    assert_eq!(out.failed.len(), 2);
+    for f in &out.failed {
+        assert!(f.live_batch.is_some(), "held, never second-tried: {f:?}");
+        assert!(f.reason.contains("may have been accepted"), "{f:?}");
+    }
+    let intents = cp.intents();
+    assert_eq!(intents.len(), 1, "the intent stays on file for the resume");
+    assert_eq!(intents[0].items.len(), 2, "with every custom id");
+}
+
+/// The scan passes' batch path: a submit whose reply was lost after acceptance is never resubmitted
+/// nor second-tried (exactly one batch at the provider). A submit refused before any connection
+/// was made is safe to send again and still is.
+#[tokio::test(start_paused = true)]
+async fn a_scan_sub_batch_whose_reply_is_lost_after_acceptance_is_never_resubmitted() {
+    let work: Vec<BatchWork> = (0..2)
+        .map(|i| BatchWork {
+            custom_id: format!("c{i}-b0"),
+            ci: i,
+            bi: 0,
+            req: request(prompt_for(&format!("w{i}"))),
+        })
+        .collect();
+    let refs: Vec<&BatchWork> = work.iter().collect();
+    let chunks: Vec<&[(String, String)]> = Vec::new();
+    let batches: Vec<&[(String, String)]> = Vec::new();
+    let meter = UsageMeter::default();
+    let api = Api::new().losing_the_reply_of(0);
+    let ctx = RoundContext {
+        api: &api,
+        repo: "acme/widgets",
+        label: "pass",
+        model: MODEL,
+        n_c: 0,
+        n_b: 0,
+        chunks: &chunks,
+        batches: &batches,
+        job: None,
+        meter: Some(&meter),
+        per_item_usd: None,
+        max_body_bytes: 192_000_000,
+        fatal_errors: false,
+    };
+    let out = submit_round(&ctx, &refs).await.unwrap();
+    assert_eq!(out.results.len(), 2);
+    for (cid, r) in &out.results {
+        let failure = r.as_ref().expect_err("no reply came back");
+        assert!(
+            !failure.resubmittable && !failure.second_tryable,
+            "{cid}: a submit that may have been accepted would be sent again: {}",
+            failure.reason
+        );
+    }
+    assert!(
+        meter
+            .notes()
+            .iter()
+            .any(|n| n.contains("may have been accepted") && n.contains("c0-b0")),
+        "the possibly running batch is noted with its custom ids: {:?}",
+        meter.notes()
+    );
+    assert_eq!(api.batches.lock().unwrap().len(), 1);
+}
+
+/// The scan passes' batch path: a row its batch never ran is neither resubmitted nor second-tried
+/// by this process; the resume's journal sends it (the run folder resends a never-run row when
+/// the same items are submitted again).
+#[tokio::test(start_paused = true)]
+async fn a_scan_row_its_batch_never_ran_is_not_sent_again_by_this_process() {
+    for word in ["canceled", "expired"] {
+        let work: Vec<BatchWork> = (0..2)
+            .map(|i| BatchWork {
+                custom_id: format!("c{i}-b0"),
+                ci: i,
+                bi: 0,
+                req: request(prompt_for(&format!("w{i}"))),
+            })
+            .collect();
+        let refs: Vec<&BatchWork> = work.iter().collect();
+        let chunks: Vec<&[(String, String)]> = Vec::new();
+        let batches: Vec<&[(String, String)]> = Vec::new();
+        let api = Api::new().rows(move |_, _| Row::NotRun(word));
+        let ctx = RoundContext {
+            api: &api,
+            repo: "acme/widgets",
+            label: "pass",
+            model: MODEL,
+            n_c: 0,
+            n_b: 0,
+            chunks: &chunks,
+            batches: &batches,
+            job: None,
+            meter: None,
+            per_item_usd: None,
+            max_body_bytes: 192_000_000,
+            fatal_errors: false,
+        };
+        let out = submit_round(&ctx, &refs).await.unwrap();
+        for (cid, r) in &out.results {
+            let failure = r.as_ref().expect_err("the batch never ran it");
+            assert!(
+                !failure.resubmittable && !failure.second_tryable,
+                "{word} {cid}: this process would send a never-run row again: {}",
+                failure.reason
+            );
+        }
+    }
 }

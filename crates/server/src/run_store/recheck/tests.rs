@@ -1207,6 +1207,69 @@ async fn the_flag_path_works_through_a_batch_seam() {
     assert_eq!(clone_rows(&done.report).len(), 2);
 }
 
+/// Drops the connection on the first `down` calls, then answers as `inner` does.
+struct DropsFirst {
+    down: usize,
+    inner: Counting,
+    seen: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for DropsFirst {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        if self.seen.fetch_add(1, Ordering::SeqCst) < self.down {
+            return Err(anyhow::Error::new(crate::failure::LlmCallFailure::new(
+                crate::failure::FailureClass::Transport,
+                "Anthropic API request failed: connection reset by peer",
+            )));
+        }
+        self.inner.complete(req).await
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The recheck's one re-ask goes through the run's seam (#582 review): a short network drop is
+/// waited out like any call of a run, and the call settles the part.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_re_asked_call_waits_out_a_short_network_drop() {
+    let waits = crate::network_wait::InstantWaits::install();
+    let saved = saved_run(UNREADABLE).await;
+    let llm = DropsFirst {
+        down: 1,
+        inner: Counting::with(|req| disjoint_objects(&asked(req))),
+        seen: AtomicUsize::new(0),
+    };
+    let c = ctx(&saved);
+    let done = recheck_saved_run(
+        &inputs(&saved, &c, ReaskFlag::Allow { max_parts: 5 }, false),
+        Some(&llm),
+        &mut |_| {},
+    )
+    .await;
+    assert!(
+        done.is_ok(),
+        "the drop was waited out: {:?}",
+        done.as_ref().err()
+    );
+    assert_eq!(
+        waits.waits(),
+        vec![crate::network_wait::NETWORK_WAIT_STEPS[0]]
+    );
+    assert_eq!(llm.inner.calls(), 1, "answered once, after the wait");
+}
+
 // ── A clone check part judged in part, batch by batch (#594) ─────────────────────────────────
 
 /// The family id a candidate's rows carry (`captures["family"]`).
@@ -1705,4 +1768,31 @@ async fn a_batch_with_no_stored_call_is_never_asked() {
     assert_eq!(llm.calls(), 0, "nothing the scan never sent is asked");
     assert!(why.contains("cannot be reproduced"), "{why}");
     assert_eq!(saved_bytes(&run.saved), before);
+}
+
+/// The recheck lets go of the run's folder when it is done: the run control the re-ask went
+/// through must not hold it (and its lock) past the recheck.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_recheck_lets_go_of_the_run_folder_when_it_is_done() {
+    let saved = saved_run(UNREADABLE).await;
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    let c = ctx(&saved);
+    let control = Arc::new(crate::operator_stop::RunControl::new());
+    let done = crate::operator_stop::with_run_control(
+        control.clone(),
+        recheck_saved_run(
+            &inputs(&saved, &c, ReaskFlag::Allow { max_parts: 5 }, false),
+            Some(&llm),
+            &mut |_| {},
+        ),
+    )
+    .await
+    .expect("the one call settles it");
+    assert_eq!(llm.calls(), 1);
+    drop(done);
+    assert!(
+        control.run_id().is_none(),
+        "the run control still holds the run's folder after the recheck"
+    );
 }

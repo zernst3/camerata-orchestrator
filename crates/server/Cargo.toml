@@ -134,8 +134,9 @@ pdf-extract = "0.12"
 sha2 = { workspace = true }
 
 [features]
-# Test seams (the outage-span override). Enabled only from dev-dependencies; never in production.
-test-support = []
+# Test seams (the outage-span override, the process sleeper the network wait sleeps through).
+# Enabled only from dev-dependencies; never in production.
+test-support = ["camerata-llm/test-support"]
 
 [dev-dependencies]
 camerata-llm = { path = "../llm", features = ["test-support"] }

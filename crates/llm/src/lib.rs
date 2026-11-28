@@ -31,6 +31,8 @@ pub mod key_reader;
 pub mod llm;
 pub mod model_input;
 pub mod model_registry;
+// The long wait for the network above the transport's own retries (#582).
+pub mod network_wait;
 pub mod provider_policy;
 pub mod rate_limit;
 // Internal retry/backoff policy for the Anthropic API transport (`llm::complete_api` +

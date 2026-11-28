@@ -900,3 +900,134 @@ async fn a_credit_stop_during_the_rule_summaries_keeps_its_class_and_a_resume_as
     assert_eq!(outcome.rules_reviewed, 1, "{outcome:?}");
     assert_eq!(outcome.rules_failed, 0);
 }
+
+// ── 4. A batch over a partial repo set (#582) ───────────────────────────────────────────────
+
+/// A report over `repos`, with `n` sites of each rule in every repo.
+fn report_over(repos: &[&str], rules: &[(&str, usize)]) -> ScanReport {
+    let names: Vec<String> = repos.iter().map(|r| (*r).to_string()).collect();
+    let mut report = ScanReport::gated(&names);
+    report.gated = false;
+    report.code_lines = 40_000;
+    for repo in repos {
+        for (rule, n) in rules {
+            for i in 0..*n {
+                let mut f = site(rule, i);
+                f.repo = (*repo).to_string();
+                report.findings.push(f);
+            }
+        }
+    }
+    report.assign_site_keys();
+    report
+}
+
+/// The first process: a group review batch over `repos` is submitted and the process is killed
+/// while it waits. Returns the batch it left running.
+async fn killed_while_a_batch_waits(
+    dir: &std::path::Path,
+    repos: &[&str],
+) -> Vec<(String, String)> {
+    let first = Arc::new(FakeBatch::new().hanging());
+    let first_llm = seam(&first);
+    let mut report = report_over(repos, &[(SQL, 3), (SECRETS, 2)]);
+    let run_future = checkpoint::with_run_checkpoints(
+        Some(dir.to_path_buf()),
+        run(&mut report, &first_llm, true, None),
+    );
+    let killed = async {
+        while first.polls_on_hung.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    };
+    tokio::select! {
+        _ = run_future => panic!("the first process was meant to be killed while a batch waited"),
+        () = killed => {}
+    }
+    let in_flight = first.batches.lock().unwrap()[0].clone();
+    assert!(!in_flight.is_empty());
+    in_flight
+}
+
+/// #582 part 3: a group review batch computed over a PARTIAL repo set (an older build reviewed
+/// while a repo was still unfinished) is never absorbed into the review of the whole set. Each
+/// group is asked again over every repo's rows.
+#[tokio::test(start_paused = true)]
+async fn a_group_review_batch_over_a_partial_repo_set_is_never_absorbed() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_flight = killed_while_a_batch_waits(dir.path(), &["acme/app"]).await;
+
+    // The resume: every repo has finished, and the provider still holds the partial batch.
+    let second = Arc::new(FakeBatch::new());
+    second
+        .known
+        .lock()
+        .unwrap()
+        .insert("msgbatch_0".to_string(), in_flight);
+    second.batches.lock().unwrap().push(Vec::new());
+    let second_llm = seam(&second);
+    let mut report = report_over(&["acme/app", "acme/web"], &[(SQL, 3), (SECRETS, 2)]);
+    let outcome = checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &second_llm, true, None),
+    )
+    .await;
+    assert_eq!(outcome.rules_reviewed, 2, "{outcome:?}");
+    assert!(
+        second
+            .fetched
+            .lock()
+            .unwrap()
+            .contains(&"msgbatch_0".to_string()),
+        "the partial batch was fetched by id"
+    );
+    // Both groups were asked again, over both repos' rows.
+    let asked_prompts: Vec<String> = second
+        .realtime
+        .asked()
+        .iter()
+        .map(|r| r.prompt.clone())
+        .chain(second.items.lock().unwrap().iter().map(item_prompt))
+        .collect();
+    assert_eq!(
+        asked_prompts.len(),
+        2,
+        "a group was absorbed from the partial batch instead of asked again: {asked_prompts:#?}"
+    );
+    for prompt in &asked_prompts {
+        assert!(prompt.contains("acme/web"), "{prompt}");
+    }
+}
+
+/// #582 part 4: the partial batch's rows are not used, but they were paid for: their cost is in
+/// the run's usage, so it counts toward the spend limit.
+#[tokio::test(start_paused = true)]
+async fn a_group_review_batch_that_is_not_absorbed_is_still_metered() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_flight = killed_while_a_batch_waits(dir.path(), &["acme/app"]).await;
+    let stale_rows = in_flight.len() as u64;
+
+    let second = Arc::new(FakeBatch::new());
+    second
+        .known
+        .lock()
+        .unwrap()
+        .insert("msgbatch_0".to_string(), in_flight);
+    second.batches.lock().unwrap().push(Vec::new());
+    let second_llm = seam(&second);
+    let meter = UsageMeter::default();
+    let mut report = report_over(&["acme/app", "acme/web"], &[(SQL, 3), (SECRETS, 2)]);
+    checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &second_llm, true, Some(&meter)),
+    )
+    .await;
+    let asked = (second.realtime.asked().len() + second.items_sent()) as u64;
+    let usage = meter.snapshot();
+    assert_eq!(
+        usage.calls,
+        asked + stale_rows,
+        "the stale batch's rows are not in the ledger: {usage:?}"
+    );
+    assert!(usage.cost_usd > 0.0);
+}

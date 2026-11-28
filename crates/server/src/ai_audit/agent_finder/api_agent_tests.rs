@@ -11,7 +11,7 @@ use camerata_secrets::fixtures::planted;
 use camerata_secrets::SecretShape;
 use serde_json::{json, Value};
 
-use super::{ApiPieceAgent, FinderWire, PauseFn};
+use super::{ApiPieceAgent, FinderWire, PauseFn, NETWORK_WAIT_STEPS};
 use crate::ai_audit::agent_finder::coverage::coverage_of;
 use crate::ai_audit::agent_finder::{
     AgentRun, AgentStop, FollowUp, Piece, PieceAgent, PieceLimits, Room, ToolEvent,
@@ -22,6 +22,7 @@ use crate::api_agent_driver::AnthropicPostError;
 use crate::cost_cap::RunControls;
 use crate::llm::LlmResponse;
 use crate::stage_telemetry::Stage;
+use camerata_llm::failure::FailureClass;
 
 const MODEL: &str = "claude-fable-5-2";
 
@@ -1309,26 +1310,36 @@ async fn a_history_400_is_failed_and_the_same_body_is_not_sent_again() {
 #[tokio::test]
 async fn failures_and_successes_feed_the_run_health_record() {
     let meter = Arc::new(UsageMeter::default());
-    // Four 500s (the schedule's three retries and the first try), then a good run.
-    let wire = ScriptedWire::new(
-        (0..4)
-            .map(|_| http(500, "api_error", "boom", None))
-            .collect(),
-    );
-    let (agent, _) = metered(&wire, &meter);
-    let run = run_ok(&agent, &room(), &limits()).await;
-    assert!(matches!(run.stop, AgentStop::Failed(_)));
-    assert_eq!(
-        meter.health().streak(),
-        1,
-        "one failed call, after its retries"
-    );
-
+    // A failed call counts toward the streak; a reply clears it.
+    meter
+        .health()
+        .note_failure(FailureClass::Transport, "Anthropic API HTTP 500: boom");
+    assert_eq!(meter.health().streak(), 1);
     let wire = ScriptedWire::new(vec![text_reply("done")]);
     let (agent, _) = metered(&wire, &meter);
     let run = run_ok(&agent, &room(), &limits()).await;
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(meter.health().streak(), 0, "a reply clears the streak");
+
+    // Server errors through the first try, the schedule's three retries and the long network
+    // wait's four steps (a 500 is a transport-class failure, #582): the outage stop, at once.
+    let stopped = Arc::new(UsageMeter::default());
+    let wire = ScriptedWire::new(
+        (0..(4 + NETWORK_WAIT_STEPS.len()))
+            .map(|_| http(500, "api_error", "boom", None))
+            .collect(),
+    );
+    let (agent, _) = metered(&wire, &stopped);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)));
+    assert!(
+        stopped.outage_stopped(),
+        "the wait ran out with nothing through"
+    );
+    assert_eq!(
+        stopped.health().trigger().map(|t| t.class),
+        Some(FailureClass::Transport)
+    );
 
     // A rate limit that outlasts the deadline is a pause, not an outage.
     let wire = ScriptedWire::new(
@@ -1364,13 +1375,11 @@ async fn a_failure_after_a_paid_turn_is_an_ok_run_that_keeps_the_usage_never_an_
     );
 
     // The same holds for a follow-up whose own request fails after the first run was paid.
-    let wire = ScriptedWire::new(vec![
-        text_reply("done"),
-        http(500, "api_error", "boom", None),
-        http(500, "api_error", "boom", None),
-        http(500, "api_error", "boom", None),
-        http(500, "api_error", "boom", None),
-    ]);
+    // The first try, three quick retries and the long network wait's steps all fail.
+    let mut script = vec![text_reply("done")];
+    script
+        .extend((0..(4 + NETWORK_WAIT_STEPS.len())).map(|_| http(500, "api_error", "boom", None)));
+    let wire = ScriptedWire::new(script);
     let agent = agent(&wire);
     let first = run_ok(&agent, &room(), &limits()).await;
     let again = agent
@@ -2382,8 +2391,11 @@ fn the_command_line_transport_does_not_serve_client_text_and_says_why() {
 
 // ─── a call that timed out may have been billed ──────────────────────────────────────────────
 
-fn network_timeout() -> Reply {
-    Err(AnthropicPostError::Network(
+/// A request that was sent and whose reply timed out: what the driver gives for a time-out past
+/// connecting (`post_anthropic_body`), the one kind that may have been billed. (A connect
+/// time-out is `Network` and never reached the model.)
+fn reply_timeout() -> Reply {
+    Err(AnthropicPostError::ReplyTimeout(
         "Anthropic API request failed: error sending request: operation timed out".to_string(),
     ))
 }
@@ -2400,7 +2412,7 @@ async fn spend_after(script: Vec<Reply>) -> (f64, Vec<Value>) {
 #[tokio::test]
 async fn a_timed_out_call_is_counted_once_at_the_request_ceiling_and_then_retried() {
     let (baseline, _) = spend_after(vec![text_reply("done")]).await;
-    let (with_timeout, bodies) = spend_after(vec![network_timeout(), text_reply("done")]).await;
+    let (with_timeout, bodies) = spend_after(vec![reply_timeout(), text_reply("done")]).await;
     assert_eq!(bodies.len(), 2, "the timeout is retried");
     let ceiling = crate::api_agent_driver::request_ceiling_usd_for_body(MODEL, &bodies[0])
         .expect("the finder model is priced");
@@ -2430,7 +2442,7 @@ async fn a_call_that_never_reached_the_model_counts_nothing() {
 #[tokio::test]
 async fn a_timed_out_call_carries_the_time_it_waited_into_the_stage_figures() {
     let wire = ScriptedWire::slow(
-        vec![network_timeout(), text_reply("done")],
+        vec![reply_timeout(), text_reply("done")],
         Duration::from_millis(40),
     );
     let meter = Arc::new(UsageMeter::default());
@@ -2848,7 +2860,9 @@ async fn a_reply_time_out_on_every_attempt_ends_with_the_reply_timeout_prefix_an
     );
     assert_eq!(wire.calls(), 4, "tried, then 3 retries");
 
-    let connect_timeouts = (0..4)
+    // A connect time-out is the network: tried, 3 retries, then the 4 steps of the long network
+    // wait (#582).
+    let connect_timeouts = (0..8)
         .map(|_| {
             Err(AnthropicPostError::Network(
                 "connect: operation timed out".into(),
@@ -2890,5 +2904,121 @@ async fn the_output_reserve_counts_against_the_window() {
         matches!(&run.stop, AgentStop::Failed(why) if why.starts_with(super::CONTEXT_FULL_PREFIX)),
         "got {:?}",
         run.stop
+    );
+}
+
+// ─── the long network wait (#582) ────────────────────────────────────────────────────────────
+
+fn connection_reset() -> Reply {
+    Err(AnthropicPostError::Network(
+        "Anthropic API request failed: connection reset by peer".to_string(),
+    ))
+}
+
+#[tokio::test]
+async fn a_network_drop_past_the_quick_retries_waits_for_the_network_and_the_piece_finishes() {
+    // Down for the first send, the 3 quick retries and two steps of the network wait.
+    let mut script: Vec<Reply> = (0..6).map(|_| connection_reset()).collect();
+    script.push(text_reply("done"));
+    let wire = ScriptedWire::new(script);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(
+        run.stop,
+        AgentStop::Finished,
+        "the drop cost minutes, not the piece"
+    );
+    assert_eq!(wire.calls(), 7);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 6, "{waits:?}");
+    assert_eq!(
+        waits[3..].to_vec(),
+        NETWORK_WAIT_STEPS[..3].to_vec(),
+        "after the quick retries, the network wait's steps"
+    );
+    // The same body went each time.
+    let bodies = wire.bodies();
+    assert!(bodies.iter().all(|b| *b == bodies[0]));
+    assert!(!meter.outage_stopped());
+}
+
+#[tokio::test]
+async fn a_network_drop_past_the_whole_wait_stops_the_run_at_once() {
+    let wire = ScriptedWire::new((0..8).map(|_| connection_reset()).collect());
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    let waits = waits_of(&pauses);
+    assert_eq!(
+        waits[3..].to_vec(),
+        NETWORK_WAIT_STEPS.to_vec(),
+        "{waits:?}"
+    );
+    assert!(
+        meter.outage_stopped(),
+        "the network wait ran out with nothing through: the outage stop"
+    );
+    let trigger = meter.health().trigger().expect("a trigger is recorded");
+    assert_eq!(
+        trigger.class,
+        camerata_llm::failure::FailureClass::Transport
+    );
+}
+
+#[tokio::test]
+async fn only_a_reply_time_out_is_counted_as_spend_a_connect_time_out_never_is() {
+    // A connect time-out never reached the model: nothing was billed, so nothing is metered.
+    // Read by the error's kind, not by "timed out" in its text.
+    let meter = Arc::new(UsageMeter::default());
+    let wire = ScriptedWire::new(
+        (0..(4 + NETWORK_WAIT_STEPS.len()))
+            .map(|_| {
+                Err(AnthropicPostError::Network(
+                    "connect: operation timed out".into(),
+                ))
+            })
+            .collect(),
+    );
+    let (agent, _) = metered(&wire, &meter);
+    let _ = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(
+        meter.snapshot().calls,
+        0,
+        "a connect time-out was metered as a billed call: {:?}",
+        meter.snapshot()
+    );
+
+    // A reply that timed out may have been billed: each counts once, at the request's ceiling.
+    let meter = Arc::new(UsageMeter::default());
+    let wire = ScriptedWire::new(
+        (0..4)
+            .map(|_| {
+                Err(AnthropicPostError::ReplyTimeout(
+                    "operation timed out".into(),
+                ))
+            })
+            .collect(),
+    );
+    let (agent, _) = metered(&wire, &meter);
+    let _ = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(meter.snapshot().calls, 4, "{:?}", meter.snapshot());
+}
+
+#[tokio::test]
+async fn a_finder_turn_is_the_providers_own_answer_on_a_meter_that_counts_only_those() {
+    // A meter linked to the run's journal counts only the provider's own answers; the finder's
+    // turns do not go through the journal, so the agent notes its own.
+    let meter = Arc::new(UsageMeter::default());
+    meter.health().link_provider_answers();
+    let wire = ScriptedWire::new(vec![text_reply("done")]);
+    let (agent, _) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished);
+    assert_eq!(
+        meter.health().successes(),
+        1,
+        "the finder's turn was a provider answer"
     );
 }

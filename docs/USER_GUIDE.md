@@ -1590,8 +1590,19 @@ while the scan runs (the Bombe toggle is in Settings, §17).
 **7. If a part fails: run to completion.** A client deliverable never carries a failed portion.
 Every inspection is saved part by part; failed or unrun parts are retried, not skipped. The rules:
 
-- A part that fails after its retries makes the **run incomplete**. A run that hit an outage (three
-  failed calls in a row, or a login or billing failure) stops and keeps its parts for later.
+- **A short network drop costs minutes, not the run.** When a call cannot reach the AI service, it
+  waits for the network and sends the same request again: 1, 2, 4 and then 8 minutes, 15 minutes in
+  all, after the service's own quick retries. When the network is back the run goes on by itself and
+  ends with the same result as a run that was never interrupted. A login or billing failure never
+  waits: waiting does not fix a key or a balance.
+- A part that fails after its retries makes the **run incomplete**. A run that hit an outage (15
+  minutes with no answer from the AI service while no other call got through, three failed calls in
+  a row or a login or billing failure) stops at once and keeps its parts for later: a call that is
+  still waiting for the network sends nothing more.
+- **Once a run is incomplete or stopped, no later stage starts.** The group reviewer and the
+  possible-duplicate check read every repository at once, so they wait until every repository's
+  finder and fix text are complete; a resume runs them once, over all of them. An `--internal` export
+  of a stopped run is built only from what already finished and sends nothing to a model.
 - **A client export is refused** while any part failed or did not run. Nothing is written and the run
   stays resumable. With `--internal` an export is still written but is **marked INTERNAL INCOMPLETE**
   (on the cover, in `json/inspection.json` and in the README) and is **not for a client**. The release gate
@@ -2851,8 +2862,20 @@ command and has no button for it.
 | 1 | The run could not start or a resume was refused; the message says why. |
 | 3 | The release gate refused the export. Nothing was written. |
 | 4 | The spend limit stopped the run. Raise the limit and resume. |
-| 5 | The AI service could not be reached (three failed calls in a row, or a login or billing failure). Resume when it is back. |
+| 5 | The AI service could not be reached (a call waited 15 minutes for the network with no answer, three failed calls in a row or a login or billing failure). Resume when it is back. |
 | 6 | The run is incomplete for another reason (a part failed after its retries). A client export was refused. A finding whose tailored fix never passed the checks does not cause this: it ships a Standard fix and the run is complete. |
+| 7 | The operator stopped the run (Ctrl+C or SIGTERM). What finished is saved. Resume it to run what remains. |
+
+**Stopping a run from the command line.** Press **Ctrl+C** (or send SIGTERM) to stop `camerata
+inspect` cleanly, as the app's stop does: no further part is sent, every batch the AI service is
+still working on is canceled there so it stops costing money and what finished is already saved.
+The command prints the run id and exits with code 7; `camerata inspect --resume <ID>` runs what
+remains and gives the same result as an uninterrupted inspection. A batch the service would not
+cancel is printed with its id and listed in the failure report beside the ledger ("could NOT be
+canceled"): cancel it by hand in the Anthropic console, since it may still run and be billed. If
+the stop is slow (the service is slow to answer a cancel), press Ctrl+C again to exit at once. The
+app's Stop does the same for a scan the app started: nothing is sent after it and a call that is
+waiting for the network sends nothing more.
 
 Saved runs live in the Camerata state folder under `runs/`, one folder per run, readable only by
 the operator: they hold model answers derived from the code. Camerata keeps the newest five runs of each
@@ -3803,7 +3826,7 @@ Each entry is a message or symptom the app can show, with its meaning and the ne
 | "Cannot resume now: <why>" | The saved run no longer fits (the repo moved; a file changed; the models or rules differ; **another version of Camerata** made it; another process works on it). | Read the reason. For a different version, start a new run. |
 | "This scan was not saved, so it cannot be resumed. Run it again." | The run was never saved. | Run it again. |
 | "This inspection was interrupted" / "did not finish" | The app closed or the run ended with parts left. | **Run what remains**. |
-| Exit code 4 / 5 / 6 / 3 (command line) | Spend limit / AI service unreachable / incomplete for another reason / release gate refused (§11a). | See the table in §11a. |
+| Exit code 4 / 5 / 6 / 7 / 3 (command line) | Spend limit / AI service unreachable / incomplete for another reason / stopped by the operator / release gate refused (§11a). | See the table in §11a. |
 | "Pipeline bug: N rule(s) reached more than one kind surface in this scan" | A rule emitted two kinds, which it must never do. The counts are not trustworthy for it. | Report it; it is an upstream bug, not something to triage. |
 | "N unspecified" chip on the Queue tab | Rows reached the screen with no kind. | Report it (a gap in Camerata); the rows are in the Queue, never silently a defect. |
 

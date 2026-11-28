@@ -346,6 +346,15 @@ pub async fn check_possible_duplicates(
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) {
+    // The check reads pairs across every repo's rows: over an incomplete or stopped run it does
+    // not start and sends nothing; a resume runs it over the whole set (#582).
+    if let Some(why) = report.cross_repo_stage_refusal() {
+        report.ledger.record_runner_notes(vec![format!(
+            "possible-duplicate check: not started, because this inspection is not complete \
+             ({why}); a resume runs it once every repository has finished"
+        )]);
+        return;
+    }
     let candidates = DupIndex::candidates(report.tree.as_ref(), &report.findings);
     if candidates.is_empty() {
         report

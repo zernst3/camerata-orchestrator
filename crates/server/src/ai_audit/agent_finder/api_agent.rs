@@ -104,6 +104,9 @@ const CONTINUE_MESSAGE: &str =
 /// overload, by the engine's schedule (`crates/llm/src/retry.rs`): 2, 8 and 30 seconds, then the
 /// call fails. Every wait is jittered ([`jittered`]).
 const BACKOFF_SECS: [u64; 3] = [2, 8, 30];
+// After `BACKOFF_SECS`, a network failure waits the engine's long network wait (1, 2, 4 and 8
+// minutes, `camerata_llm::network_wait`) before the run's outage stop (#582).
+use camerata_llm::network_wait::NETWORK_WAIT_STEPS;
 /// A rate limit (429) or an overload (529, 503) is waited out, never counted out: the wait when
 /// the provider gave no `retry-after`, before jitter.
 const WAIT_OUT_SECS: u64 = 30;
@@ -229,6 +232,9 @@ pub struct ApiPieceAgent {
     wire: Option<Arc<dyn FinderWire>>,
     pause: Option<PauseFn>,
     meter: Option<Arc<UsageMeter>>,
+    /// The run's control (the operator's stop, the app's cancel), taken from the run's scope
+    /// when the agent is built (#583).
+    control: Option<Arc<crate::operator_stop::RunControl>>,
     store: Arc<Mutex<Store>>,
 }
 
@@ -261,8 +267,16 @@ impl ApiPieceAgent {
             wire: None,
             pause: None,
             meter: None,
+            control: crate::operator_stop::current_run_control(),
             store: Arc::default(),
         }
+    }
+
+    /// Why the run's control refuses another request, if it does: the operator's stop or the
+    /// app's cancel, or the outage stop it was told of.
+    fn control_refusal(&self) -> Option<AgentStop> {
+        let control = self.control.as_ref().filter(|c| c.refuses_sends())?;
+        Some(AgentStop::Failed(control.refusal().to_string()))
     }
 
     /// Record every turn on the run's meter (stage `Finder`), feed its health record and have it
@@ -327,6 +341,9 @@ impl ApiPieceAgent {
         }
         if meter.outage_stopped() {
             anyhow::bail!("the run stopped after repeated provider failures; no request was sent");
+        }
+        if let Some(AgentStop::Failed(why)) = self.control_refusal() {
+            anyhow::bail!("{why}; no request was sent");
         }
         Ok(())
     }
@@ -413,6 +430,9 @@ impl ApiPieceAgent {
     ) -> Result<LlmResponse, SendFailure> {
         let mut attempts: Vec<AttemptRecord> = Vec::new();
         let mut retries = 0usize;
+        // Steps of the long network wait taken (#582): after the transport schedule, a network
+        // failure waits 1, 2, 4 and 8 minutes before the outage stop.
+        let mut network_steps = 0usize;
         let mut waited = Duration::ZERO;
         // What the run had succeeded at when this call started: a wait that runs out stops the
         // run only if nothing has succeeded since ([`RunHealth::note_wait_exhausted`]).
@@ -420,86 +440,92 @@ impl ApiPieceAgent {
         loop {
             let mut record = AttemptRecord::new("api", &self.model);
             let attempt_started = std::time::Instant::now();
-            let (class, message, status, retryable, retry_after, overloaded) = match self
-                .post(body, use_caching)
-                .await
-            {
-                Ok(reply) => return Ok(reply),
-                Err(AnthropicPostError::Refusal(v)) => return Err(SendFailure::Refused(v)),
-                Err(AnthropicPostError::BadReply(e)) => (
-                    FailureClass::Content,
-                    format!("the provider's reply was not JSON: {e}"),
-                    None,
-                    false,
-                    None,
-                    false,
-                ),
-                Err(
-                    err @ (AnthropicPostError::Network(_) | AnthropicPostError::ReplyTimeout(_)),
-                ) => {
-                    let reply_timeout = matches!(err, AnthropicPostError::ReplyTimeout(_));
-                    let (AnthropicPostError::Network(e) | AnthropicPostError::ReplyTimeout(e)) =
-                        err
-                    else {
-                        unreachable!("matched above")
-                    };
-                    // A call that timed out may still have been billed and nothing came back to
-                    // price it from: it counts once, at the request's cost ceiling. A failure
-                    // that never reached the model counts nothing.
-                    if e.to_ascii_lowercase().contains("timed out") {
-                        self.count_timed_out_call(body, attempt_started.elapsed());
-                    }
-                    (
-                        FailureClass::Transport,
-                        // Only a time-out of the wait for the reply says the request itself is
-                        // too slow to answer; a connect time-out is the network and reruns whole.
-                        if reply_timeout {
-                            format!("{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: {e}")
-                        } else {
-                            format!("Anthropic API request failed: {e}")
-                        },
-                        None,
-                        true,
+            let (class, message, status, retryable, retry_after, overloaded, reply_timed_out) =
+                match self.post(body, use_caching).await {
+                    Ok(reply) => return Ok(reply),
+                    Err(AnthropicPostError::Refusal(v)) => return Err(SendFailure::Refused(v)),
+                    Err(AnthropicPostError::BadReply(e)) => (
+                        FailureClass::Content,
+                        format!("the provider's reply was not JSON: {e}"),
                         None,
                         false,
-                    )
-                }
-                Err(AnthropicPostError::Http {
-                    status,
-                    body: text,
-                    retry_after,
-                }) => {
-                    let (etype, emsg) = camerata_llm::failure::provider_error_of(&text);
-                    let message = camerata_llm::failure::scrub_message(
-                        emsg.as_deref().unwrap_or(&text),
-                        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
-                    );
-                    let (class, helps) =
-                        camerata_llm::failure::classify_http(status, etype.as_deref(), &message);
-                    record.http_status = Some(status);
-                    record.error_type = etype.clone();
-                    // The engine retries 429, 529 and every 5xx, and only when the answer is
-                    // not an exhausted account.
-                    let retryable =
-                        helps && (status == 429 || status == 529 || (500..600).contains(&status));
-                    let overloaded =
-                        matches!(status, 529 | 503) || etype.as_deref() == Some("overloaded_error");
-                    (
-                        class,
-                        if request_too_large(status, etype.as_deref(), &message) {
-                            format!(
+                        None,
+                        false,
+                        false,
+                    ),
+                    Err(
+                        err
+                        @ (AnthropicPostError::Network(_) | AnthropicPostError::ReplyTimeout(_)),
+                    ) => {
+                        let reply_timeout = matches!(err, AnthropicPostError::ReplyTimeout(_));
+                        let (AnthropicPostError::Network(e) | AnthropicPostError::ReplyTimeout(e)) =
+                            err
+                        else {
+                            unreachable!("matched above")
+                        };
+                        // A call whose reply timed out may still have been billed and nothing came
+                        // back to price it from: it counts once, at the request's cost ceiling. A
+                        // failure that never reached the model (a connect time-out, a refused or
+                        // dropped connection) counts nothing. By the error's kind, never its text.
+                        if reply_timeout {
+                            self.count_timed_out_call(body, attempt_started.elapsed());
+                        }
+                        (
+                            FailureClass::Transport,
+                            // Only a time-out of the wait for the reply says the request itself is
+                            // too slow to answer; a connect time-out is the network and reruns whole.
+                            if reply_timeout {
+                                format!("{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: {e}")
+                            } else {
+                                format!("Anthropic API request failed: {e}")
+                            },
+                            None,
+                            true,
+                            None,
+                            false,
+                            reply_timeout,
+                        )
+                    }
+                    Err(AnthropicPostError::Http {
+                        status,
+                        body: text,
+                        retry_after,
+                    }) => {
+                        let (etype, emsg) = camerata_llm::failure::provider_error_of(&text);
+                        let message = camerata_llm::failure::scrub_message(
+                            emsg.as_deref().unwrap_or(&text),
+                            camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+                        );
+                        let (class, helps) = camerata_llm::failure::classify_http(
+                            status,
+                            etype.as_deref(),
+                            &message,
+                        );
+                        record.http_status = Some(status);
+                        record.error_type = etype.clone();
+                        // The engine retries 429, 529 and every 5xx, and only when the answer is
+                        // not an exhausted account.
+                        let retryable = helps
+                            && (status == 429 || status == 529 || (500..600).contains(&status));
+                        let overloaded = matches!(status, 529 | 503)
+                            || etype.as_deref() == Some("overloaded_error");
+                        (
+                            class,
+                            if request_too_large(status, etype.as_deref(), &message) {
+                                format!(
                                 "{REQUEST_TOO_LARGE_PREFIX}Anthropic API HTTP {status}: {message}"
                             )
-                        } else {
-                            format!("Anthropic API HTTP {status}: {message}")
-                        },
-                        Some((status, text)),
-                        retryable,
-                        retry_after,
-                        overloaded,
-                    )
-                }
-            };
+                            } else {
+                                format!("Anthropic API HTTP {status}: {message}")
+                            },
+                            Some((status, text)),
+                            retryable,
+                            retry_after,
+                            overloaded,
+                            false,
+                        )
+                    }
+                };
             record.message = camerata_llm::failure::scrub_message(
                 &message,
                 camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
@@ -513,6 +539,11 @@ impl ApiPieceAgent {
                         .as_ref()
                         .is_some_and(|(code, _)| matches!(code, 429 | 503 | 529)));
             let mut wait_exhausted = false;
+            // The long network wait covers what a down network looks like: a transport-class
+            // failure, but not a reply that timed out (the request itself is too slow, and waiting
+            // for the network does not make it faster).
+            let network_wait = class == FailureClass::Transport && !reply_timed_out;
+            let mut network_exhausted = false;
             let delay = if !retryable {
                 None
             } else if wait_out {
@@ -531,7 +562,12 @@ impl ApiPieceAgent {
                 );
                 retries += 1;
                 Some(d)
+            } else if network_wait && network_steps < NETWORK_WAIT_STEPS.len() {
+                let d = NETWORK_WAIT_STEPS[network_steps];
+                network_steps += 1;
+                Some(d)
             } else {
+                network_exhausted = network_wait;
                 None
             };
             if let Some(delay) = delay {
@@ -560,6 +596,13 @@ impl ApiPieceAgent {
                     meter.health().note_wait_exhausted(&message, before);
                 }
             }
+            if network_exhausted {
+                // The network wait ran out. If no call got through meanwhile, the network is down
+                // for the whole run: the outage stop, at once (#582).
+                if let (Some(meter), Some(before)) = (&self.meter, successes_at_start) {
+                    meter.health().note_network_wait_exhausted(&message, before);
+                }
+            }
             let mut failure = LlmCallFailure::new(class, message);
             failure.attempts = attempts;
             failure.retryable = retryable;
@@ -571,6 +614,11 @@ impl ApiPieceAgent {
     /// Why the run says no further request may go out, if it does: an outage or credit stop, or
     /// the spend limit. The same stops the loop checks between turns.
     fn stop_between_attempts(&self) -> Option<AgentStop> {
+        // The run's control first: the operator's stop or the app's cancel ends a wait too, not
+        // only the meter's own stops.
+        if let Some(stop) = self.control_refusal() {
+            return Some(stop);
+        }
         let meter = self.meter.as_ref()?;
         if meter.outage_stopped() {
             return Some(AgentStop::Failed(run_stopped_text(meter)));
@@ -631,6 +679,9 @@ impl ApiPieceAgent {
         }
         if let Some(meter) = &self.meter {
             meter.record_stage(Stage::Finder, &counted);
+            // The agent's turns do not go through the run's journal: this reply came from the
+            // provider itself, so it is the provider's answer the run's health record counts.
+            meter.health().note_provider_answer();
         }
         usage_of(&counted)
     }
@@ -680,6 +731,9 @@ impl ApiPieceAgent {
         let stop = loop {
             if let Some(m) = self.meter.as_ref().filter(|m| m.outage_stopped()) {
                 break AgentStop::Failed(run_stopped_text(m));
+            }
+            if let Some(stop) = self.control_refusal() {
+                break stop;
             }
             if usage.len() >= limits.max_turns {
                 break AgentStop::TurnLimit(format!(

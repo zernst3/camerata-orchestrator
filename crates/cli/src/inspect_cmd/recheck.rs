@@ -37,7 +37,8 @@ pub async fn run_recheck_saved(
     .await
 }
 
-/// [`run_recheck_saved`] with the credential store handed in.
+/// [`run_recheck_saved`] with the credential store handed in. Ctrl+C and SIGTERM stop a recheck's
+/// re-ask as they stop a run (#583).
 pub async fn run_recheck_saved_with_store(
     store: &dyn camerata_server::credentials::CredentialStore,
     run: &str,
@@ -46,19 +47,24 @@ pub async fn run_recheck_saved_with_store(
     max_cost_usd: Option<f64>,
     reask: Option<usize>,
 ) -> Result<InspectOutcome, InspectError> {
-    recheck_saved_inspect(
-        run,
-        repos,
-        export,
-        max_cost_usd,
-        reask,
-        store,
-        Seams {
-            resume: None,
-            llm: None,
-            preflight_sink: &|text| print!("{text}"),
-        },
-    )
+    super::operator_stop::run_stoppable(super::operator_stop::spawn_stop_listener(), |control| {
+        camerata_server::operator_stop::with_run_control(
+            control,
+            Box::pin(recheck_saved_inspect(
+                run,
+                repos,
+                export,
+                max_cost_usd,
+                reask,
+                store,
+                Seams {
+                    resume: None,
+                    llm: None,
+                    preflight_sink: &|text| print!("{text}"),
+                },
+            )),
+        )
+    })
     .await
 }
 

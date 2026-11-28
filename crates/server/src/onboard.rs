@@ -1207,6 +1207,14 @@ impl ScanReport {
     /// not inspected. Files left out as scope (vendored, generated, binary, over the size limit)
     /// are not failures and are not counted here.
     pub fn incomplete_reasons(&self) -> Vec<String> {
+        self.incomplete_reasons_over(|_| true)
+    }
+
+    /// [`Self::incomplete_reasons`], counting only the failed parts `counts` keeps.
+    fn incomplete_reasons_over(
+        &self,
+        counts: impl Fn(&crate::ai_audit::FailedPass) -> bool,
+    ) -> Vec<String> {
         use crate::ai_audit::FailureClass;
         let mut out: Vec<String> = Vec::new();
         if let Some(e) = &self.ai_error {
@@ -1230,7 +1238,11 @@ impl ScanReport {
             ));
         }
         // A disclosed limit of the scope (a tool not run by policy) is not a failed part.
-        let parts = || self.failed_passes.iter().filter(|f| !f.scope_note);
+        let parts = || {
+            self.failed_passes
+                .iter()
+                .filter(|f| !f.scope_note && counts(f))
+        };
         let did_not_run = parts()
             .filter(|f| matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
             .count();
@@ -1277,6 +1289,35 @@ impl ScanReport {
             ));
         }
         out
+    }
+
+    /// Why a stage that reads across repos (the group reviewer, the possible-duplicate check) must
+    /// not start on this report, in plain words for the operator; `None` when it may.
+    ///
+    /// Owner ruling (#582): "A failure stops/pauses the scan, period." Such a stage reads every
+    /// repo's rows and fix text at once, so over a partial row set it would spend on a review
+    /// that the resume has to throw away and redo, and its output would describe an inspection
+    /// that never happened. It refuses while any part failed or did not run
+    /// ([`Self::incomplete_reasons`]) and while the run is outage-stopped. The outage stop is
+    /// named on its own although `incomplete_reasons` already counts it: the stage must never
+    /// start after a stop, whatever a later change to that list does.
+    pub fn cross_repo_stage_refusal(&self) -> Option<String> {
+        // A pipeline integrity disclosure is the final checks' finding about the run's own
+        // bookkeeping, not missing work: every repository's findings are there, and a recheck on
+        // a newer build replaces it (#588). It does not hold back a stage that spans repos.
+        let reasons = self.incomplete_reasons_over(|f| {
+            !f.pass
+                .starts_with(crate::scan_ledger::INTEGRITY_PASS_PREFIX)
+        });
+        if !reasons.is_empty() {
+            return Some(reasons.join("; "));
+        }
+        if self.ledger.is_outage_stopped() {
+            return Some(
+                "the run stopped because the model provider could not be reached".to_string(),
+            );
+        }
+        None
     }
 
     /// Record a repo the scan was asked to inspect and could not (a folder that is gone, files

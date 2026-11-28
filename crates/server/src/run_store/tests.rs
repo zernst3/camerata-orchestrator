@@ -3893,3 +3893,60 @@ async fn a_rerun_serves_the_good_reply_before_a_bad_one_stored_under_the_same_ke
     })
     .await;
 }
+
+/// One source of truth for "the provider answered" (#582 review): a reply the run's journal
+/// replays from an earlier attempt is recorded on the meter like any reply, and it is not a
+/// provider answer: it neither counts as a success nor clears the outage streak. A real answer
+/// through the same seam does.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_replayed_reply_recorded_on_the_meter_is_not_a_provider_answer() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Scripted::new();
+        {
+            let journal = JournalLlm::new(&model, store.clone());
+            journal.complete(ask("part one")).await.unwrap();
+        }
+        let store = reopen(store);
+        let control = Arc::new(crate::operator_stop::RunControl::new());
+        let seam =
+            crate::network_wait::run_model_seam(&model, Some(store.clone()), control.clone());
+        let meter = crate::operator_stop::with_run_control(control.clone(), async {
+            crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::default())
+        })
+        .await;
+        meter.health().note_failure(
+            crate::failure::FailureClass::Transport,
+            "Anthropic API request failed: connection reset by peer",
+        );
+        let before = meter.health().successes();
+        let calls = model.calls();
+        let replayed = seam.complete(ask("part one")).await.unwrap();
+        assert_eq!(model.calls(), calls, "answered from the run's store");
+        meter.record_stage(crate::stage_telemetry::Stage::Calibration, &replayed);
+        assert_eq!(
+            meter.health().successes(),
+            before,
+            "a replayed reply counted as a provider answer"
+        );
+        assert_eq!(
+            meter.health().streak(),
+            1,
+            "a replay does not clear the streak"
+        );
+
+        let real = seam.complete(ask("part two")).await.unwrap();
+        assert_eq!(model.calls(), calls + 1);
+        meter.record_stage(crate::stage_telemetry::Stage::Calibration, &real);
+        assert_eq!(
+            meter.health().successes(),
+            before + 1,
+            "a real answer counts"
+        );
+        assert_eq!(meter.health().streak(), 0);
+    })
+    .await;
+}

@@ -551,7 +551,22 @@ pub(crate) async fn submit_round(
                             }
                             // A credit or billing row (never billed) stops the run now, as in the
                             // stage runner, and is neither resubmitted nor second-tried.
-                            let sendable = !refused && !stop_run_on_billing_row(ctx.meter, &error);
+                            // A row the batch never ran (canceled or expired first, nothing
+                            // billed) is sent only by a resume (the run folder resends it when
+                            // the same items are submitted again), never by this process: a
+                            // send now would be billed once now and once more by that resume.
+                            let unrun = camerata_llm::failure::is_unrun_batch_row(&error);
+                            let sendable =
+                                !refused && !unrun && !stop_run_on_billing_row(ctx.meter, &error);
+                            let error = if unrun {
+                                format!(
+                                    "the batch was {} before this item ran; nothing was billed, \
+                                     and a resume sends it",
+                                    error.trim()
+                                )
+                            } else {
+                                error
+                            };
                             out.results.insert(
                                 w.custom_id.clone(),
                                 Err(ItemFailure {
@@ -587,7 +602,38 @@ pub(crate) async fn submit_round(
                 );
                 let error = disclosable_error(&format!("{:#}", failure.error));
                 let item = match &failure.batch_id {
-                    // Nothing was accepted, so nothing can be running: safe to send again.
+                    // The request may have reached the provider and been accepted with only the
+                    // reply lost (a time-out after sending, a dropped connection, a 5xx): the
+                    // batch may be running and billed. It is NOT sent again, which could bill the
+                    // same items twice outside the cap's sight.
+                    None if classify_pass_error(&failure.error) == FailureClass::Transport
+                        && !camerata_llm::failure::never_reached_provider(&failure.error) =>
+                    {
+                        if let Some(m) = ctx.meter {
+                            m.record_note(format!(
+                                "a batch of {} item(s) may have been accepted by the provider \
+                                 although its reply was lost ({error}); it was NOT sent again, \
+                                 since a second submission could bill the same items twice. \
+                                 Check the Anthropic console. Custom ids: {}.",
+                                sub.len(),
+                                sub.iter()
+                                    .map(|w| w.custom_id.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                        ItemFailure {
+                            reason: format!(
+                                "the batch submission may have been accepted by the provider \
+                                 although its reply was lost ({error}); it was not sent again, \
+                                 so it cannot be billed twice"
+                            ),
+                            resubmittable: false,
+                            second_tryable: false,
+                        }
+                    }
+                    // Nothing was accepted (the request provably never reached the provider, or
+                    // the provider refused it), so nothing can be running: safe to send again.
                     None => ItemFailure {
                         reason: format!("batch submission failed ({error})"),
                         resubmittable: true,
@@ -639,9 +685,7 @@ pub(crate) fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Re
     let Some(m) = meter else { return };
     match result {
         Ok(_) => m.health().note_success(),
-        Err(e) => m
-            .health()
-            .note_failure(classify_pass_error(e), &e.to_string()),
+        Err(e) => m.health().note_failed_error(e),
     }
 }
 

@@ -137,6 +137,14 @@ pub struct RunHealth {
     trigger: Mutex<Option<OutageTrigger>>,
     /// How many model calls have succeeded in all, never reset ([`Self::successes`]).
     successes: std::sync::atomic::AtomicU64,
+    /// When a real model call last succeeded (wall clock, compared with the start of a call whose
+    /// network wait ran out: [`Self::note_failed_error`]).
+    last_success: Mutex<Option<std::time::Instant>>,
+    /// Called once, when the run first stops ([`Self::on_trip`]).
+    trip_hooks: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
+    /// Set once the record counts only the provider's own answers
+    /// ([`Self::link_provider_answers`]): a reply recorded on the meter may be a replay.
+    linked: AtomicBool,
     clock: Clock,
 }
 
@@ -167,6 +175,9 @@ impl RunHealth {
             stopped: AtomicBool::new(false),
             trigger: Mutex::new(None),
             successes: std::sync::atomic::AtomicU64::new(0),
+            last_success: Mutex::new(None),
+            trip_hooks: Mutex::new(Vec::new()),
+            linked: AtomicBool::new(false),
             clock,
         }
     }
@@ -187,10 +198,40 @@ impl RunHealth {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// A model call succeeded: the provider is reachable, so the streak starts over.
+    /// A reply was recorded on the run's meter. When this record is linked to the run's journal
+    /// ([`Self::link_provider_answers`]) a recorded reply may be one the journal replayed, which
+    /// proves nothing about the provider: only [`Self::note_provider_answer`] counts then.
+    /// Otherwise (no journal, so no replay) the reply is the provider's own answer.
     pub fn note_success(&self) {
+        if self.linked.load(Ordering::SeqCst) {
+            return;
+        }
+        self.note_provider_answer();
+    }
+
+    /// Count only the provider's own answers from now on: the run's journal reports each one.
+    pub fn link_provider_answers(&self) {
+        self.linked.store(true, Ordering::SeqCst);
+    }
+
+    /// The provider itself answered a call (never a replay): the provider is reachable, so the
+    /// streak starts over. The one count of successes ([`Self::successes`]).
+    pub fn note_provider_answer(&self) {
         *self.streak_lock() = Streak::default();
+        *self
+            .last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
         self.successes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Whether a real model call succeeded at or after `since` (a reply replayed from the run's
+    /// journal is never one: it is not counted here).
+    fn succeeded_since(&self, since: std::time::Instant) -> bool {
+        self.last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|at| at >= since)
     }
 
     /// How many model calls have succeeded so far. A call that waits out a rate limit reads it
@@ -239,6 +280,37 @@ impl RunHealth {
         }
     }
 
+    /// A model call failed with `error`, after its retries and the long network wait. The one
+    /// entry point for a failed call's error: an error tagged
+    /// [`camerata_llm::network_wait::NetworkWaitExhausted`] (the call waited the full network
+    /// wait while no other call got an answer) stops the run at once, since the streak's own
+    /// span has been waited out already, many times over; any other error goes to
+    /// [`Self::note_failure`] with its class.
+    pub fn note_failed_error(&self, error: &anyhow::Error) {
+        if let Some(tag) = camerata_llm::network_wait::network_wait_exhausted_of(error) {
+            // This record is the one source of truth for "did anything get through": a real call
+            // that succeeded since this one started means the network is up and only this
+            // request is failing, so it is one step of the usual streak.
+            if self.succeeded_since(tag.started) {
+                self.note_failure(FailureClass::Transport, &error.to_string());
+                return;
+            }
+            self.trip(
+                FailureClass::Transport,
+                format!(
+                    "a model call waited {} minutes for the network and no other call got through \
+                     (last: {error})",
+                    camerata_llm::network_wait::NETWORK_WAIT_TOTAL.as_secs() / 60
+                ),
+            );
+            return;
+        }
+        self.note_failure(
+            crate::ai_audit::classify_pass_error(error),
+            &error.to_string(),
+        );
+    }
+
     /// A rate limit or an overload did not clear within the longest a call waits for one.
     /// `successes_before` is [`Self::successes`] as the call started. If no call succeeded since,
     /// the provider is answering but will not serve the run at all, and every piece would wait
@@ -258,6 +330,26 @@ impl RunHealth {
         true
     }
 
+    /// A call waited the whole long network wait ([`camerata_llm::network_wait`]) and the
+    /// provider still could not be reached. `successes_before` is [`Self::successes`] as the call
+    /// started. If no call succeeded since, the network is down for the whole run: stop it, as a
+    /// transport outage, at once. If one did, this request alone is failing and the run goes on.
+    /// Returns whether the run was stopped.
+    pub fn note_network_wait_exhausted(&self, detail: &str, successes_before: u64) -> bool {
+        if self.successes() != successes_before {
+            return false;
+        }
+        self.trip(
+            FailureClass::Transport,
+            format!(
+                "a model call waited {} minutes for the network and no other call got through \
+                 (last: {detail})",
+                camerata_llm::network_wait::NETWORK_WAIT_TOTAL.as_secs() / 60
+            ),
+        );
+        true
+    }
+
     fn trip(&self, class: FailureClass, detail: String) {
         let mut trigger = self
             .trigger
@@ -270,7 +362,38 @@ impl RunHealth {
                 at: crate::client_source::records::now_rfc3339(),
             });
         }
-        self.stopped.store(true, Ordering::SeqCst);
+        let first = !self.stopped.swap(true, Ordering::SeqCst);
+        if first {
+            let hooks = std::mem::take(
+                &mut *self
+                    .trip_hooks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            for hook in hooks {
+                hook();
+            }
+        }
+    }
+
+    /// Call `hook` when the run first stops (the outage stop, an auth or billing stop, a rate
+    /// limit that would not clear), or at once if it already has.
+    pub fn on_trip(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        if self.is_stopped() {
+            hook();
+            return;
+        }
+        let mut hooks = self
+            .trip_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Checked again under the lock: a trip between the check above and here took the list.
+        if self.is_stopped() {
+            drop(hooks);
+            hook();
+            return;
+        }
+        hooks.push(hook);
     }
 
     /// The clause that says why the run stopped ([`OutageTrigger::phrase`]); the plain
@@ -369,6 +492,22 @@ mod tests {
         // With nothing succeeding since the call started, the same refusal stops the run.
         assert!(h.note_wait_exhausted("HTTP 429", h.successes()));
         assert!(h.is_stopped());
+    }
+
+    #[test]
+    fn a_network_wait_that_ran_out_stops_the_run_only_if_no_call_succeeded_meanwhile() {
+        let (h, _) = health();
+        let before = h.successes();
+        h.note_success(); // another piece's call got through while this one waited
+        assert!(!h.note_network_wait_exhausted("connection reset", before));
+        assert!(
+            !h.is_stopped(),
+            "the network is up: this request alone fails"
+        );
+        assert!(h.note_network_wait_exhausted("connection reset", h.successes()));
+        assert!(h.is_stopped());
+        assert_eq!(h.trigger().map(|t| t.class), Some(FailureClass::Transport));
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE);
     }
 
     #[test]

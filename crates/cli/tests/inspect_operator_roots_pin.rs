@@ -29,13 +29,30 @@ fn the_export_hands_the_gate_the_repo_folders_of_the_run() {
 
 #[test]
 fn a_resume_runs_the_pipeline_on_the_arguments_the_run_saved() {
-    let resume = body_of("pub async fn resume_inspect(");
+    // `resume_inspect` is `resume_inspect_controlled` on a fresh run control (#583).
+    assert!(
+        body_of("pub async fn resume_inspect(").contains("resume_inspect_controlled("),
+        "resume_inspect must go through resume_inspect_controlled"
+    );
+    let resume = body_of("pub async fn resume_inspect_controlled(");
     assert!(
         resume.contains("serde_json::from_value(record.args.clone())"),
         "a resume must restore the saved arguments, repo folders included"
     );
     assert!(
-        resume.contains("run_inspect_pipeline_with("),
+        resume.contains("run_inspect_pipeline_controlled("),
         "a resume must go through the pipeline whose export passes the repo folders"
+    );
+    // The pipeline a resume runs is the one whose export passes the repo folders.
+    assert!(
+        body_of("pub async fn run_inspect_pipeline_controlled(")
+            .contains("run_inspect_pipeline_as("),
+        "the controlled pipeline must be the one pipeline"
+    );
+    assert!(
+        body_of("async fn run_inspect_pipeline_as(").contains(
+            "&args.repo_dirs(),\n    )\n    .await\n    {\n        Ok(released) => released,"
+        ),
+        "the pipeline must pass the run's repo folders to release_product_export"
     );
 }

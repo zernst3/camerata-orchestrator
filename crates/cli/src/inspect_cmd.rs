@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod finder;
+pub mod operator_stop;
 pub mod plan_only;
+pub use operator_stop::EXIT_OPERATOR_STOPPED;
 pub mod recheck;
 pub use recheck::{recheck_saved_inspect, run_recheck_saved, run_recheck_saved_with_store};
 pub(crate) mod preflight;
@@ -470,6 +472,9 @@ pub enum InspectError {
     IncompleteRun(Box<IncompleteRun>),
     /// `--resume` was given a run that is already complete: nothing to do, and it says so.
     AlreadyComplete(String),
+    /// The operator stopped the run (Ctrl+C or SIGTERM, #583): nothing more was sent, the live
+    /// batches were canceled, and `--resume` runs what remains.
+    StoppedByOperator(Box<operator_stop::OperatorStopped>),
 }
 
 /// A client export refused because the run did not complete, with the run's own account.
@@ -502,6 +507,7 @@ impl InspectError {
                 incomplete_exit_code(run.refusal.outage, run.refusal.cost_capped)
             }
             InspectError::AlreadyComplete(_) => 0,
+            InspectError::StoppedByOperator(_) => EXIT_OPERATOR_STOPPED,
         }
     }
 }
@@ -548,6 +554,7 @@ impl std::fmt::Display for InspectError {
                 run.ledger_path.display()
             ),
             InspectError::AlreadyComplete(message) => write!(f, "{message}"),
+            InspectError::StoppedByOperator(stopped) => write!(f, "{stopped}"),
         }
     }
 }
@@ -963,6 +970,7 @@ pub async fn run_inspect_with_key_presence(
         args,
         has_api_key,
         &camerata_server::credentials::MemoryCredentialStore::new(),
+        Arc::new(camerata_server::operator_stop::RunControl::new()),
     )
     .await
 }
@@ -974,8 +982,9 @@ async fn run_inspect_pipeline(
     args: InspectArgs,
     has_api_key: bool,
     creds: &dyn camerata_server::credentials::CredentialStore,
+    control: Arc<camerata_server::operator_stop::RunControl>,
 ) -> Result<InspectOutcome, InspectError> {
-    run_inspect_pipeline_with(
+    run_inspect_pipeline_controlled(
         args,
         has_api_key,
         creds,
@@ -984,6 +993,7 @@ async fn run_inspect_pipeline(
             llm: None,
             preflight_sink: &|text| print!("{text}"),
         },
+        control,
     )
     .await
 }
@@ -1006,28 +1016,60 @@ pub async fn run_inspect_pipeline_with(
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
 ) -> Result<InspectOutcome, InspectError> {
+    run_inspect_pipeline_controlled(
+        args,
+        has_api_key,
+        creds,
+        seams,
+        Arc::new(camerata_server::operator_stop::RunControl::new()),
+    )
+    .await
+}
+
+/// [`run_inspect_pipeline_with`] on the run control `control`: the handle the operator's stop
+/// ([`operator_stop::run_stoppable`]) holds, carried into the run's model seam so a stop reaches
+/// every send and every live batch.
+pub async fn run_inspect_pipeline_controlled(
+    args: InspectArgs,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+    control: Arc<camerata_server::operator_stop::RunControl>,
+) -> Result<InspectOutcome, InspectError> {
     // Boxed: the pipeline is one very large future, and callers (a test thread, the command line)
     // hold this one on a small stack. The box keeps theirs a pointer.
-    Box::pin(run_inspect_pipeline_as(
+    // The pipeline is boxed before it is handed on, so only the box moves.
+    let pipeline = Box::pin(run_inspect_pipeline_as(
         args,
         has_api_key,
         creds,
         seams,
         false,
+        control.clone(),
+    ));
+    let out = Box::pin(camerata_server::operator_stop::with_run_control(
+        control.clone(),
+        pipeline,
     ))
-    .await
+    .await;
+    // The run's folder is let go when the pipeline ends, whoever still holds the control, so a
+    // resume (even in this same process) can open it.
+    control.release_store();
+    out
 }
 
 /// The one pipeline, as a new run or a resume (`rerun` false) or as a rerun of a saved run's
 /// deterministic stages on this build (`rerun` true, #588). A rerun is a resume whose model seam
 /// has no client behind it: every stage runs again from the saved inputs, every model reply comes
-/// from the run's store, and a reply the store does not hold refuses the whole rerun.
+/// from the run's store, and a reply the store does not hold refuses the whole rerun. `control`
+/// is the run's stop handle (#583).
 async fn run_inspect_pipeline_as(
     args: InspectArgs,
     has_api_key: bool,
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
     rerun: bool,
+    control: Arc<camerata_server::operator_stop::RunControl>,
 ) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
@@ -1060,6 +1102,8 @@ async fn run_inspect_pipeline_as(
     }
     write_start_warnings(&mut std::io::stderr(), &warnings);
     let (manifest_path, ledger_file) = args.state_paths();
+    // The operator's stop records itself in the failure report beside this ledger.
+    control.set_ledger_file(ledger_file.clone());
     // A multi-repo run's one cache and one ledger cover several folders; record which, so that
     // deleting any one of them can find and remove the files (see `project_files_covering`).
     // Written before anything is spent: a cache that deletion could not find must not exist.
@@ -1517,13 +1561,20 @@ async fn run_inspect_pipeline_as(
                 ))
             }
         };
-    let journaled = store
-        .as_ref()
-        .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
-    let model_seam: &dyn camerata_server::llm::LlmPort = match &journaled {
-        Some(j) => j.as_ref(),
-        None => base,
+    // The run's seam: journaled into the run folder, and with the long network wait around every
+    // send, so a short blip costs minutes and not the run (#582). The app builds its seam with the
+    // same function. A rerun's store-only seam has no network behind it, so it never waits.
+    let run_seam: Option<Box<dyn camerata_server::llm::LlmPort + '_>> = if store_only_seam.is_some()
+    {
+        camerata_server::network_wait::rerun_model_seam(base, store.clone())
+    } else {
+        Some(camerata_server::network_wait::run_model_seam(
+            base,
+            store.clone(),
+            control.clone(),
+        ))
     };
+    let model_seam: &dyn camerata_server::llm::LlmPort = run_seam.as_deref().unwrap_or(base);
     // The agent finder's setup: one value, built once here and carried into the audit. The run
     // builds the agent from it on its own shared meter. A test that already stands an agent in
     // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
@@ -2049,19 +2100,23 @@ pub async fn run_resume(
 ) -> Result<InspectOutcome, InspectError> {
     let store = &camerata_server::credentials::KeyringCredentialStore;
     let has_api_key = api_key_present(store);
-    resume_inspect(
-        run,
-        repos,
-        export,
-        max_cost_usd,
-        has_api_key,
-        store,
-        Seams {
-            resume: None,
-            llm: None,
-            preflight_sink: &|text| print!("{text}"),
-        },
-    )
+    // Ctrl+C and SIGTERM stop the resume as they stop a run (#583).
+    operator_stop::run_stoppable(operator_stop::spawn_stop_listener(), |control| {
+        resume_inspect_controlled(
+            run,
+            repos,
+            export,
+            max_cost_usd,
+            has_api_key,
+            store,
+            Seams {
+                resume: None,
+                llm: None,
+                preflight_sink: &|text| print!("{text}"),
+            },
+            control,
+        )
+    })
     .await
 }
 
@@ -2076,6 +2131,31 @@ pub async fn resume_inspect(
     has_api_key: bool,
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    resume_inspect_controlled(
+        run,
+        repos,
+        export,
+        max_cost_usd,
+        has_api_key,
+        creds,
+        seams,
+        Arc::new(camerata_server::operator_stop::RunControl::new()),
+    )
+    .await
+}
+
+/// [`resume_inspect`] on the run control `control` (see [`run_inspect_pipeline_controlled`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_inspect_controlled(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+    control: Arc<camerata_server::operator_stop::RunControl>,
 ) -> Result<InspectOutcome, InspectError> {
     use camerata_server::run_store as rs;
     let project_key = match repos {
@@ -2111,7 +2191,7 @@ pub async fn resume_inspect(
     if seams.llm.is_none() {
         require_api_key_for_client_inspection(args.backend, has_api_key)?;
     }
-    run_inspect_pipeline_with(
+    run_inspect_pipeline_controlled(
         args,
         has_api_key,
         creds,
@@ -2119,6 +2199,7 @@ pub async fn resume_inspect(
             resume: Some(run_id),
             ..seams
         },
+        control,
     )
     .await
 }
@@ -2190,6 +2271,8 @@ pub async fn rerun_deterministic_inspect(
             ..seams
         },
         true,
+        // A rerun makes no model call: there is nothing for an operator's stop to cancel.
+        Arc::new(camerata_server::operator_stop::RunControl::new()),
     ))
     .await
 }
@@ -2500,7 +2583,15 @@ pub fn refuse_unfit_build_for_client(
 /// Settings writes), with `ANTHROPIC_API_KEY` as the fallback, then runs
 /// [`run_inspect_with_store`].
 pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, InspectError> {
-    run_inspect_with_store(args, &camerata_server::credentials::KeyringCredentialStore).await
+    // Ctrl+C and SIGTERM stop the run the way the app's stop does (#583).
+    operator_stop::run_stoppable(operator_stop::spawn_stop_listener(), |control| {
+        run_inspect_with_store_controlled(
+            args,
+            &camerata_server::credentials::KeyringCredentialStore,
+            control,
+        )
+    })
+    .await
 }
 
 /// [`run_inspect`] with the credential store injected (tests pass an in-memory one so nothing
@@ -2513,13 +2604,27 @@ pub async fn run_inspect_with_store(
     args: InspectArgs,
     store: &dyn camerata_server::credentials::CredentialStore,
 ) -> Result<InspectOutcome, InspectError> {
+    run_inspect_with_store_controlled(
+        args,
+        store,
+        Arc::new(camerata_server::operator_stop::RunControl::new()),
+    )
+    .await
+}
+
+/// [`run_inspect_with_store`] on the run control `control`.
+async fn run_inspect_with_store_controlled(
+    args: InspectArgs,
+    store: &dyn camerata_server::credentials::CredentialStore,
+    control: Arc<camerata_server::operator_stop::RunControl>,
+) -> Result<InspectOutcome, InspectError> {
     let has_api_key = api_key_present(store);
     require_api_key_for_client_inspection(args.backend, has_api_key)?;
     refuse_unfit_build_for_client(
         args.client_engagement,
         &camerata_server::run_store::engine_pin::BuildId::current(),
     )?;
-    run_inspect_pipeline(args, has_api_key, store).await
+    run_inspect_pipeline(args, has_api_key, store, control).await
 }
 
 /// Format the final report block `main.rs` prints after a successful run.

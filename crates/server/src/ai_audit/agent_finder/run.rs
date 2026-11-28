@@ -1335,7 +1335,7 @@ pub async fn with_agent_override<F: std::future::Future>(
 
 /// Whether a test agent stands in for the run's piece agent (see [`with_agent_override`]).
 pub fn agent_override_is_set() -> bool {
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if AGENT_FACTORY_OVERRIDE.try_with(|_| ()).is_ok() {
             return true;
@@ -1345,12 +1345,12 @@ pub fn agent_override_is_set() -> bool {
 }
 
 /// Builds a test agent from the run's shared meter (`test-support` only).
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub type AgentFactoryOverride = std::sync::Arc<
     dyn Fn(std::sync::Arc<UsageMeter>) -> std::sync::Arc<dyn PieceAgent> + Send + Sync,
 >;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static AGENT_FACTORY_OVERRIDE: AgentFactoryOverride;
 }
@@ -1358,12 +1358,31 @@ tokio::task_local! {
 /// Run `fut` with a test agent that is built, once for each repository, from the run's own
 /// shared meter: the seam that lets a test put the real API transport over a scripted wire, with
 /// every turn counted on the run's meter. Carried with the future like [`with_agent_override`].
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn with_agent_factory_override<F: std::future::Future>(
     factory: AgentFactoryOverride,
     fut: F,
 ) -> F::Output {
     AGENT_FACTORY_OVERRIDE.scope(factory, fut).await
+}
+
+/// The agent factory override in scope here, if any (`test-support` only): a job the app spawns
+/// carries it into its own task, the way the app's other test seams are carried.
+#[cfg(any(test, feature = "test-support"))]
+pub fn agent_factory_override_in_scope() -> Option<AgentFactoryOverride> {
+    AGENT_FACTORY_OVERRIDE.try_with(std::sync::Arc::clone).ok()
+}
+
+/// Run `fut` under `factory` when there is one (`test-support` only).
+#[cfg(any(test, feature = "test-support"))]
+pub async fn with_optional_agent_factory_override<F: std::future::Future>(
+    factory: Option<AgentFactoryOverride>,
+    fut: F,
+) -> F::Output {
+    match factory {
+        Some(f) => AGENT_FACTORY_OVERRIDE.scope(f, fut).await,
+        None => fut.await,
+    }
 }
 
 pub use super::cli_agent::EngagementKind;
@@ -1623,7 +1642,7 @@ pub(crate) async fn find_repo_for_run_with(
         )
         .await;
     }
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Ok(factory) = AGENT_FACTORY_OVERRIDE.try_with(std::sync::Arc::clone) {
             let shared_meter = meter.map_or_else(

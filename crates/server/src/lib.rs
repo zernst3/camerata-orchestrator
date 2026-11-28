@@ -93,8 +93,10 @@ pub mod live_fleet;
 pub mod llm;
 pub mod machine_files;
 mod native_units;
+pub mod network_wait;
 pub mod notify;
 pub mod onboard;
+pub mod operator_stop;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;
@@ -3032,6 +3034,10 @@ pub(crate) async fn start_audit_job(
     // project-agnostic recent_scan fallback, and the persisted inspection entry) through the
     // ONE shared writer, `AppState::set_last_scan`, the instant the report is final.
     let scan_state = state.clone();
+    // TEST SUPPORT: a test's agent factory reaches the job's own task (task-locals do not cross
+    // `tokio::spawn`). Production builds have no such seam.
+    #[cfg(any(test, feature = "test-support"))]
+    let test_agent_factory = crate::ai_audit::agent_finder::run::agent_factory_override_in_scope();
     tokio::spawn(async move {
         // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
         // rationale): everything below runs the entire AI + deterministic pipeline in this
@@ -3345,12 +3351,20 @@ pub(crate) async fn start_audit_job(
                 Some(usage_ledger.clone()),
             )
             .with_session_sink(sessions.clone());
-            let journaled = run_store
-                .as_ref()
-                .map(|s| rs::journal::wrap(&real, s.clone()));
-            let model_seam: &dyn crate::llm::LlmPort = match &journaled {
-                Some(j) => j.as_ref(),
-                None => &real,
+            // The run's seam, built by the one function the command line uses: journaled into
+            // the run folder, with the long network wait around every send (#582).
+            let run_control = std::sync::Arc::new(crate::operator_stop::RunControl::new());
+            let run_seam =
+                crate::network_wait::run_model_seam(&real, run_store.clone(), run_control.clone());
+            let model_seam: &dyn crate::llm::LlmPort = run_seam.as_ref();
+            // The cockpit's Stop is a flag on the job: it reaches the run's control, so a cancel
+            // refuses every later send and ends a network wait with no other send (#583).
+            let _cancel_watch = {
+                let jobs = body_jobs.clone();
+                let id = body_jid.clone();
+                crate::operator_stop::stop_on_cancel(run_control.clone(), move || {
+                    jobs.is_cancel_requested(&id)
+                })
             };
             // The review tree's stage 2 reads the final report with the run's own controls, and
             // never runs where the compliance gate blocked the AI review.
@@ -3388,33 +3402,43 @@ pub(crate) async fn start_audit_job(
                     return;
                 }
             };
-            let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
-                run_store.as_ref().map(|s| s.checkpoint_dir()),
-                crate::prompt_frame::with_seed(
-                    token_seed,
-                    crate::onboard::audit_repos_with_llm_controlled(
-                        model_seam,
-                        &sources,
-                        &selected,
-                        notes,
-                        model.as_deref(),
-                        calibration_model.as_deref(),
-                        mode,
-                        thorough,
-                        Some((&transcripts, SCAN_AUDIT_KEY)),
-                        Some((&body_jobs, &body_jid)),
-                        prior.as_ref(),
-                        deep,
-                        soc2_enabled,
-                        run_ai_review,
-                        run_deterministic,
-                        backend_resolution,
-                        corpus.as_ref(),
-                        &chosen_options,
-                        run_controls,
+            // The run's control is in scope, so the meters the audit makes link the run's outage
+            // stop to it: a call that is waiting out the network never sends after the stop.
+            let audit = Box::pin(crate::operator_stop::with_run_control(
+                run_control.clone(),
+                Box::pin(crate::checkpoint::with_run_checkpoints(
+                    run_store.as_ref().map(|s| s.checkpoint_dir()),
+                    crate::prompt_frame::with_seed(
+                        token_seed,
+                        crate::onboard::audit_repos_with_llm_controlled(
+                            model_seam,
+                            &sources,
+                            &selected,
+                            notes,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            mode,
+                            thorough,
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
+                            Some((&body_jobs, &body_jid)),
+                            prior.as_ref(),
+                            deep,
+                            soc2_enabled,
+                            run_ai_review,
+                            run_deterministic,
+                            backend_resolution,
+                            corpus.as_ref(),
+                            &chosen_options,
+                            run_controls,
+                        ),
                     ),
-                ),
+                )),
             ));
+            #[cfg(any(test, feature = "test-support"))]
+            let audit = crate::ai_audit::agent_finder::run::with_optional_agent_factory_override(
+                test_agent_factory.clone(),
+                audit,
+            );
             let (mut report, mut manifest) =
                 crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
                     .await;
@@ -3566,34 +3590,37 @@ pub(crate) async fn start_audit_job(
                     .collect();
                 // With the run's own delimiter seed in scope, like the audit above, so a resumed
                 // run asks the group reviewer the same questions and its stored replies match.
-                crate::checkpoint::with_run_checkpoints(
-                    run_store.as_ref().map(|s| s.checkpoint_dir()),
-                    crate::prompt_frame::with_seed(token_seed, async {
-                        crate::ai_audit::group_review::review_scan_report(
-                            &mut report,
-                            model_seam,
-                            &review_controls,
-                            &rules,
-                            llm_backend == crate::llm::Backend::Cli,
-                            mode == crate::ai_audit::ScanMode::Batch,
-                            Some((&body_jobs, &body_jid)),
-                            Some((&transcripts, SCAN_AUDIT_KEY)),
-                            corpus.as_ref(),
-                        )
-                        .await;
-                        // The possible-duplicate check reads the Fix ids the group reviewer
-                        // just made; a failure of it is a note, never a failed part.
-                        crate::possible_duplicate::check::check_possible_duplicates(
-                            &mut report,
-                            model_seam,
-                            &review_controls,
-                            llm_backend == crate::llm::Backend::Cli,
-                            mode == crate::ai_audit::ScanMode::Batch,
-                            Some((&body_jobs, &body_jid)),
-                            Some((&transcripts, SCAN_AUDIT_KEY)),
-                        )
-                        .await;
-                    }),
+                crate::operator_stop::with_run_control(
+                    run_control.clone(),
+                    Box::pin(crate::checkpoint::with_run_checkpoints(
+                        run_store.as_ref().map(|s| s.checkpoint_dir()),
+                        crate::prompt_frame::with_seed(token_seed, async {
+                            crate::ai_audit::group_review::review_scan_report(
+                                &mut report,
+                                model_seam,
+                                &review_controls,
+                                &rules,
+                                llm_backend == crate::llm::Backend::Cli,
+                                mode == crate::ai_audit::ScanMode::Batch,
+                                Some((&body_jobs, &body_jid)),
+                                Some((&transcripts, SCAN_AUDIT_KEY)),
+                                corpus.as_ref(),
+                            )
+                            .await;
+                            // The possible-duplicate check reads the Fix ids the group reviewer
+                            // just made; a failure of it is a note, never a failed part.
+                            crate::possible_duplicate::check::check_possible_duplicates(
+                                &mut report,
+                                model_seam,
+                                &review_controls,
+                                llm_backend == crate::llm::Backend::Cli,
+                                mode == crate::ai_audit::ScanMode::Batch,
+                                Some((&body_jobs, &body_jid)),
+                                Some((&transcripts, SCAN_AUDIT_KEY)),
+                            )
+                            .await;
+                        }),
+                    )),
                 )
                 .await;
             }

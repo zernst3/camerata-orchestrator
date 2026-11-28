@@ -44,6 +44,8 @@ pub struct KeyReaderConfig {
     pub candidates: Vec<PathBuf>,
     pub timeout: Duration,
     /// Set once a run failed: the failure is remembered for the life of the process.
+    // Read only by the macOS reader; Linux keeps its Secret Service direct read.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     failed: std::sync::Arc<std::sync::Mutex<Option<&'static str>>>,
 }
 

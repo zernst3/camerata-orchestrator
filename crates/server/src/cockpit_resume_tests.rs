@@ -33,6 +33,14 @@ if os.environ.get("CAMERATA_FAKE_WARM"):
 # warm-up run has the test harness's stdin, which never ends.
 prompt = sys.stdin.read() if "-p" in args else ""
 def note(stage):
+    drop = os.environ.get("FAKE_DROP_STAGE_FILE", "")
+    if drop and os.path.exists(drop) and open(drop).read().strip() == stage:
+        log = os.environ.get("FAKE_LOG")
+        if log:
+            with open(log, "a") as f:
+                f.write("dropped " + stage + "\n")
+        sys.stderr.write("API Error: Unable to connect to API (ECONNREFUSED): connection refused\\n")
+        sys.exit(1)
     down = os.environ.get("FAKE_503_STAGE_FILE", "")
     if down and os.path.exists(down) and open(down).read().strip() == stage:
         sys.stderr.write("API Error: 503 Service Unavailable\\n")
@@ -1095,6 +1103,19 @@ async fn interrupted_scan_with_finder() -> InterruptedScan {
 }
 
 async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
+    scan_rig_hooked(mode, agent_finder, None).await
+}
+
+/// Called with the app state and the job's id as soon as a rig's job is started.
+type StartedHook<'a> = &'a (dyn Fn(&AppState, &str) + Sync);
+
+/// [`scan_rig`], calling `started` with the job's id as soon as the job is started (before it
+/// finishes). A hooked rig makes no assumption about how the scan ends.
+async fn scan_rig_hooked(
+    mode: &str,
+    agent_finder: bool,
+    started: Option<StartedHook<'_>>,
+) -> InterruptedScan {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     let state_dir = root.path().join("state");
@@ -1118,9 +1139,14 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     let group_review_down = root.path().join("group-review-down");
     // `stage503:<stage>` takes that stage's calls down with a 503 instead of the group review's.
     let stage_down = root.path().join("stage-503");
+    // `drop:<stage>` drops that stage's connections (a transport failure) instead (#582).
+    let stage_drop = root.path().join("stage-drop");
     let outage_flag = if let Some(stage) = mode.strip_prefix("stage503:") {
         std::fs::write(&stage_down, stage).unwrap();
         stage_down.clone()
+    } else if let Some(stage) = mode.strip_prefix("drop:") {
+        std::fs::write(&stage_drop, stage).unwrap();
+        stage_drop.clone()
     } else {
         std::fs::write(&group_review_down, mode).unwrap();
         group_review_down.clone()
@@ -1133,6 +1159,7 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     let guards = vec![
         camerata_test_env::EnvGuard::set("FAKE_GROUP_REVIEW_DOWN", &group_review_down),
         camerata_test_env::EnvGuard::set("FAKE_503_STAGE_FILE", &stage_down),
+        camerata_test_env::EnvGuard::set("FAKE_DROP_STAGE_FILE", &stage_drop),
         camerata_test_env::EnvGuard::set("PATH", &path),
         camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir),
         camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
@@ -1183,8 +1210,11 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
             .unwrap();
     }
     let job_id = start_audit_job(&state, audit_request(), AuditJobOptions::default()).await;
+    if let Some(started) = started {
+        started(&state, &job_id);
+    }
     let job = finished(&state, &job_id).await;
-    if agent_finder {
+    if agent_finder || started.is_some() {
         // Whatever the job's status, the run's folder is the only one in the state folder.
         let run_id = std::fs::read_dir(crate::run_store::runs_dir())
             .expect("the scan made a run folder")
@@ -1536,31 +1566,47 @@ async fn group_review_outage_ends_in_bounded_time(mode: &str) {
         crate::run_store::read_record(&rig.run_id).unwrap().status,
         crate::run_store::RunStatus::Incomplete
     );
-    // What the policy decided: it waited, no single call spent more than its 60 s budget waiting,
-    // and each wait is one of the schedule's steps (5, 20, 60 clipped to 35 for a 503; 2, 8, 30
-    // for a lost connection).
+    // What the policy decided: it waited, each send spent no more than its 60 s budget on the
+    // transport's quick retries (5, 20, 60 clipped to 35 for a 503; 2, 8, 30 for a lost
+    // connection), and between sends the call waited the long network wait (#582: 1, 2, 4 and 8
+    // minutes), five sends and fifteen minutes of network wait a call.
     let waits = recorder.0.secs();
     assert!(!waits.is_empty(), "the outage was retried: {waits:?}");
-    let allowed: &[u64] = if mode == "transport" {
+    let quick: &[u64] = if mode == "transport" {
         &[2, 8, 30]
     } else {
         &[5, 20, 35]
     };
+    let network: Vec<u64> = crate::network_wait::NETWORK_WAIT_STEPS
+        .iter()
+        .map(std::time::Duration::as_secs)
+        .collect();
+    let allowed: Vec<u64> = quick
+        .iter()
+        .copied()
+        .chain(network.iter().copied())
+        .collect();
     for w in &waits {
         assert!(
             allowed.contains(w),
             "wait {w} is not a step of {allowed:?}: {waits:?}"
         );
     }
-    let per_call: u64 = if mode == "transport" { 40 } else { 60 };
+    let quick_per_send: u64 = quick.iter().sum();
+    let per_call: u64 = quick_per_send * (network.len() as u64 + 1)
+        + crate::network_wait::NETWORK_WAIT_TOTAL.as_secs();
     assert_eq!(
         waits.iter().sum::<u64>() % per_call,
         0,
         "every call ran its whole schedule and no more: {waits:?}"
     );
     assert!(
-        waits.contains(allowed.last().unwrap()),
+        waits.contains(quick.last().unwrap()),
         "the last step of the schedule was taken (a 503's is clipped to the 35 s left): {waits:?}"
+    );
+    assert!(
+        waits.contains(network.last().unwrap()),
+        "the whole network wait was taken before the call failed: {waits:?}"
     );
     // The failed part is listed, so a resume knows what to run.
     let scan = rig.state.get_last_scan(&rig.project_id).unwrap();
@@ -2027,4 +2073,247 @@ async fn the_synchronous_scan_route_refuses_a_client_inspection_on_a_dirty_build
         why.contains("cannot start an inspection for a client"),
         "{why}"
     );
+}
+
+// ---- #582: the app job stops on a long outage and starts no later stage --------------------
+
+/// The app's job path, end to end: the fix stage's connections drop for good. Every call waits the
+/// long network wait (instant here), the run stops with the outage stop, and the group reviewer is
+/// never called. Once the network is back, "Run what remains" finishes the run and the group review
+/// runs then, over the whole set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn an_app_scan_stopped_by_an_outage_starts_no_group_review_and_a_resume_runs_it() {
+    if !camerata_test_env::python3_on_path_for("an_app_scan_stopped_by_an_outage") {
+        return;
+    }
+    let waits = crate::network_wait::InstantWaits::install();
+    let rig = interrupted_scan_with("drop:fix").await;
+    let scan = rig.state.get_last_scan(&rig.project_id).unwrap();
+    assert!(
+        scan.ledger.is_outage_stopped(),
+        "the long drop stopped the run: {:?}",
+        scan.failed_passes
+    );
+    assert!(
+        waits
+            .waits()
+            .contains(crate::network_wait::NETWORK_WAIT_STEPS.last().unwrap()),
+        "the run waited the whole network wait first: {:?}",
+        waits.waits()
+    );
+    let calls = |log: &std::path::Path| std::fs::read_to_string(log).unwrap_or_default();
+    let group_reviews = |text: &str| text.lines().filter(|l| *l == "group_review").count();
+    assert_eq!(
+        group_reviews(&calls(&rig.log)),
+        0,
+        "the group reviewer was called after the outage stop: {}",
+        calls(&rig.log)
+    );
+
+    // The network is back: the resume finishes the run, and the group review runs then.
+    std::fs::remove_file(&rig.outage_flag).unwrap();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().status,
+        crate::run_store::RunStatus::Complete
+    );
+    assert!(group_reviews(&calls(&rig.log)) > 0, "{}", calls(&rig.log));
+}
+
+/// A sleeper for the long network wait that, at the first step, cancels the app's job the way the
+/// cockpit's Stop does (the job's cancel flag), lets a second pass, and records how many model
+/// calls had gone out by then. Every other wait is instant.
+struct CancelAtFirstWait {
+    job: std::sync::OnceLock<(crate::jobs::JobStore, String)>,
+    sent_at_cancel: std::sync::Mutex<Option<usize>>,
+}
+
+impl crate::network_wait::Sleeper for CancelAtFirstWait {
+    fn sleep<'a>(
+        &'a self,
+        d: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let first = d == crate::network_wait::NETWORK_WAIT_STEPS[0]
+                && self.sent_at_cancel.lock().unwrap().is_none();
+            if !first {
+                tokio::task::yield_now().await;
+                return;
+            }
+            while self.job.get().is_none() {
+                tokio::task::yield_now().await;
+            }
+            let (jobs, id) = self.job.get().unwrap();
+            // What the cockpit's Stop does (`routes::onboarding`): the job is canceled.
+            jobs.cancel(id);
+            // A call already on its way when the Stop came lands in the log meanwhile.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let sent = std::fs::read_to_string(std::env::var("FAKE_LOG").unwrap_or_default())
+                .unwrap_or_default()
+                .lines()
+                .count();
+            *self.sent_at_cancel.lock().unwrap() = Some(sent);
+        })
+    }
+}
+
+/// The cockpit's Stop during an outage (#583): the job's cancel reaches the run's control, so a
+/// call that is waiting out the network never sends again, and nothing else is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_cockpit_stop_during_a_network_wait_sends_nothing_more() {
+    if !camerata_test_env::python3_on_path_for("the_cockpit_stop_during_a_network_wait") {
+        return;
+    }
+    let sleeper = Arc::new(CancelAtFirstWait {
+        job: std::sync::OnceLock::new(),
+        sent_at_cancel: std::sync::Mutex::new(None),
+    });
+    crate::network_wait::set_process_sleeper(Some(sleeper.clone()));
+    let hook = |state: &AppState, id: &str| {
+        let _ = sleeper.job.set((state.jobs.clone(), id.to_string()));
+    };
+    let rig = scan_rig_hooked("drop:fix", false, Some(&hook)).await;
+    // The job reads "cancelled" at once; its worker may still be running. Wait for the count
+    // taken at the Stop, then for the call log to stay quiet: a run that went on sending after
+    // the Stop (every later wait is instant here) would keep writing to it.
+    let read = || std::fs::read_to_string(&rig.log).unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while sleeper.sent_at_cancel.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut last = read();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let now = read();
+        if now == last || std::time::Instant::now() > deadline {
+            break;
+        }
+        last = now;
+    }
+    crate::network_wait::set_process_sleeper(None);
+    let sent_at_cancel = sleeper
+        .sent_at_cancel
+        .lock()
+        .unwrap()
+        .expect("a fix call waited for the network and the job was canceled then");
+    let sent = read();
+    assert_eq!(
+        sent.lines().count(),
+        sent_at_cancel,
+        "a model call went out after the Stop: {sent}"
+    );
+    assert_eq!(rig.job.status, "cancelled", "{:?}", rig.job.message);
+}
+
+/// A finder wire whose every connection drops, counting the sends, and the sends made once the
+/// Stop had had time to land (`settled` set).
+#[derive(Default)]
+struct DroppingFinderWire {
+    sends: std::sync::atomic::AtomicUsize,
+    after_stop: std::sync::atomic::AtomicUsize,
+    settled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::ai_audit::agent_finder::api_agent::FinderWire for DroppingFinderWire {
+    async fn send(
+        &self,
+        _body: &serde_json::Value,
+        _use_caching: bool,
+    ) -> Result<crate::llm::LlmResponse, crate::api_agent_driver::AnthropicPostError> {
+        use std::sync::atomic::Ordering;
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        if self.settled.load(Ordering::SeqCst) {
+            self.after_stop.fetch_add(1, Ordering::SeqCst);
+        }
+        Err(crate::api_agent_driver::AnthropicPostError::Network(
+            "Anthropic API request failed: connection reset by peer".to_string(),
+        ))
+    }
+}
+
+/// The cockpit's Stop while the agent finder waits out the network (#582, #583): the agent's wait
+/// honors the run's control, so the waiting piece never sends again and no other piece sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_cockpit_stop_during_the_agent_finders_network_wait_sends_nothing_more() {
+    use std::sync::atomic::Ordering;
+    if !camerata_test_env::python3_on_path_for("the_cockpit_stop_during_the_agent_finders") {
+        return;
+    }
+    let job: Arc<std::sync::OnceLock<(crate::jobs::JobStore, String)>> = Arc::default();
+    let wire = Arc::new(DroppingFinderWire::default());
+    let canceled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pause: crate::ai_audit::agent_finder::api_agent::PauseFn = {
+        let (job, canceled, settled) = (job.clone(), canceled.clone(), wire.settled.clone());
+        Arc::new(move |d| {
+            let (job, canceled, settled) = (job.clone(), canceled.clone(), settled.clone());
+            Box::pin(async move {
+                let first_network_step = d >= crate::network_wait::NETWORK_WAIT_STEPS[0]
+                    && !canceled.swap(true, Ordering::SeqCst);
+                if !first_network_step {
+                    tokio::task::yield_now().await;
+                    return;
+                }
+                while job.get().is_none() {
+                    tokio::task::yield_now().await;
+                }
+                let (jobs, id) = job.get().unwrap();
+                // What the cockpit's Stop does (`routes::onboarding`).
+                jobs.cancel(id);
+                // Long enough for the Stop to reach the run's control; from here no send may go.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                settled.store(true, Ordering::SeqCst);
+            })
+        })
+    };
+    let factory: crate::ai_audit::agent_finder::run::AgentFactoryOverride = {
+        let (wire, pause) = (wire.clone(), pause.clone());
+        Arc::new(move |meter| {
+            let agent = crate::ai_audit::agent_finder::api_agent::ApiPieceAgent::new(
+                "claude-sonnet-5-5",
+                "sk-test-not-a-real-key",
+            )
+            .with_meter(meter)
+            .with_wire(wire.clone())
+            .with_pause(pause.clone());
+            Arc::new(agent) as Arc<dyn crate::ai_audit::agent_finder::PieceAgent>
+        })
+    };
+    let hook = |state: &AppState, id: &str| {
+        let _ = job.set((state.jobs.clone(), id.to_string()));
+    };
+    let rig = crate::ai_audit::agent_finder::run::with_agent_factory_override(
+        factory,
+        scan_rig_hooked("down", true, Some(&hook)),
+    )
+    .await;
+    // The job reads "cancelled" at once; wait for the agent's sends to stay quiet.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !wire.settled.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut last = wire.sends.load(Ordering::SeqCst);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let now = wire.sends.load(Ordering::SeqCst);
+        if now == last || std::time::Instant::now() > deadline {
+            break;
+        }
+        last = now;
+    }
+    assert!(
+        wire.settled.load(Ordering::SeqCst),
+        "a finder request waited out the network and the job was cancelled then"
+    );
+    assert_eq!(
+        wire.after_stop.load(Ordering::SeqCst),
+        0,
+        "the agent finder sent after the Stop ({} sends in all)",
+        wire.sends.load(Ordering::SeqCst)
+    );
+    assert_eq!(rig.job.status, "cancelled", "{:?}", rig.job.message);
 }
