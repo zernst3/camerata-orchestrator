@@ -5489,6 +5489,60 @@ the cache, so later reads (including on handler threads) never touch the Keychai
 prompts at most once per launch. A change made outside the app (Keychain Access) is seen on the
 next launch.
 
+#### Stable key reader (#574)
+
+macOS ties a Keychain "Always Allow" to the exact hash of the binary that asks, and every
+rebuilt `camerata` has a new hash, so the approval was lost on each build. The Anthropic key is
+therefore read by a tiny separate program, `camerata-key-reader` (`crates/key-reader`, no
+workspace dependencies, only `security-framework`). Its hash changes only when its own code
+changes, so the approval is given once and survives engine rebuilds.
+
+* The reader takes no arguments and reads one item, service `camerata`, account
+  `anthropic_api_key`, through the Security framework (not `/usr/bin/security`). It writes the key
+  to stdout; the engine (`crates/llm/src/key_reader.rs`) reads that pipe. The key is never in an
+  env var, argument, file or log line (tests assert each).
+* The engine looks for the reader at the stable install path
+  `$HOME/.camerata/bin/camerata-key-reader` FIRST, then next to the running binary as a fallback
+  (a copy beside each build's binary can have its own hash and so its own prompt; the stable
+  path is one file for every build and worktree). It runs a reader only by absolute path, only
+  when the file is owned by the current user and has no group or world write bit; otherwise it
+  logs one line and treats it as missing. If none is usable it uses the direct keychain read it
+  always had. Off macOS the reader is never used (Linux keeps its Secret Service read).
+* Exit codes: 0 with the key on stdout; 2 "no such entry", which the engine treats as no key
+  configured (nothing else is tried); 1 for anything else (locked, denied, cancelled). If the
+  reader fails, prints nothing, prints 8192 bytes or more, or runs past `READER_TIMEOUT` (5
+  seconds, then it is killed), the read fails closed: the direct read is NOT tried and the
+  existing "no API key is configured" message results (an `ANTHROPIC_API_KEY` env fallback still
+  applies). A failure is remembered for the life of the process, so later reads do not re-spawn
+  the reader, wait again or raise the dialog again.
+* `CAMERATA_NO_KEYCHAIN=1` disables all keychain access, the reader included (it is never run).
+* Only the Anthropic key goes through the reader; the other credentials use the direct read.
+* Install: `scripts/install-key-reader.sh` builds the reader and copies it to
+  `$HOME/.camerata/bin/` (and any extra folders you name), skipping a copy whose SHA-256 is
+  unchanged.
+* The reader's hash stays put only while its build inputs do. It also changes on a Rust
+  toolchain bump, a `security-framework` or lockfile bump, or a profile or `RUSTFLAGS` change,
+  not only on an edit to `crates/key-reader`. The install script skips the copy when the built
+  bytes equal the installed ones, but it cannot make a different build hash the same: after any
+  of those changes the owner approves once more. Build the reader the same way each time
+  (release, no extra flags).
+
+Owner check by hand (one-time approval survives a rebuild; not run by the tests):
+
+1. `scripts/install-key-reader.sh` (builds and installs the reader to `~/.camerata/bin`).
+2. Approve it once by running the installed reader directly, NOT through the engine (the engine
+   gives up after 5 seconds, and the dialog asks for your login password):
+   `~/.camerata/bin/camerata-key-reader >/dev/null`, enter the password, choose Always Allow.
+   Running it again must print nothing and return at once.
+3. Rebuild the engine (`cargo build --release -p camerata`) and run a command that reads the key,
+   for example the app or `camerata inspect` on a throwaway project. There must be no dialog.
+   Running `scripts/install-key-reader.sh` again must print `unchanged:`.
+4. Only a change to the reader's build (see above) asks again. A reader that is locked out or
+   denied makes the run stop with "no API key is configured" instead of hanging.
+
+The distribution build (#73) replaces this with a Developer ID signature, whose Team ID keeps
+approvals stable for the shipped app.
+
 The GitHub provider carries its token, so `ProviderCell` (the swappable provider slot in
 `AppState`) is re-selected whenever the `github_token` credential is saved or deleted, and the
 tracker poller reads the cell on every tick; a token saved after launch is used immediately.

@@ -121,28 +121,36 @@ pub const NO_KEYCHAIN_ENV: &str = "CAMERATA_NO_KEYCHAIN";
 /// Where the production store keeps credentials: the OS keychain, or process memory under
 /// [`NO_KEYCHAIN_ENV`].
 enum ProductionBacking {
-    Keychain(ServiceKeyringStore),
+    /// The direct keychain store, plus where to find the stable key reader (#574).
+    Keychain(ServiceKeyringStore, crate::key_reader::KeyReaderConfig),
     Memory(MemoryCredentialStore),
 }
 
 impl CredentialStore for ProductionBacking {
     fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
         match self {
-            Self::Keychain(s) => s.set(name, value),
+            Self::Keychain(s, _) => s.set(name, value),
             Self::Memory(s) => s.set(name, value),
         }
     }
 
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
         match self {
-            Self::Keychain(s) => s.get(name),
+            // The Anthropic key goes through the stable key reader first (the macOS approval
+            // then survives rebuilds); the direct read is the fallback when no helper exists.
+            Self::Keychain(s, cfg) => crate::key_reader::get_with_reader(
+                name,
+                cfg,
+                &|m| eprintln!("[camerata-llm] {m}"),
+                || s.get(name),
+            ),
             Self::Memory(s) => s.get(name),
         }
     }
 
     fn delete(&self, name: &str) -> Result<(), CredentialError> {
         match self {
-            Self::Keychain(s) => s.delete(name),
+            Self::Keychain(s, _) => s.delete(name),
             Self::Memory(s) => s.delete(name),
         }
     }
@@ -150,10 +158,13 @@ impl CredentialStore for ProductionBacking {
 
 /// Pure: the keychain is bypassed exactly when the seam's value is `1` (surrounding whitespace
 /// ignored). Unset, empty or anything else means the real keychain.
-fn production_backing(no_keychain: Option<&str>) -> ProductionBacking {
+fn production_backing(
+    no_keychain: Option<&str>,
+    reader: crate::key_reader::KeyReaderConfig,
+) -> ProductionBacking {
     match no_keychain.map(str::trim) {
         Some("1") => ProductionBacking::Memory(MemoryCredentialStore::new()),
-        _ => ProductionBacking::Keychain(ServiceKeyringStore::new(KEYRING_SERVICE)),
+        _ => ProductionBacking::Keychain(ServiceKeyringStore::new(KEYRING_SERVICE), reader),
     }
 }
 
@@ -164,7 +175,10 @@ impl KeyringCredentialStore {
         static SHARED: std::sync::OnceLock<CachedCredentialStore<ProductionBacking>> =
             std::sync::OnceLock::new();
         SHARED.get_or_init(|| {
-            let backing = production_backing(std::env::var(NO_KEYCHAIN_ENV).ok().as_deref());
+            let backing = production_backing(
+                std::env::var(NO_KEYCHAIN_ENV).ok().as_deref(),
+                crate::key_reader::KeyReaderConfig::production(),
+            );
             if matches!(backing, ProductionBacking::Memory(_)) {
                 eprintln!(
                     "[camerata-llm] {NO_KEYCHAIN_ENV}=1: the OS keychain is not read or written \
@@ -758,19 +772,67 @@ mod tests {
         assert_eq!(anthropic_api_key(s.as_ref()), None);
     }
 
+    /// A reader config that finds no helper (the helper is absent in tests).
+    fn no_reader() -> crate::key_reader::KeyReaderConfig {
+        crate::key_reader::KeyReaderConfig::new(vec![], std::time::Duration::from_secs(1))
+    }
+
     // ── the no-keychain seam ──────────────────────────────────────────────────
+
+    /// CAMERATA_NO_KEYCHAIN=1 never spawns the key reader, and without the seam the reader
+    /// is used (so the check is not vacuous). The fake helper stands in; the real keychain is
+    /// never touched (a present helper means the direct read is not reached).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_no_keychain_seam_never_spawns_the_key_reader() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("camerata-nokc-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let helper = d.join(crate::key_reader::READER_BIN);
+        let marker = d.join("spawned");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf %s fake-key\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = || {
+            crate::key_reader::KeyReaderConfig::new(
+                vec![helper.clone()],
+                std::time::Duration::from_secs(5),
+            )
+        };
+        let seam = production_backing(Some("1"), cfg());
+        assert_eq!(seam.get(ANTHROPIC_API_KEY).unwrap(), None);
+        assert!(!marker.exists(), "the seam must never spawn the key reader");
+        let real = production_backing(None, cfg());
+        assert_eq!(
+            real.get(ANTHROPIC_API_KEY).unwrap().as_deref(),
+            Some("fake-key")
+        );
+        assert!(marker.exists(), "without the seam the reader runs");
+    }
 
     #[test]
     fn the_seam_bypasses_the_keychain_only_when_set_to_one() {
         for value in [Some("1"), Some(" 1 ")] {
             assert!(
-                matches!(production_backing(value), ProductionBacking::Memory(_)),
+                matches!(
+                    production_backing(value, no_reader()),
+                    ProductionBacking::Memory(_)
+                ),
                 "{value:?} must select the in-memory backing"
             );
         }
         for value in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
             assert!(
-                matches!(production_backing(value), ProductionBacking::Keychain(_)),
+                matches!(
+                    production_backing(value, no_reader()),
+                    ProductionBacking::Keychain(..)
+                ),
                 "{value:?} must leave the real keychain in place"
             );
         }
@@ -781,7 +843,7 @@ mod tests {
     /// hands a deleted credential back to the env fallback like the real store does.
     #[test]
     fn under_the_seam_the_production_backing_is_an_empty_memory_store() {
-        let backing = production_backing(Some("1"));
+        let backing = production_backing(Some("1"), no_reader());
         assert_eq!(backing.get(ANTHROPIC_API_KEY).unwrap(), None);
         backing.set(ANTHROPIC_API_KEY, "sk-ant-memory").unwrap();
         assert_eq!(

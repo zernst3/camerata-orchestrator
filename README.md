@@ -88,7 +88,7 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 
 | | |
 |---|---|
-| Rust | over 700,000 lines of Rust across 29 crates and one maintainer tool, including tests |
+| Rust | over 700,000 lines of Rust across 30 crates and one maintainer tool, including tests |
 | Tests | 12,000+ automated tests; roughly half the lines are test code |
 | Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
 | Rule library | 455 rules across 22 domains; 454 cite at least one published source (965 sources in all) |
