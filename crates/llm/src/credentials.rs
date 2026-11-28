@@ -176,12 +176,25 @@ impl KeyringCredentialStore {
     }
 }
 
+static FORBID_READS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test seam: while on, any read through [`KeyringCredentialStore`] panics, so a test can prove a
+/// code path never asks the production credential store at all (not even a cached or in-memory
+/// view of it).
+pub fn forbid_reads_for_tests(on: bool) {
+    FORBID_READS.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
 impl CredentialStore for KeyringCredentialStore {
     fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
         Self::shared().set(name, value)
     }
 
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+        assert!(
+            !FORBID_READS.load(std::sync::atomic::Ordering::SeqCst),
+            "the credential store was read while reads are forbidden"
+        );
         Self::shared().get(name)
     }
 
