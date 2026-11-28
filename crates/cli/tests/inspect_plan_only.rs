@@ -258,7 +258,7 @@ fn the_binary_exits_zero_with_figures_makes_no_connection_and_refuses_under_a_sm
     let before = snapshot(state.path());
     let repo_before = snapshot(&repo);
     let run = |extra: &[&str]| {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_camerata"));
+        let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
         cmd.args([
             "inspect",
             "--plan-only",

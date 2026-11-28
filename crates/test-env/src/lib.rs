@@ -293,3 +293,16 @@ mod tests {
         );
     }
 }
+
+/// The variable that makes a Camerata binary download nothing (`pinned_tools::OFFLINE_ENV` in
+/// the server; a test holds the two names equal).
+pub const OFFLINE_ENV: &str = "CAMERATA_OFFLINE";
+
+/// A command for a Camerata binary that runs offline: a tool it is missing is a refusal, never a
+/// download (#587). The one shared helper for a test that starts a Camerata binary and builds
+/// the command over several statements; a single builder chain may instead set the switch itself.
+pub fn offline_command(program: impl AsRef<OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.env(OFFLINE_ENV, "1");
+    cmd
+}

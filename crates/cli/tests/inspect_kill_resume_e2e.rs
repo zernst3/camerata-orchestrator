@@ -194,7 +194,7 @@ fn world(root: &tempfile::TempDir, name: &str) -> World {
 }
 
 fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camerata"));
+    let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
     cmd.args([
         "inspect",
         "--internal",
@@ -238,7 +238,7 @@ fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> C
 }
 
 fn resume_cmd(w: &World, export: &Path, envs: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camerata"));
+    let mut cmd = camerata_test_env::offline_command(env!("CARGO_BIN_EXE_camerata"));
     cmd.args(["inspect", "--resume", "latest", "--export"])
         .arg(export);
     let path = format!(

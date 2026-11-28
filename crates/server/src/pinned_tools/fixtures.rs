@@ -183,6 +183,7 @@ case "$script" in
     ;;
   *eslint.js)
     if [ "$1" = "--version" ]; then echo "v9.39.5"; exit 0; fi
+    echo "$PWD" >> "$0.eslint-runs"
     printf '[{{"filePath":"%s/app.js","messages":[]}}]\n' "$PWD"
     exit 0
     ;;

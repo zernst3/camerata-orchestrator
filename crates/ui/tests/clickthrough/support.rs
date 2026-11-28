@@ -375,6 +375,8 @@ impl Stack {
         let data_dir = data.path().join("seed");
 
         let seeded = Command::new(camerata)
+            // No test downloads (#587): every Camerata binary a test starts runs offline.
+            .env("CAMERATA_OFFLINE", "1")
             .args(["seed-review"])
             .arg(fixture_dir())
             .arg("--data-dir")
@@ -403,6 +405,7 @@ impl Stack {
         let server_port = free_port();
         let server_log = File::create(logs.path().join("server.log")).expect("a log file");
         let server_child = Command::new(server_bin)
+            .env("CAMERATA_OFFLINE", "1")
             .env("CAMERATA_NO_KEYCHAIN", "1")
             .env("CAMERATA_DATA_DIR", &data_dir)
             .env("CAMERATA_SERVER_ADDR", format!("127.0.0.1:{server_port}"))
@@ -433,6 +436,7 @@ impl Stack {
         let lv_log = File::create(logs.path().join("liveview.log")).expect("a log file");
         let lv_err = File::create(logs.path().join("liveview.err")).expect("a log file");
         let lv_child = Command::new(liveview_binary())
+            .env("CAMERATA_OFFLINE", "1")
             .args(["liveview", "--project", &project, "--port", "0"])
             .env(
                 "CAMERATA_BFF_URL",
