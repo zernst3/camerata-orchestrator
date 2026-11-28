@@ -100,45 +100,105 @@ where
     }
 }
 
-/// Resolves on the first SIGINT (Ctrl+C) or SIGTERM. From then on a second one exits the process
-/// at once with [`EXIT_OPERATOR_STOPPED`]: the stop is at work, and the operator wants out now.
-pub async fn os_stop_signal() {
-    first_signal().await;
-    eprintln!(
-        "camerata inspect: stopping. No further part is sent and the live batches are being \
-         cancelled. Press Ctrl+C again to exit at once."
-    );
-    tokio::spawn(async {
-        first_signal().await;
-        eprintln!("camerata inspect: exiting at once; check the provider console for batches");
-        std::process::exit(EXIT_OPERATOR_STOPPED);
-    });
-}
-
-/// The next SIGINT or SIGTERM. A signal that cannot be listened for never resolves: a run must not
-/// stop because a handler could not be installed.
-async fn first_signal() {
-    let interrupt = async {
-        if tokio::signal::ctrl_c().await.is_err() {
+/// Start listening for SIGINT and SIGTERM now, on a thread of its own with its own runtime, and
+/// return a future that resolves on the first one. The listener is installed before this returns,
+/// so a Ctrl+C at any moment from here on is the operator's stop, never the default kill. From
+/// the first signal on, a second one exits the process at once with [`EXIT_OPERATOR_STOPPED`]:
+/// the listener's thread does that itself, so it works even while the pipeline's own thread is
+/// blocked or the stop is slow to finish (a provider slow to answer a cancel).
+///
+/// If the listener cannot be set up (no thread, no signal handler), the returned future never
+/// resolves: a run must not stop because a handler could not be installed.
+pub fn spawn_stop_listener() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+    let spawned = std::thread::Builder::new()
+        .name("camerata-stop-signal".to_string())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                let _ = ready_tx.send(false);
+                return;
+            };
+            rt.block_on(async move {
+                let Some(mut signals) = Signals::install() else {
+                    let _ = ready_tx.send(false);
+                    return;
+                };
+                let _ = ready_tx.send(true);
+                signals.next().await;
+                eprintln!(
+                    "camerata inspect: stopping. No further part is sent and the live batches are \
+                     being canceled. Press Ctrl+C again to exit at once."
+                );
+                let _ = first_tx.send(());
+                signals.next().await;
+                eprintln!(
+                    "camerata inspect: exiting at once; check the provider console for batches"
+                );
+                std::process::exit(EXIT_OPERATOR_STOPPED);
+            });
+        });
+    // Wait until the handlers are in place (milliseconds), so nothing after this line can be
+    // killed by a Ctrl+C the listener does not see yet.
+    let ready = spawned.is_ok()
+        && ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or(false);
+    if !ready {
+        eprintln!(
+            "camerata inspect: Ctrl+C could not be set up to stop this run cleanly; it runs on"
+        );
+    }
+    Box::pin(async move {
+        if first_rx.await.is_err() {
             std::future::pending::<()>().await;
         }
-    };
+    })
+}
+
+/// The signals the stop listens for: SIGINT and SIGTERM, every delivery.
+struct Signals {
     #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                if term.recv().await.is_none() {
-                    std::future::pending::<()>().await;
-                }
-            }
-            Err(_) => std::future::pending::<()>().await,
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    /// Install the handlers; `None` when one cannot be.
+    fn install() -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Some(Self {
+                interrupt: signal(SignalKind::interrupt()).ok()?,
+                terminate: signal(SignalKind::terminate()).ok()?,
+            })
         }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = interrupt => {}
-        () = terminate => {}
+        #[cfg(not(unix))]
+        {
+            Some(Self {})
+        }
+    }
+
+    /// The next SIGINT or SIGTERM.
+    async fn next(&mut self) {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                Some(()) = self.interrupt.recv() => {}
+                Some(()) = self.terminate.recv() => {}
+                else => std::future::pending::<()>().await,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
     }
 }

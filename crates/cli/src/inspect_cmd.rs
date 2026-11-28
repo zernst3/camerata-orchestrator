@@ -2092,7 +2092,7 @@ pub async fn run_resume(
     let store = &camerata_server::credentials::KeyringCredentialStore;
     let has_api_key = api_key_present(store);
     // Ctrl+C and SIGTERM stop the resume as they stop a run (#583).
-    operator_stop::run_stoppable(operator_stop::os_stop_signal(), |control| {
+    operator_stop::run_stoppable(operator_stop::spawn_stop_listener(), |control| {
         resume_inspect_controlled(
             run,
             repos,
@@ -2575,7 +2575,7 @@ pub fn refuse_unfit_build_for_client(
 /// [`run_inspect_with_store`].
 pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, InspectError> {
     // Ctrl+C and SIGTERM stop the run the way the app's stop does (#583).
-    operator_stop::run_stoppable(operator_stop::os_stop_signal(), |control| {
+    operator_stop::run_stoppable(operator_stop::spawn_stop_listener(), |control| {
         run_inspect_with_store_controlled(
             args,
             &camerata_server::credentials::KeyringCredentialStore,

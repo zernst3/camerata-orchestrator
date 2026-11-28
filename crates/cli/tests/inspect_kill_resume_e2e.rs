@@ -535,3 +535,67 @@ fn a_run_killed_during_the_export_resumes_without_a_single_model_call() {
     );
     assert_same(&export, &baseline);
 }
+
+/// A real Ctrl+C (SIGINT) to the real binary part way through the model calls (#583): the run
+/// stops cleanly, exits with the stop code and says how to resume; the resume finishes it to the
+/// uninterrupted export.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(process_env)]
+fn ctrl_c_on_the_real_binary_exits_with_the_stop_code_and_the_run_resumes() {
+    if !python_and_typst_available("ctrl_c_on_the_real_binary") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let baseline = baseline_export(&root);
+
+    let w = world(&root, "ctrl-c");
+    let export = root.path().join("resumed.zip");
+    let mut child = inspect(&w, &export, &[], &[("FAKE_DELAY", "0.6")])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for("some model calls to be stored", || {
+        calls_stored(&w.state) >= 3
+    });
+    let sent = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the stop took more than 30 s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(camerata::inspect_cmd::EXIT_OPERATOR_STOPPED),
+        "{stderr}"
+    );
+    assert!(stderr.contains("STOPPED BY THE OPERATOR"), "{stderr}");
+    assert!(stderr.contains("--resume"), "{stderr}");
+    assert!(!export.exists(), "nothing was exported");
+
+    let out = resume_cmd(&w, &export, &[]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_same(&export, &baseline);
+}
