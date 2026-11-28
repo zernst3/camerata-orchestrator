@@ -551,7 +551,22 @@ pub(crate) async fn submit_round(
                             }
                             // A credit or billing row (never billed) stops the run now, as in the
                             // stage runner, and is neither resubmitted nor second-tried.
-                            let sendable = !refused && !stop_run_on_billing_row(ctx.meter, &error);
+                            // A row the batch never ran (canceled or expired first, nothing
+                            // billed) is sent only by a resume (the run folder resends it when
+                            // the same items are submitted again), never by this process: a
+                            // send now would be billed once now and once more by that resume.
+                            let unrun = camerata_llm::failure::is_unrun_batch_row(&error);
+                            let sendable =
+                                !refused && !unrun && !stop_run_on_billing_row(ctx.meter, &error);
+                            let error = if unrun {
+                                format!(
+                                    "the batch was {} before this item ran; nothing was billed, \
+                                     and a resume sends it",
+                                    error.trim()
+                                )
+                            } else {
+                                error
+                            };
                             out.results.insert(
                                 w.custom_id.clone(),
                                 Err(ItemFailure {

@@ -1484,6 +1484,9 @@ impl<'a> Repricer<'a> {
 struct BatchOrigin<'a> {
     batch_id: &'a str,
     ttl: CacheTtl,
+    /// True for a batch an earlier process submitted (a resume reading it back), false for one
+    /// this process submitted.
+    earlier_process: bool,
 }
 
 /// Deal with every row of one fetched batch. `members` lists the batch's items as
@@ -1498,7 +1501,11 @@ fn settle_rows<S: StageItems>(
     members: Vec<(String, Work<S::Id>)>,
     origin: &BatchOrigin<'_>,
 ) -> Vec<Work<S::Id>> {
-    let BatchOrigin { batch_id, ttl } = *origin;
+    let BatchOrigin {
+        batch_id,
+        ttl,
+        earlier_process,
+    } = *origin;
     let mut by_id: HashMap<String, BatchResultRow> =
         rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
     let mut repricer = Repricer::new(ctx.model, ttl);
@@ -1537,20 +1544,27 @@ fn settle_rows<S: StageItems>(
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
                     report_progress(ctx, stage, book);
-                } else if camerata_llm::failure::is_unrun_batch_row(&error) && run_stopped(ctx) {
-                    // The batch never ran this row (canceled or expired first, nothing billed)
-                    // and the run is stopped (the operator's stop, a cancel, the outage stop):
-                    // the run folder keeps the row and the resume sends it. Sending it again
-                    // now would be billed once now and once more by that resume.
+                } else if camerata_llm::failure::is_unrun_batch_row(&error) && !earlier_process {
+                    // The batch this process submitted never ran this row (canceled or expired
+                    // first, nothing billed). Only a resume sends it: the run folder keeps the
+                    // row, and a send now (in a batch, in real time or by a caller's later round)
+                    // would be billed once now and once more by that resume. The item is held
+                    // on the batch, so no round and no second try sends it. A resume that reads
+                    // such a batch back (`earlier_process`) sends the row once, as below.
+                    let class = if run_stopped(ctx) {
+                        FailureClass::OutageStop
+                    } else {
+                        FailureClass::Transport
+                    };
                     book.fail(
                         &work.id,
-                        FailureClass::OutageStop,
+                        class,
                         &format!(
-                            "the batch was {} before this item ran; nothing was billed, and a \
-                             resume sends it",
+                            "batch {batch_id} was {} before this item ran; nothing was billed, \
+                             and a resume sends it",
                             error.trim()
                         ),
-                        None,
+                        Some(batch_id.to_string()),
                     );
                     report_progress(ctx, stage, book);
                 } else if stop_run_on_billing_row(ctx.meter, &error) {
@@ -1838,6 +1852,7 @@ where
                 let origin = BatchOrigin {
                     batch_id: &record.batch_id,
                     ttl,
+                    earlier_process: true,
                 };
                 for work in settle_rows(stage, s, ctx, book, rows, members, &origin) {
                     out.insert(work.id.clone(), work);
@@ -2855,6 +2870,7 @@ where
                 let origin = BatchOrigin {
                     batch_id: &batch_id,
                     ttl,
+                    earlier_process: false,
                 };
                 follow.extend(settle_rows(stage, s, ctx, book, rows, members, &origin));
                 record.settled = true;

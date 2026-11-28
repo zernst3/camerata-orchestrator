@@ -3356,12 +3356,11 @@ async fn a_failed_warm_call_does_not_block_the_prefix_for_the_next_submission() 
 }
 
 /// A row its batch never ran (canceled at the provider, or expired) is never sent again by the
-/// stage itself while the run is stopped: the run folder keeps it as a row the resume sends, and a
-/// second send now would be billed once now and once more by that resume. On a run that is not
-/// stopped (a resume that fetched such a batch, a cancel the run did not make), the stage sends
-/// it once, as it would any row that never ran.
+/// process that submitted the batch, whether or not the run is stopped: the run folder keeps it
+/// as a row the resume sends, and a send now would be billed once now and once more by that
+/// resume.
 #[tokio::test(start_paused = true)]
-async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_while_the_run_is_stopped() {
+async fn a_canceled_or_expired_row_is_never_sent_again_by_the_process_that_submitted_it() {
     for word in ["canceled", "expired"] {
         let control = Arc::new(crate::operator_stop::RunControl::new());
         control.note_outage_stop();
@@ -3387,7 +3386,8 @@ async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_while_the_ru
             assert_eq!(f.class, FailureClass::OutageStop, "{word}: {f:?}");
         }
 
-        // Not stopped: the rows are sent once more, and answered.
+        // Not stopped: still never sent again by this process, in a batch, in real time or by a
+        // later round (the items are held): only a resume sends a row its batch never ran.
         let api = Api::new().rows(move |round, _| {
             if round == 0 {
                 Row::NotRun(word)
@@ -3398,8 +3398,58 @@ async fn a_canceled_or_expired_row_is_never_sent_again_by_the_stage_while_the_ru
         let mut stage = Scripted::new(&["a1", "a2"]);
         let c = ctx(&api.realtime, Some(&api));
         let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        assert_eq!(
+            api.submit_calls.load(Ordering::SeqCst),
+            1,
+            "{word}: the process that submitted the batch sent its never-run rows again"
+        );
+        assert_eq!(api.realtime.call_count(), 0, "{word}");
+        assert_eq!(out.failed.len(), 2, "{word}");
+        for f in &out.failed {
+            assert!(
+                f.live_batch.is_some(),
+                "{word}: held from later rounds: {f:?}"
+            );
+        }
+    }
+}
+
+/// The resume is the one that sends a row its batch never ran: it reads the batch an earlier
+/// process submitted, finds the rows canceled or expired, sends them once and finishes.
+#[tokio::test(start_paused = true)]
+async fn a_resume_sends_the_rows_an_earlier_processs_batch_never_ran_once() {
+    for word in ["canceled", "expired"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        // Process 1: the batch is accepted and the process ends before its results are read.
+        let api = Api::new().failing_fetch();
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let mut c = ctx(&api.realtime, Some(&api));
+        c.checkpoint = Some(&cp);
+        let _ = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        let records = cp.batches();
+        assert_eq!(records.len(), 1);
+
+        // Process 2, the resume: the earlier batch never ran its rows (canceled or expired).
+        let api = Api::new().knowing(&records[0]).rows(move |round, _| {
+            if round == 0 {
+                Row::NotRun(word)
+            } else {
+                Row::Ok
+            }
+        });
+        // This process's own batches are numbered after the earlier one.
+        api.batches.lock().unwrap().push(Vec::new());
+        let mut stage = Scripted::new(&["a1", "a2"]);
+        let mut c = ctx(&api.realtime, Some(&api));
+        c.checkpoint = Some(&cp);
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
         assert!(out.failed.is_empty(), "{word}: {:?}", out.failed);
-        assert_eq!(api.submit_calls.load(Ordering::SeqCst), 2, "{word}");
+        assert_eq!(
+            api.submit_calls.load(Ordering::SeqCst),
+            1,
+            "{word}: the resume sends the never-run rows once"
+        );
     }
 }
 
@@ -3488,4 +3538,49 @@ async fn a_scan_sub_batch_whose_reply_is_lost_after_acceptance_is_never_resubmit
         meter.notes()
     );
     assert_eq!(api.batches.lock().unwrap().len(), 1);
+}
+
+/// The scan passes' batch path: a row its batch never ran is neither resubmitted nor second-tried
+/// by this process; the resume's journal sends it (the run folder resends a never-run row when
+/// the same items are submitted again).
+#[tokio::test(start_paused = true)]
+async fn a_scan_row_its_batch_never_ran_is_not_sent_again_by_this_process() {
+    for word in ["canceled", "expired"] {
+        let work: Vec<BatchWork> = (0..2)
+            .map(|i| BatchWork {
+                custom_id: format!("c{i}-b0"),
+                ci: i,
+                bi: 0,
+                req: request(prompt_for(&format!("w{i}"))),
+            })
+            .collect();
+        let refs: Vec<&BatchWork> = work.iter().collect();
+        let chunks: Vec<&[(String, String)]> = Vec::new();
+        let batches: Vec<&[(String, String)]> = Vec::new();
+        let api = Api::new().rows(move |_, _| Row::NotRun(word));
+        let ctx = RoundContext {
+            api: &api,
+            repo: "acme/widgets",
+            label: "pass",
+            model: MODEL,
+            n_c: 0,
+            n_b: 0,
+            chunks: &chunks,
+            batches: &batches,
+            job: None,
+            meter: None,
+            per_item_usd: None,
+            max_body_bytes: 192_000_000,
+            fatal_errors: false,
+        };
+        let out = submit_round(&ctx, &refs).await.unwrap();
+        for (cid, r) in &out.results {
+            let failure = r.as_ref().expect_err("the batch never ran it");
+            assert!(
+                !failure.resubmittable && !failure.second_tryable,
+                "{word} {cid}: this process would send a never-run row again: {}",
+                failure.reason
+            );
+        }
+    }
 }
