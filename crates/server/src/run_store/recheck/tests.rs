@@ -1769,3 +1769,30 @@ async fn a_batch_with_no_stored_call_is_never_asked() {
     assert!(why.contains("cannot be reproduced"), "{why}");
     assert_eq!(saved_bytes(&run.saved), before);
 }
+
+/// The recheck lets go of the run's folder when it is done: the run control the re-ask went
+/// through must not hold it (and its lock) past the recheck.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_recheck_lets_go_of_the_run_folder_when_it_is_done() {
+    let saved = saved_run(UNREADABLE).await;
+    let llm = Counting::with(|req| disjoint_objects(&asked(req)));
+    let c = ctx(&saved);
+    let control = Arc::new(crate::operator_stop::RunControl::new());
+    let done = crate::operator_stop::with_run_control(
+        control.clone(),
+        recheck_saved_run(
+            &inputs(&saved, &c, ReaskFlag::Allow { max_parts: 5 }, false),
+            Some(&llm),
+            &mut |_| {},
+        ),
+    )
+    .await
+    .expect("the one call settles it");
+    assert_eq!(llm.calls(), 1);
+    drop(done);
+    assert!(
+        control.run_id().is_none(),
+        "the run control still holds the run's folder after the recheck"
+    );
+}

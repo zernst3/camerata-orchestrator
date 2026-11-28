@@ -309,6 +309,17 @@ pub fn current_run_control() -> Option<Arc<RunControl>> {
     RUN_CONTROL.try_with(Arc::clone).ok()
 }
 
+/// Lets go of the run's folder on `control` when dropped ([`RunControl::release_store`]): a piece
+/// of work that attached the folder for its calls (the recheck's re-ask) holds it no longer than
+/// it runs, whichever way it ends.
+pub struct ReleaseStoreOnDrop(pub Arc<RunControl>);
+
+impl Drop for ReleaseStoreOnDrop {
+    fn drop(&mut self) {
+        self.0.release_store();
+    }
+}
+
 /// How often [`stop_on_cancel`] looks at the app's cancel flag.
 pub const CANCEL_POLL: Duration = Duration::from_millis(200);
 

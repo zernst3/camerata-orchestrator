@@ -551,6 +551,8 @@ pub async fn recheck_saved_run(
         // operator's stop refuses it and ends its wait).
         let control = crate::operator_stop::current_run_control()
             .unwrap_or_else(|| std::sync::Arc::new(crate::operator_stop::RunControl::new()));
+        // The control lets go of the run's folder when the re-ask is over, whichever way it ends.
+        let _release = crate::operator_stop::ReleaseStoreOnDrop(control.clone());
         let journaled = llm
             .map(|l| crate::network_wait::run_model_seam(l, Some(store.clone()), control.clone()));
         for part in &parts {
