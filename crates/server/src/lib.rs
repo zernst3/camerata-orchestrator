@@ -3353,6 +3353,15 @@ pub(crate) async fn start_audit_job(
             let run_seam =
                 crate::network_wait::run_model_seam(&real, run_store.clone(), run_control.clone());
             let model_seam: &dyn crate::llm::LlmPort = run_seam.as_ref();
+            // The cockpit's Stop is a flag on the job: it reaches the run's control, so a cancel
+            // refuses every later send and ends a network wait with no other send (#583).
+            let _cancel_watch = {
+                let jobs = body_jobs.clone();
+                let id = body_jid.clone();
+                crate::operator_stop::stop_on_cancel(run_control.clone(), move || {
+                    jobs.is_cancel_requested(&id)
+                })
+            };
             // The review tree's stage 2 reads the final report with the run's own controls, and
             // never runs where the compliance gate blocked the AI review.
             let review_controls = run_controls.clone();

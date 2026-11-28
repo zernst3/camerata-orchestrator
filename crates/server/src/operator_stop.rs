@@ -259,6 +259,42 @@ pub async fn run_until_stopped<T>(
     }
 }
 
+/// How often [`stop_on_cancel`] looks at the app's cancel flag.
+pub const CANCEL_POLL: Duration = Duration::from_millis(200);
+
+/// A task that stops a run's control when the app's cancel flag is set; it ends with the guard.
+/// Hold it for as long as the run lasts.
+pub struct CancelWatch(tokio::task::JoinHandle<()>);
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Watch `cancelled` (the app's cancel: a flag on the job, set by the cockpit's Stop) and call
+/// [`RunControl::stop`] once it reads true, so the cancel refuses every later send, ends every
+/// network wait without another send and cancels the live batches, exactly as the command
+/// line's Ctrl+C does. The run itself is left to end on its own (the job's own cancel handling
+/// saves what it finished). Must be called inside a Tokio runtime.
+pub fn stop_on_cancel(
+    control: Arc<RunControl>,
+    cancelled: impl Fn() -> bool + Send + 'static,
+) -> CancelWatch {
+    CancelWatch(tokio::spawn(async move {
+        loop {
+            if control.is_stopped() {
+                return;
+            }
+            if cancelled() {
+                control.stop().await;
+                return;
+            }
+            tokio::time::sleep(CANCEL_POLL).await;
+        }
+    }))
+}
+
 #[cfg(test)]
 #[path = "operator_stop_tests.rs"]
 mod tests;

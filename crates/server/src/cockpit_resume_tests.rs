@@ -35,6 +35,10 @@ prompt = sys.stdin.read() if "-p" in args else ""
 def note(stage):
     drop = os.environ.get("FAKE_DROP_STAGE_FILE", "")
     if drop and os.path.exists(drop) and open(drop).read().strip() == stage:
+        log = os.environ.get("FAKE_LOG")
+        if log:
+            with open(log, "a") as f:
+                f.write("dropped " + stage + "\n")
         sys.stderr.write("API Error: Unable to connect to API (ECONNREFUSED): connection refused\\n")
         sys.exit(1)
     down = os.environ.get("FAKE_503_STAGE_FILE", "")
@@ -1099,6 +1103,16 @@ async fn interrupted_scan_with_finder() -> InterruptedScan {
 }
 
 async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
+    scan_rig_hooked(mode, agent_finder, None).await
+}
+
+/// [`scan_rig`], calling `started` with the job's id as soon as the job is started (before it
+/// finishes). A hooked rig makes no assumption about how the scan ends.
+async fn scan_rig_hooked(
+    mode: &str,
+    agent_finder: bool,
+    started: Option<&(dyn Fn(&AppState, &str) + Sync)>,
+) -> InterruptedScan {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     let state_dir = root.path().join("state");
@@ -1193,8 +1207,11 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
             .unwrap();
     }
     let job_id = start_audit_job(&state, audit_request(), AuditJobOptions::default()).await;
+    if let Some(started) = started {
+        started(&state, &job_id);
+    }
     let job = finished(&state, &job_id).await;
-    if agent_finder {
+    if agent_finder || started.is_some() {
         // Whatever the job's status, the run's folder is the only one in the state folder.
         let run_id = std::fs::read_dir(crate::run_store::runs_dir())
             .expect("the scan made a run folder")
@@ -2100,4 +2117,90 @@ async fn an_app_scan_stopped_by_an_outage_starts_no_group_review_and_a_resume_ru
         crate::run_store::RunStatus::Complete
     );
     assert!(group_reviews(&calls(&rig.log)) > 0, "{}", calls(&rig.log));
+}
+
+/// A sleeper for the long network wait that, at the first step, cancels the app's job the way the
+/// cockpit's Stop does (the job's cancel flag), lets a second pass, and records how many model
+/// calls had gone out by then. Every other wait is instant.
+struct CancelAtFirstWait {
+    job: std::sync::OnceLock<(crate::jobs::JobStore, String)>,
+    sent_at_cancel: std::sync::Mutex<Option<usize>>,
+}
+
+impl crate::network_wait::Sleeper for CancelAtFirstWait {
+    fn sleep<'a>(
+        &'a self,
+        d: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let first = d == crate::network_wait::NETWORK_WAIT_STEPS[0]
+                && self.sent_at_cancel.lock().unwrap().is_none();
+            if !first {
+                tokio::task::yield_now().await;
+                return;
+            }
+            while self.job.get().is_none() {
+                tokio::task::yield_now().await;
+            }
+            let (jobs, id) = self.job.get().unwrap();
+            // What the cockpit's Stop does (`routes::onboarding`): the job is cancelled.
+            jobs.cancel(id);
+            // A call already on its way when the Stop came lands in the log meanwhile.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let sent = std::fs::read_to_string(std::env::var("FAKE_LOG").unwrap_or_default())
+                .unwrap_or_default()
+                .lines()
+                .count();
+            *self.sent_at_cancel.lock().unwrap() = Some(sent);
+        })
+    }
+}
+
+/// The cockpit's Stop during an outage (#583): the job's cancel reaches the run's control, so a
+/// call that is waiting out the network never sends again, and nothing else is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_cockpit_stop_during_a_network_wait_sends_nothing_more() {
+    if !camerata_test_env::python3_on_path_for("the_cockpit_stop_during_a_network_wait") {
+        return;
+    }
+    let sleeper = Arc::new(CancelAtFirstWait {
+        job: std::sync::OnceLock::new(),
+        sent_at_cancel: std::sync::Mutex::new(None),
+    });
+    crate::network_wait::set_process_sleeper(Some(sleeper.clone()));
+    let hook = |state: &AppState, id: &str| {
+        let _ = sleeper.job.set((state.jobs.clone(), id.to_string()));
+    };
+    let rig = scan_rig_hooked("drop:fix", false, Some(&hook)).await;
+    // The job reads "cancelled" at once; its worker may still be running. Wait for the count
+    // taken at the Stop, then for the call log to stay quiet: a run that went on sending after
+    // the Stop (every later wait is instant here) would keep writing to it.
+    let read = || std::fs::read_to_string(&rig.log).unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while sleeper.sent_at_cancel.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut last = read();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let now = read();
+        if now == last || std::time::Instant::now() > deadline {
+            break;
+        }
+        last = now;
+    }
+    crate::network_wait::set_process_sleeper(None);
+    let sent_at_cancel = sleeper
+        .sent_at_cancel
+        .lock()
+        .unwrap()
+        .expect("a fix call waited for the network and the job was cancelled then");
+    let sent = read();
+    assert_eq!(
+        sent.lines().count(),
+        sent_at_cancel,
+        "a model call went out after the Stop: {sent}"
+    );
+    assert_eq!(rig.job.status, "cancelled", "{:?}", rig.job.message);
 }
