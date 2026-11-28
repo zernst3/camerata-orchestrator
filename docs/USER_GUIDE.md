@@ -118,6 +118,22 @@ backend**, controls only the project-less chat assistant (the chatbox that lives
 project). It does not affect any project's scan, recommendations, rescans or dev loop: those
 always resolve from that project's own Backend setting above, never from the chat setting.
 
+**macOS: stop the Keychain dialog after every rebuild (one-time setup).** macOS remembers
+"Always Allow" per program, and a freshly built `camerata` is a new program each time. Camerata
+therefore reads the Anthropic key through a small separate reader that rarely changes:
+
+1. Install it once: `scripts/install-key-reader.sh` (it puts `camerata-key-reader` in
+   `~/.camerata/bin/`).
+2. Approve it once, by running it yourself: `~/.camerata/bin/camerata-key-reader >/dev/null`,
+   enter your login password and choose **Always Allow**. Do this in a terminal, not through the
+   app: the app stops waiting after 5 seconds.
+3. From then on, rebuilding Camerata does not ask again. If the reader is locked out, denied or
+   missing a key, the run stops with "no API key is configured" instead of hanging.
+
+The reader asks again only when the reader itself is rebuilt differently (a Rust or dependency
+update, or a different build mode); run step 2 again then. Setting `CAMERATA_NO_KEYCHAIN=1`
+turns all of this off.
+
 **Local-first:** Camerata stores only configs + pointers (JSON in the operator's OS app-data dir:
 `projects.json`, `settings.json`, and one `onboarding-draft-<project>.json` per project); the repo code lives on the operator's own
 machine. Each repo a project references must resolve to a local git checkout (see §5).

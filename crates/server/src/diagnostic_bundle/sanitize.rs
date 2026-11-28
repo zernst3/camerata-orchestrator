@@ -141,6 +141,7 @@ pub const CAMERATA_CRATES: &[&str] = &[
     "fleet",
     "gateway",
     "intake",
+    "key-reader",
     "linter-registry",
     "liveness",
     "llm",

@@ -26,15 +26,32 @@ pub async fn run_recheck_saved(
     max_cost_usd: Option<f64>,
     reask: Option<usize>,
 ) -> Result<InspectOutcome, InspectError> {
-    let store = &camerata_server::credentials::KeyringCredentialStore;
-    let has_api_key = api_key_present(store);
+    run_recheck_saved_with_store(
+        &camerata_server::credentials::KeyringCredentialStore,
+        run,
+        repos,
+        export,
+        max_cost_usd,
+        reask,
+    )
+    .await
+}
+
+/// [`run_recheck_saved`] with the credential store handed in.
+pub async fn run_recheck_saved_with_store(
+    store: &dyn camerata_server::credentials::CredentialStore,
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+    reask: Option<usize>,
+) -> Result<InspectOutcome, InspectError> {
     recheck_saved_inspect(
         run,
         repos,
         export,
         max_cost_usd,
         reask,
-        has_api_key,
         store,
         Seams {
             resume: None,
@@ -44,6 +61,66 @@ pub async fn run_recheck_saved(
         },
     )
     .await
+}
+
+/// The model of a recheck run with `--reask-failed-judge`, built on its first call. Until then the
+/// credential store is never asked: a recheck that settles everything from the run's stored
+/// replies makes no call and needs no key (#604). The first call prints one line saying a key is
+/// needed and why, reads the key, applies the client-engagement key rule and builds the real model.
+struct LazyLlm<'a> {
+    creds: &'a dyn camerata_server::credentials::CredentialStore,
+    backend: camerata_server::llm::ProjectBackend,
+    client_engagement: bool,
+    usage: Arc<camerata_server::usage_ledger::UsageLedger>,
+    notice: &'a (dyn Fn(&str) + Sync),
+    built: std::sync::OnceLock<Result<camerata_server::llm::Llm, String>>,
+}
+
+impl LazyLlm<'_> {
+    fn model(&self) -> anyhow::Result<&camerata_server::llm::Llm> {
+        let built = self.built.get_or_init(|| {
+            (self.notice)(
+                "A clone check part needs a new model call (its stored reply cannot be read), so \
+                 the API key is read from the credential store now.\n",
+            );
+            let has_api_key = api_key_present(self.creds);
+            if self.client_engagement {
+                super::require_api_key_for_client_inspection(self.backend, has_api_key)
+                    .map_err(|e| e.to_string())?;
+            }
+            let backend = match camerata_server::llm::resolve_backend(self.backend, has_api_key) {
+                camerata_server::llm::BackendResolution::Api => camerata_server::llm::Backend::Api,
+                _ => camerata_server::llm::Backend::Cli,
+            };
+            Ok(camerata_server::onboard::build_llm(
+                self.creds,
+                backend,
+                Some(self.usage.clone()),
+            ))
+        });
+        built.as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+#[async_trait::async_trait]
+impl camerata_server::llm::LlmPort for LazyLlm<'_> {
+    async fn complete(
+        &self,
+        req: camerata_server::llm::LlmRequest,
+    ) -> anyhow::Result<camerata_server::llm::LlmResponse> {
+        camerata_server::llm::LlmPort::complete(self.model()?, req).await
+    }
+    async fn complete_streaming(
+        &self,
+        req: camerata_server::llm::LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<camerata_server::llm::LlmResponse> {
+        camerata_server::llm::LlmPort::complete_streaming(self.model()?, req, on_delta).await
+    }
+    /// The recheck never batches, so nothing downcasts this to the concrete model.
+    fn as_any(&self) -> &dyn std::any::Any {
+        &()
+    }
 }
 
 fn failed(e: RecheckError) -> InspectError {
@@ -63,7 +140,6 @@ pub async fn recheck_saved_inspect(
     export: Option<PathBuf>,
     max_cost_usd: Option<f64>,
     reask: Option<usize>,
-    has_api_key: bool,
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
 ) -> Result<InspectOutcome, InspectError> {
@@ -127,35 +203,25 @@ pub async fn recheck_saved_inspect(
     let pin = rs::engine_pin::EnginePin::for_run(corpus.as_ref(), &controls);
     let (_manifest, ledger_file) = args.state_paths();
 
-    // A model is built only when the flag could use one; a client run needs a key for it.
+    // A model is handed to the recheck only when the flag could use one, and even then it is built
+    // (and the credential read) by its first call, which the recheck makes only once a failed
+    // clone check part is confirmed to need one (#604).
     let usage = Arc::new(camerata_server::usage_ledger::UsageLedger::new());
-    let real = match (reask, seams.llm) {
-        (Some(_), None) => {
-            super::require_api_key_for_client_inspection(args.backend, has_api_key).or_else(
-                |e| {
-                    if args.client_engagement {
-                        Err(e)
-                    } else {
-                        Ok(())
-                    }
-                },
-            )?;
-            let backend = match camerata_server::llm::resolve_backend(args.backend, has_api_key) {
-                camerata_server::llm::BackendResolution::Api => camerata_server::llm::Backend::Api,
-                _ => camerata_server::llm::Backend::Cli,
-            };
-            Some(camerata_server::onboard::build_llm(
-                creds,
-                backend,
-                Some(usage),
-            ))
-        }
+    let lazy = match (reask, seams.llm) {
+        (Some(_), None) => Some(LazyLlm {
+            creds,
+            backend: args.backend,
+            client_engagement: args.client_engagement,
+            usage,
+            notice: seams.preflight_sink,
+            built: std::sync::OnceLock::new(),
+        }),
         _ => None,
     };
-    let llm: Option<&dyn camerata_server::llm::LlmPort> = match (reask, seams.llm, real.as_ref()) {
+    let llm: Option<&dyn camerata_server::llm::LlmPort> = match (reask, seams.llm, lazy.as_ref()) {
         (None, _, _) => None,
         (Some(_), Some(scripted), _) => Some(scripted),
-        (Some(_), None, Some(real)) => Some(real),
+        (Some(_), None, Some(lazy)) => Some(lazy),
         (Some(_), None, None) => None,
     };
     let inputs = RecheckInputs {
@@ -292,4 +358,60 @@ pub async fn recheck_saved_inspect(
         run_id: Some(run_id),
         run_notes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camerata_server::credentials::{CredentialError, CredentialStore};
+    use camerata_server::llm::{LlmPort, LlmRequest, ProjectBackend};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct Counting(AtomicUsize);
+
+    impl CredentialStore for Counting {
+        fn set(&self, _: &str, _: &str) -> Result<(), CredentialError> {
+            Ok(())
+        }
+        fn get(&self, _: &str) -> Result<Option<String>, CredentialError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> Result<(), CredentialError> {
+            Ok(())
+        }
+    }
+
+    /// The key is read by the first call and not before: building the model asks nothing, the
+    /// first call prints one line saying why a key is needed and then reads it, and a later call
+    /// neither prints again nor fails differently.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_key_is_read_only_by_the_first_call_after_one_printed_line() {
+        let _no_keychain = camerata_test_env::EnvGuard::set("CAMERATA_NO_KEYCHAIN", "1");
+        let _no_key = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let store = Counting(AtomicUsize::new(0));
+        let said: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let sink = |text: &str| said.lock().unwrap().push(text.to_string());
+        let lazy = LazyLlm {
+            creds: &store,
+            backend: ProjectBackend::Api,
+            client_engagement: true,
+            usage: Arc::new(camerata_server::usage_ledger::UsageLedger::new()),
+            notice: &sink,
+            built: std::sync::OnceLock::new(),
+        };
+        assert_eq!(store.0.load(Ordering::SeqCst), 0, "built, nothing asked");
+        assert!(said.lock().unwrap().is_empty());
+        let first = lazy.complete(LlmRequest::new("x".to_string())).await;
+        assert!(first.is_err(), "a client run with no key refuses the call");
+        assert!(store.0.load(Ordering::SeqCst) >= 1, "the key was read");
+        assert_eq!(said.lock().unwrap().len(), 1, "one line, once");
+        assert!(said.lock().unwrap()[0].contains("API key"));
+        let asked = store.0.load(Ordering::SeqCst);
+        let _ = lazy.complete(LlmRequest::new("y".to_string())).await;
+        assert_eq!(store.0.load(Ordering::SeqCst), asked, "not read again");
+        assert_eq!(said.lock().unwrap().len(), 1, "not said again");
+    }
 }

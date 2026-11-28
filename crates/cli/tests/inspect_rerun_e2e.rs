@@ -854,7 +854,6 @@ async fn recheck(
         Some(export.to_path_buf()),
         None,
         Some(5),
-        true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
             resume: None,
@@ -1108,7 +1107,6 @@ fn a_recheck_never_provisions_or_downloads_a_tool() {
             Some(export),
             None,
             None,
-            true,
             &camerata_server::credentials::MemoryCredentialStore::new(),
             Seams {
                 resume: None,
@@ -1155,4 +1153,508 @@ fn the_recheck_code_names_no_provisioning_or_tool_run() {
             );
         }
     }
+}
+
+// ── #604: a recheck that makes no model call never reads a credential ───────────────────────────
+
+/// A credential store that counts every question it is asked.
+struct CountingStore {
+    asked: AtomicUsize,
+}
+
+impl camerata_server::credentials::CredentialStore for CountingStore {
+    fn set(&self, _: &str, _: &str) -> Result<(), camerata_server::credentials::CredentialError> {
+        Ok(())
+    }
+    fn get(
+        &self,
+        _: &str,
+    ) -> Result<Option<String>, camerata_server::credentials::CredentialError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+    fn delete(&self, _: &str) -> Result<(), camerata_server::credentials::CredentialError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// The zero-call recheck succeeds with the keychain unavailable and no key in the environment,
+/// with and without `--reask-failed-judge`, and the credential store is never asked.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_recheck_that_makes_no_call_never_asks_the_credential_store() {
+    on_a_big_stack(async {
+        if !typst_available("a_recheck_that_makes_no_call_never_asks") {
+            return;
+        }
+        let _no_keychain = camerata_test_env::EnvGuard::set("CAMERATA_NO_KEYCHAIN", "1");
+        let _no_key = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        for reask in [None, Some(5)] {
+            let saved = saved_run_with_a_bookkeeping_defect().await;
+            let export = saved.out.path().join("recheck.zip");
+            let store = CountingStore {
+                asked: AtomicUsize::new(0),
+            };
+            let outcome = Box::pin(camerata::inspect_cmd::run_recheck_saved_with_store(
+                &store,
+                &saved.run_id,
+                &[saved.repo.path().to_path_buf()],
+                Some(export),
+                None,
+                reask,
+            ))
+            .await
+            .expect("the recheck passes with no key anywhere");
+            assert!(outcome.release_gate.starts_with("release gate: passed"));
+            assert_eq!(
+                store.asked.load(Ordering::SeqCst),
+                0,
+                "the credential store was asked (reask {reask:?})"
+            );
+            // The production entry point too: its own keyring backing must not be read.
+            let saved = saved_run_with_a_bookkeeping_defect().await;
+            camerata_server::credentials::forbid_reads_for_tests(true);
+            let direct = Box::pin(camerata::inspect_cmd::run_recheck_saved(
+                &saved.run_id,
+                &[saved.repo.path().to_path_buf()],
+                Some(saved.out.path().join("direct.zip")),
+                None,
+                reask,
+            ))
+            .await;
+            camerata_server::credentials::forbid_reads_for_tests(false);
+            direct.expect("the production recheck passes without reading the keyring");
+        }
+    })
+}
+
+// ── #594: a clone check part judged in part, three judge batches, through the release gate ──────
+
+const JUDGED_RULE: &str = "ARCH-SINGLE-SOURCE-LOGIC-1";
+
+/// One function whose statements follow a sequence unique to family `i`, so no two families share
+/// a run of tokens long enough to be one clone candidate.
+fn shaped_body(i: usize, name: &str, rate: &str) -> String {
+    let shapes = [
+        "    let v = order.a * user.b;\n",
+        "    if order.a > user.b {\n        return order.c;\n    }\n",
+        "    total = total + order.a - user.b;\n",
+        "    for x in &order.items {\n        total += x.p;\n    }\n",
+        "    if user.a && !order.b {\n        total = 0.0;\n    }\n",
+        "    total = if order.a { user.b } else { order.c };\n",
+    ];
+    let mut s = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut out = format!(
+        "pub fn {name}(order: &Order, user: &User) -> f64 {{\n    let mut total = {rate};\n"
+    );
+    for _ in 0..14 {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        out.push_str(shapes[(s % 6) as usize]);
+    }
+    out.push_str("    total\n}\n");
+    out
+}
+
+/// The ids a judge request asks about.
+fn judge_ids(req: &LlmRequest) -> Vec<String> {
+    req.prompt
+        .split_once(camerata_server::onboard::clone_advisory::prompt::BATCH_MARKER)
+        .map(|(_, rest)| rest)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|i| i["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn verdict_objects(ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| {
+            // The affirmative word of the rule the candidate belongs to.
+            let word = camerata_checks::clone_rules::CloneRule::ALL
+                .iter()
+                .find(|r| id.starts_with(r.id()))
+                .map_or("same_decision", |r| r.affirmative_word());
+            json!({"verdicts": [{"id": id, "verdict": word, "concept": "the discount"}]})
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The scripted model of the first run: it answers the judge batch over `good` with verdicts (one
+/// `different`, one `unsure`, the rest `same_decision`) and every other judge batch with the
+/// stand-in reply the first build could not read. It logs each judge request's digest and ids.
+struct JudgeScript {
+    inner: Scripted,
+    good: Vec<String>,
+    log: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+}
+
+#[async_trait]
+impl LlmPort for JudgeScript {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let ids = judge_ids(&req);
+        if ids.is_empty() {
+            return self.inner.complete(req).await;
+        }
+        self.log.lock().unwrap().push((
+            camerata_server::run_store::journal::request_key(&req),
+            ids.clone(),
+        ));
+        let mut resp = self.inner.complete(req).await?;
+        if ids == self.good {
+            let verdicts: Vec<Value> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let word = match i {
+                        0 => "different",
+                        1 => "unsure",
+                        _ => "same_decision",
+                    };
+                    json!({"id": id, "verdict": word, "concept": "the discount"})
+                })
+                .collect();
+            resp.text = json!({ "verdicts": verdicts }).to_string();
+        }
+        Ok(resp)
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The model of the recheck: it answers any judge request with `same_decision` for every id and
+/// records what it was asked.
+struct ReaskModel {
+    asked: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+#[async_trait]
+impl LlmPort for ReaskModel {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let ids = judge_ids(&req);
+        self.asked.lock().unwrap().push(ids.clone());
+        Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
+            elapsed_ms: None,
+            text: verdict_objects(&ids),
+            model: req.model.clone(),
+            backend: "stub".to_string(),
+            cost_usd: Some(0.01),
+            input_tokens: Some(1_000),
+            output_tokens: Some(100),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        })
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+struct ThreeBatchRun {
+    saved: Saved,
+    /// The candidate ids of each of the rule's three batches.
+    batches: Vec<Vec<String>>,
+}
+
+/// A saved run whose clone check for one rule asked three judge batches: the first was answered
+/// and merged, the second was answered with a reply the first build turned down and the current
+/// reader reads, the third with one nothing reads.
+async fn saved_run_three_batches() -> ThreeBatchRun {
+    let state = tempfile::tempdir().unwrap();
+    let guards = vec![
+        camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path()),
+        camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
+    ];
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture_with(repo.path(), false);
+    for i in 0..22 {
+        for (dir, file, name, rate) in [
+            ("a", "total.rs", format!("applyA{i}"), "0.2"),
+            ("b", "summary.rs", format!("quoteB{i}"), "0.15"),
+        ] {
+            let d = repo.path().join(format!("src/{dir}{i}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(file), shaped_body(i, &name, rate)).unwrap();
+        }
+    }
+    for g in [
+        &["add", "."][..],
+        &["commit", "-q", "-m", "clone families"][..],
+    ] {
+        let out = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(g)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {g:?}");
+    }
+    let files = camerata_server::onboard::read_local_repo_files(
+        repo.path(),
+        &camerata_server::onboard::scope::ScanScope::default().for_repo("x"),
+    )
+    .unwrap()
+    .files;
+    let armed: std::collections::HashSet<&str> = camerata_checks::clone_rules::CloneRule::ALL
+        .iter()
+        .map(|r| r.id())
+        .collect();
+    let set = camerata_checks::clone_rules::candidates(&files, &armed);
+    let ids: Vec<String> = set.by_rule[&camerata_checks::clone_rules::CloneRule::SingleSourceLogic]
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    let size = camerata_server::onboard::clone_advisory::BATCH_SIZE;
+    assert!(
+        ids.len() > 2 * size && ids.len() <= 3 * size,
+        "three batches of candidates: {}",
+        ids.len()
+    );
+    let batches: Vec<Vec<String>> = ids.chunks(size).map(<[String]>::to_vec).collect();
+
+    let out = tempfile::tempdir().unwrap();
+    let agent = Arc::new(Reviewer::new(vec![real_problem()]));
+    let first_calls = agent.calls.clone();
+    let llm = JudgeScript {
+        inner: Scripted {
+            calls: AtomicUsize::new(0),
+            fixes: false,
+        },
+        good: batches[0].clone(),
+        log: std::sync::Mutex::new(Vec::new()),
+    };
+    let first = {
+        let _defect = camerata_server::test_defects::LostRowGuard::set();
+        Box::pin(with_agent_override(
+            agent,
+            run_inspect_pipeline_with(
+                args(repo.path(), &out.path().join("first.zip"), false),
+                true,
+                &camerata_server::credentials::MemoryCredentialStore::new(),
+                Seams {
+                    resume: None,
+                    llm: Some(&llm),
+                    preflight_sink: &|_| {},
+                    tools: None,
+                },
+            ),
+        ))
+        .await
+    };
+    let outcome = first.expect("an internal run writes its package, marked incomplete");
+    let run_id = resolve_run("latest", None, RunOrigin::Cli).unwrap();
+    // The first build turned the second batch's reply down; the current reader reads it. Replies of
+    // the other rules' batches are made readable too, so only the third batch is left unread.
+    let log = llm.log.lock().unwrap().clone();
+    for entry in std::fs::read_dir(runs_dir().join(&run_id).join("calls")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let Some((_, want)) = log.iter().find(|(k, _)| v["key"] == json!(k)) else {
+            continue;
+        };
+        let other_rule = want.iter().any(|id| !id.starts_with(JUDGED_RULE));
+        if *want == batches[1] || other_rule {
+            let text = verdict_objects(want);
+            for e in v["entries"].as_object_mut().unwrap().values_mut() {
+                if e["response"].is_object() {
+                    e["response"]["text"] = json!(text);
+                }
+            }
+            std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        }
+    }
+    patch_saved_run(&run_id, |v| {
+        v["pin"]["build"]["commit"] = json!(BUILD_A);
+        v["pin"]["build"]["dirty"] = json!(false);
+    });
+    ThreeBatchRun {
+        saved: Saved {
+            run_id,
+            repo,
+            out,
+            _state: state,
+            _guards: guards,
+            first_run_agent_calls: first_calls.load(Ordering::SeqCst),
+            ledger_path: outcome.ledger_path.clone(),
+        },
+        batches,
+    }
+}
+
+async fn recheck_with(
+    saved: &Saved,
+    export: &Path,
+    reask: Option<usize>,
+    llm: Option<&dyn LlmPort>,
+) -> Result<camerata::inspect_cmd::InspectOutcome, InspectError> {
+    Box::pin(camerata::inspect_cmd::recheck_saved_inspect(
+        &saved.run_id,
+        &[saved.repo.path().to_path_buf()],
+        Some(export.to_path_buf()),
+        None,
+        reask,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            resume: None,
+            llm,
+            preflight_sink: &|_| {},
+            tools: None,
+        },
+    ))
+    .await
+}
+
+fn saved_bytes(saved: &Saved) -> Vec<Vec<u8>> {
+    let dir = runs_dir().join(&saved.run_id);
+    [
+        dir.join(camerata_server::run_store::REPORT_FILE),
+        dir.join("run.json"),
+        saved.ledger_path.clone(),
+    ]
+    .iter()
+    .map(|p| std::fs::read(p).unwrap())
+    .collect()
+}
+
+/// Without the flag the unreadable third batch refuses the recheck, naming it: no call, and the
+/// saved report, ledger and run record stay byte for byte as they were.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_part_with_one_unreadable_batch_refuses_without_the_flag_and_changes_nothing() {
+    on_a_big_stack(async {
+        if !typst_available("a_part_with_one_unreadable_batch_refuses") {
+            return;
+        }
+        let run = saved_run_three_batches().await;
+        let before = saved_bytes(&run.saved);
+        let export = run.saved.out.path().join("refused.zip");
+        let counting = ReaskModel {
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let err = recheck_with(&run.saved, &export, None, Some(&counting))
+            .await
+            .expect_err("the unreadable batch refuses the recheck");
+        let why = err.to_string();
+        assert!(why.contains("batch 3 of 3"), "{why}");
+        assert!(
+            !why.contains("batch 1 of 3") && !why.contains("batch 2 of 3"),
+            "{why}"
+        );
+        assert!(counting.asked.lock().unwrap().is_empty(), "zero calls");
+        assert!(!export.exists(), "no export");
+        assert_eq!(saved_bytes(&run.saved), before, "saved files untouched");
+    })
+}
+
+/// With the flag exactly one call is made (the unreadable batch); the good batch is untouched and
+/// the readable one is added with no call; the package passes the release gate, is written, and
+/// "How this was done" carries the re-ask sentence.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_part_with_one_unreadable_batch_is_finished_with_one_call_and_passes_the_gate() {
+    on_a_big_stack(async {
+        if !typst_available("a_part_with_one_unreadable_batch_is_finished") {
+            return;
+        }
+        let run = saved_run_three_batches().await;
+        let export = run.saved.out.path().join("three.zip");
+        let model = ReaskModel {
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let outcome = recheck_with(&run.saved, &export, Some(5), Some(&model))
+            .await
+            .expect("the recheck passes the gate");
+        assert_eq!(
+            model.asked.lock().unwrap().as_slice(),
+            &[run.batches[2].clone()],
+            "exactly one call, for the unreadable batch"
+        );
+        assert!(
+            outcome.release_gate.starts_with("release gate: passed"),
+            "{}",
+            outcome.release_gate
+        );
+        assert!(
+            outcome.incomplete_reasons.is_empty(),
+            "{:?}",
+            outcome.incomplete_reasons
+        );
+        assert!(export.exists());
+        // No candidate has a second row.
+        let report: Value = serde_json::from_slice(
+            &std::fs::read(
+                runs_dir()
+                    .join(&run.saved.run_id)
+                    .join(camerata_server::run_store::REPORT_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for f in report["findings"].as_array().unwrap() {
+            if f["rule_id"] == JUDGED_RULE {
+                let key = (
+                    f["captures"]["family"].to_string(),
+                    f["path"].to_string(),
+                    f["line"].to_string(),
+                );
+                assert!(seen.insert(key.clone()), "a second row for {key:?}");
+            }
+        }
+        let zip = std::fs::read(&export).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let mut sentence = String::new();
+        for i in 0..archive.len() {
+            let mut f = archive.by_index(i).unwrap();
+            if f.name().unwrap_or_default().ends_with(".xlsx") {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut f, &mut bytes).unwrap();
+                let grid =
+                    camerata_server::release_gate::xlsx_sheet_grid(&bytes, "Start here").unwrap();
+                for r in &grid {
+                    if r.first().is_some_and(|c| c == "How this was done") {
+                        sentence = r.get(1).cloned().unwrap_or_default();
+                    }
+                }
+            }
+        }
+        assert!(sentence.contains(&BUILD_A[..12]), "{sentence}");
+        assert!(
+            sentence.contains(&format!(
+                "was completed on build {}, by asking",
+                camerata_server::run_store::engine_pin::BuildId::current()
+                    .short_commit()
+                    .unwrap()
+            )) && sentence.contains("once more"),
+            "the re-ask variant: {sentence}"
+        );
+    })
 }

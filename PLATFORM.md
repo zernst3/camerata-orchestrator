@@ -63,7 +63,7 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
     ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
-    ▸ 30-member Rust workspace (29 crates and one maintainer tool) · 12,000+
+    ▸ 31-member Rust workspace (30 crates and one maintainer tool) · 12,000+
       tests · governs its OWN source in CI.
     ▸ ADAPTER LADDER: a typed `camerata-client`, a first `camerata-mcp` server (stdio)
       and `camerata` (the CLI) as a real HTTP adapter all drive the same BFF surface
@@ -215,7 +215,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Verified at runtime (reproducible from this repository):**
 
-- A **30-member workspace** (29 crates and one maintainer tool, `tools/corpus-verifier`) with **12,000+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
+- A **31-member workspace** (30 crates and one maintainer tool, `tools/corpus-verifier`) with **12,000+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
 - **The Codebase Inspection, end to end on fixture repositories:** per-repo detection and rule proposal, the two-tier audit with calibration and dedup, multi-repo projects, saved runs and resume (a fixed parser reuses saved replies instead of re-paying them), the group reviewer and the person's review with its decision record, plus the client package (PDF, workbook, `json/inspection.json`, `json/decisions.json`, CSV and JSON datasets, import-ready tickets) behind a release gate that refuses a deliverable carrying a secret, a held row without a decision or datasets that disagree (and an export that is refused while any part is unfinished).
 - **Brownfield onboarding, end to end** on fixture repos: the triage tables, Process emitting baseline waivers and GitHub issues and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata live-demo`, with the gateway's verdict and jail tests covered by `cargo test`.
@@ -280,7 +280,7 @@ The inspection commands are under [Run an inspection headless](#run-an-inspectio
 
 ## The crate dependency graph
 
-The real `[dependencies]` graph between the workspace members: 29 crates and one maintainer tool, a strict DAG the compiler enforces (a cycle between crates does not compile). Read it from the bottom up: `camerata-core`, `camerata-api-types` and the other leaf crates depend on nothing in the workspace; checks, agents and the model stack build on them; `camerata-server` is the composition root; `camerata-ui`, `camerata` (the CLI) and `camerata-mcp` are thin binaries on top. The README carries a compact version of this graph.
+The real `[dependencies]` graph between the workspace members: 30 crates and one maintainer tool, a strict DAG the compiler enforces (a cycle between crates does not compile). Read it from the bottom up: `camerata-core`, `camerata-api-types` and the other leaf crates depend on nothing in the workspace; checks, agents and the model stack build on them; `camerata-server` is the composition root; `camerata-ui`, `camerata` (the CLI) and `camerata-mcp` are thin binaries on top. The README carries a compact version of this graph.
 
 The diagram is generated from `cargo metadata`, with one arrow per direct normal dependency, and a test (`crates/rules/tests/docs_crate_graph.rs`) fails when it disagrees with the manifests. Dev-dependencies are not drawn.
 
@@ -301,6 +301,7 @@ graph TD
     fleet["camerata-fleet<br/>tiered governed run"]
     gateway["camerata-gateway<br/>layer 1 gate, MCP"]
     intake["camerata-intake<br/>lead engineer intake"]
+    key_reader["camerata-key-reader<br/>stable Keychain key reader"]
     linter_registry["camerata-linter-registry<br/>linter rule-id lists"]
     liveness["camerata-liveness<br/>stall detection"]
     llm["camerata-llm<br/>model providers, registry, usage"]
@@ -408,7 +409,7 @@ Notes on reading it:
 - `camerata-check` is the standalone binary that carries the architectural checkers into a client's own CI, with no server in it.
 - `camerata-test-env` is test support only. It is a dev-dependency of the crates that change environment variables in their tests, so it has no arrow here.
 - `corpus-verifier` is the maintainer tool that promotes rules from grounded to verified. No app crate depends on it.
-- `camerata-linter-registry`, `camerata-preview`, `camerata-deploy` and `camerata-maintenance` have no workspace dependencies. The CLI links `camerata-deploy` and `camerata-maintenance` for the demos.
+- `camerata-linter-registry`, `camerata-preview`, `camerata-deploy`, `camerata-maintenance` and `camerata-key-reader` have no workspace dependencies. The CLI links `camerata-deploy` and `camerata-maintenance` for the demos.
 
 The crate map and the runtime model are in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §1.
 

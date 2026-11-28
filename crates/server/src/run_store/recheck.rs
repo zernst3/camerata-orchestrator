@@ -108,9 +108,21 @@ pub struct Rechecked {
     pub lines: Vec<String>,
 }
 
-/// What the first build's seal adds to the ledger after it saved the ledger file, or a recheck
-/// records: left out when the file's ledger is compared with the report's.
-const SEALED_LATER: [&str; 4] = ["path_hygiene", "content", "discarded", "rerun"];
+/// The ledger fields the first build's own pipeline adds or recomputes AFTER it saved the ledger
+/// file (`save_ledger`, before the seal) and BEFORE it saved the report (`write_report`, after
+/// it), or a recheck records. The seal records the path audit, the content check and the rows it
+/// sets aside (`path_hygiene`, `content`, `discarded`), and its site keying rebuilds the review
+/// tree, which records the fix merge and the place merge again (`fix_merge`, `place_merge`).
+/// `rerun` is the recheck's own record. Read from the order of `run_inspect` and
+/// `ScanReport::seal` at build a7e1e1d5; every other field of the two copies must match exactly.
+const SEALED_LATER: [&str; 6] = [
+    "path_hygiene",
+    "content",
+    "discarded",
+    "rerun",
+    "fix_merge",
+    "place_merge",
+];
 
 fn without_sealed_later(mut v: serde_json::Value) -> serde_json::Value {
     if let Some(o) = v.as_object_mut() {
@@ -139,8 +151,8 @@ pub fn load_saved_report(run_dir: &Path, ledger_file: &Path) -> Result<ScanRepor
         Err(e) => {
             return refused(format!(
                 "the saved report of this run is missing or cannot be read ({}: {e}). A run saves \
-                 its sealed report when it ends; without it there is nothing to recheck. Resume \
-                 the run on the build that started it instead.",
+                 its sealed report when it ends; without it this command cannot finish the run. \
+                 Restore the saved report to the run folder, or start the inspection again.",
                 path.display()
             ))
         }
@@ -189,11 +201,20 @@ pub fn load_saved_report(run_dir: &Path, ledger_file: &Path) -> Result<ScanRepor
         return Err(missing("convention records"));
     }
     let embedded = without_sealed_later(serde_json::to_value(&report.ledger).unwrap_or_default());
-    if embedded != without_sealed_later(ledger_v) {
+    let on_file = without_sealed_later(ledger_v);
+    if embedded != on_file {
+        let differs: Vec<&str> = embedded
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, v)| on_file.get(k.as_str()) != Some(*v))
+            .map(|(k, _)| k.as_str())
+            .collect();
         return refused(format!(
-            "the ledger inside the saved report does not match the saved ledger file ({}), so \
-             one of them is not from the end of this run; it was not changed",
-            ledger_file.display()
+            "the ledger inside the saved report does not match the saved ledger file ({}; \
+             differing: {}), so one of them is not from the end of this run; it was not changed",
+            ledger_file.display(),
+            differs.join(", ")
         ));
     }
     Ok(report)
@@ -242,21 +263,6 @@ fn saved_rows_of<'a>(
         .findings
         .iter()
         .filter(move |f| f.repo == repo && f.rule_id == rule.id())
-}
-
-/// Whether the saved rows of the part show that nothing of the rule was judged: only its one
-/// not-assessed row, saying so.
-fn nothing_judged_yet(report: &ScanReport, repo: &str, rule: CloneRule) -> bool {
-    let mut any = false;
-    for row in saved_rows_of(report, repo, rule) {
-        any = true;
-        match &row.kind {
-            Some(FindingKind::NotAssessed(n))
-                if redo::saved_row_judged_nothing(&n.reason_detail) => {}
-            _ => return false,
-        }
-    }
-    any
 }
 
 /// One clone check part to redo, planned from the run's data.
@@ -361,8 +367,8 @@ pub async fn recheck_saved_run(
         return refused(format!(
             "this recheck redoes the final checks and a clone check part whose reply could not \
              be read, and the run has more that stays unfinished, so a client export would be \
-             refused: {}. Resume the run on the build that started it instead. Nothing was \
-             asked and no export was written.",
+             refused: {}. This command cannot finish this run. Nothing was asked and no \
+             export was written.",
             left.join("; ")
         ));
     }
@@ -394,16 +400,6 @@ pub async fn recheck_saved_run(
                     fp.repo, fp.reason
                 ));
             };
-            if !nothing_judged_yet(&report, &fp.repo, rule) {
-                return refused(format!(
-                    "the clone check for rule {} in {} was judged in part by build {}, so its \
-                     saved rows are not only the one not-assessed row; this command redoes a \
-                     part that judged nothing. Resume the run on that build instead.",
-                    rule.id(),
-                    fp.repo,
-                    saved_pin.build.short_commit().unwrap_or_default()
-                ));
-            }
             let Some((_, dir)) = inputs.sources.iter().find(|(name, _)| name == &fp.repo) else {
                 return refused(format!(
                     "repository {} of the failed clone check was not given to this command",
@@ -435,6 +431,51 @@ pub async fn recheck_saved_run(
                      and no export was written.",
                     rule.id(),
                     fp.repo
+                ));
+            }
+            // A batch the scan never sent, or batched differently (its verdict cache held some
+            // candidates and the run does not record which), has no stored call under its
+            // rebuilt key. It is never asked.
+            if let Some(batch) = plan.unsent().next() {
+                return refused(format!(
+                    "the clone check for rule {} in {} cannot be redone: {} has no call stored \
+                     under its rebuilt request, so the batch layout of the first build cannot be \
+                     reproduced (or that batch was never sent), and this command asks only batches \
+                     the first build sent. Nothing was asked and no export was written.",
+                    rule.id(),
+                    fp.repo,
+                    batch.describe()
+                ));
+            }
+            // The saved rows of a part judged in part are tied to its batches by candidate id
+            // before anything is redone; rows that cannot be tied refuse rather than risk a
+            // second row for a candidate.
+            let traces = redo::SavedTraces {
+                rows: saved_rows_of(&report, &fp.repo, rule)
+                    .filter(|r| !matches!(r.kind, Some(FindingKind::NotAssessed(_))))
+                    .collect(),
+                discarded: report
+                    .discarded
+                    .iter()
+                    .filter(|f| f.repo == fp.repo && f.rule_id == rule.id())
+                    .collect(),
+                folded: report
+                    .findings
+                    .iter()
+                    .filter(|f| f.repo == fp.repo)
+                    .flat_map(|f| &f.flagged_by)
+                    .filter(|b| b.rule_id == rule.id())
+                    .map(|b| (b.path.as_str(), b.line))
+                    .collect(),
+            };
+            if let Err(why) = plan.tie_to_saved_rows(&traces) {
+                return refused(format!(
+                    "the clone check for rule {} in {} was judged in part by build {}, and its \
+                     saved rows cannot be tied to its batches ({why}), so finishing it could \
+                     count a candidate twice. Nothing was asked and no export was written.",
+                    rule.id(),
+                    fp.repo,
+                    saved_pin.build.short_commit().unwrap_or_default()
                 ));
             }
             parts.push(PartPlan {
