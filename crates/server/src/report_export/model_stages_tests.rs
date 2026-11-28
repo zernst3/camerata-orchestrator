@@ -375,6 +375,8 @@ const OLDER_RUN_FIX: &str = "Use the shared query builder in src/db.rs.";
 fn older_run_json() -> serde_json::Value {
     let meter = StageMeter::default();
     meter.record(Stage::Finder, &call("acme-old-scan-model", "api"));
+    meter.record(Stage::Calibration, &call("acme-old-cal-model", "api"));
+    meter.record(Stage::GroupReview, &call("acme-old-review-model", "api"));
     meter.record(Stage::FixGeneration, &call("acme-old-fix-model", "api"));
     let mut report = report_with(
         vec![crate::onboard::Finding {
@@ -480,4 +482,131 @@ fn an_older_run_with_no_model_lists_no_stage() {
         stages.note.as_deref(),
         Some("No model was used in this inspection.")
     );
+}
+
+// ── Review round 1 ──────────────────────────────────────────────────────────────────────────
+
+/// Provenance stamps the configured calibration and group review models even when the stage never
+/// ran. An older run lists a stage only when its stage record shows calls.
+#[test]
+fn an_older_run_lists_calibration_and_group_review_only_when_they_ran() {
+    let mut value = older_run_json();
+    let stages = value["ledger"]["stage_telemetry"]["stages"]
+        .as_array_mut()
+        .expect("telemetry stages");
+    stages.retain(|s| s["stage"] != "calibration" && s["stage"] != "group_review");
+    let report: ScanReport = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        lines(&model_stages(&report)),
+        vec![
+            "Finder: acme-old-scan-model.",
+            "Duplicate check: model not recorded.",
+            "Fix text: model not recorded.",
+        ]
+    );
+    let mut value = older_run_json();
+    value["ledger"]
+        .as_object_mut()
+        .unwrap()
+        .remove("stage_telemetry");
+    let report: ScanReport = serde_json::from_value(value).unwrap();
+    let listed = lines(&model_stages(&report));
+    assert!(
+        !listed
+            .iter()
+            .any(|l| l.starts_with("Calibration") || l.starts_with("Group review")),
+        "no stage record, no sign they ran: {listed:?}"
+    );
+}
+
+/// The new-format record: calibration configured but never called is not listed.
+#[test]
+fn calibration_configured_but_never_called_is_not_listed() {
+    let meter = StageMeter::default();
+    meter.record(Stage::Finder, &call("acme-scan-model", "api"));
+    let mut report = report_with(vec![finding("SEC-1", "a.rs", 1, "high")], vec!["SEC-1"]);
+    report.provenance.calibration_model = Some("acme-configured-cal-model".to_string());
+    report
+        .ledger
+        .record_model_stages(RecordedStageModels::from_telemetry(&meter.snapshot(0)));
+    assert_eq!(
+        lines(&model_stages(&report)),
+        vec!["Finder: acme-scan-model, live."]
+    );
+}
+
+fn carried(n: usize) -> crate::scan_ledger::IncrementalCarry {
+    crate::scan_ledger::IncrementalCarry {
+        changed: 0,
+        carried_files: 4,
+        carried_findings: n,
+        prior_sha: Some("abc1234".to_string()),
+    }
+}
+
+/// An incremental run whose model findings were all carried called no model, but its findings did
+/// come from one: the report never says no model was used.
+#[test]
+fn a_run_that_carried_every_model_finding_does_not_say_no_model_was_used() {
+    let mut report = report_with(vec![finding("SEC-1", "a.rs", 1, "high")], vec!["SEC-1"]);
+    report
+        .ledger
+        .record_model_stages(RecordedStageModels::default());
+    report.ledger.record_incremental(carried(3));
+    let stages = model_stages(&report);
+    assert!(stages.stages.is_empty());
+    assert_eq!(stages.note.as_deref(), Some(CARRIED_ALL_NOTE));
+    assert_ne!(stages.note.as_deref(), Some(NO_MODEL_NOTE));
+}
+
+/// A run that called models and carried other model findings lists what it called and says
+/// some findings came from an earlier inspection.
+#[test]
+fn a_run_that_carried_some_model_findings_says_so_under_its_list() {
+    let mut report = run_with_mixed_stages();
+    report.ledger.record_incremental(carried(2));
+    let stages = model_stages(&report);
+    assert_eq!(stages.stages.len(), 6);
+    assert_eq!(stages.note.as_deref(), Some(CARRIED_SOME_NOTE));
+    // Nothing carried: no note.
+    let mut none_carried = run_with_mixed_stages();
+    none_carried.ledger.record_incremental(carried(0));
+    assert_eq!(model_stages(&none_carried).note, None);
+}
+
+#[test]
+fn the_carried_notes_pass_the_client_text_rules() {
+    for text in [CARRIED_ALL_NOTE, CARRIED_SOME_NOTE] {
+        assert!(crate::client_text::banned_in(text).is_empty(), "{text}");
+        assert!(
+            !text.contains(", and ") && !text.contains(", or "),
+            "{text}"
+        );
+        assert!(text.contains("inspection"), "{text}");
+        assert!(!text.to_lowercase().contains("audit"), "{text}");
+    }
+}
+
+/// A run saved before the record existed, whose duplicate check a newer build ran later: that
+/// stage names its model, the others stay as the older run's.
+#[test]
+fn an_older_run_names_a_stage_a_newer_build_ran_later() {
+    let mut report = older_run();
+    let later = StageMeter::default();
+    later.record(Stage::DuplicateCheck, &call("acme-dup-model", "api"));
+    let mut partial = RecordedStageModels::partial();
+    partial.absorb(&later.snapshot(0));
+    report.ledger.record_model_stages(partial);
+    let stages = model_stages(&report);
+    assert_eq!(
+        lines(&stages),
+        vec![
+            "Finder: acme-old-scan-model.",
+            "Group review: acme-old-review-model.",
+            "Duplicate check: acme-dup-model, live.",
+            "Fix text: model not recorded.",
+            "Calibration: acme-old-cal-model.",
+        ]
+    );
+    assert_eq!(stages.note.as_deref(), Some(OLDER_RUN_NOTE));
 }

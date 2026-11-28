@@ -59,6 +59,16 @@ pub struct ModelStagesJson {
 pub const OLDER_RUN_NOTE: &str = "This inspection was saved before the model of each stage was \
      recorded. A stage that says model not recorded ran, but its model was not saved with the run.";
 
+/// The note of a run that called no model but carried its model findings from an earlier
+/// inspection (an incremental run whose files had not changed).
+pub const CARRIED_ALL_NOTE: &str = "No model was called in this inspection. Its model findings \
+     were carried from an earlier inspection, and that inspection's models are not listed here.";
+
+/// The note of a run that called models and also carried model findings from an earlier
+/// inspection.
+pub const CARRIED_SOME_NOTE: &str = "Some model findings were carried from an earlier \
+     inspection. This list names only the models this inspection called.";
+
 /// The note of a run that made no model call.
 pub const NO_MODEL_NOTE: &str = "No model was used in this inspection.";
 

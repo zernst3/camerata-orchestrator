@@ -115,3 +115,48 @@ fn the_ledger_keeps_the_record_through_a_save_and_an_older_ledger_has_none() {
     let older: crate::scan_ledger::ScanLedger = serde_json::from_value(older).unwrap();
     assert!(older.model_stages().is_none());
 }
+
+/// A call counted outside the meter (a recheck's re-asked part) adds to what the stage holds,
+/// in model and in mode, and a new stage joins in pipeline order.
+#[test]
+fn calls_added_outside_the_meter_add_to_the_stage() {
+    let meter = StageMeter::default();
+    meter.record(Stage::ScanPass, &call("acme-scan", "api"));
+    meter.record(Stage::CloneJudge, &call("acme-judge", "api"));
+    meter.record(Stage::CloneJudge, &call("acme-judge", "api"));
+    let mut record = RecordedStageModels::from_telemetry(&meter.snapshot(0));
+    record.add_calls(Stage::CloneJudge, "acme-judge", "live", 1);
+    record.add_calls(Stage::Calibration, "acme-cal (requested)", "live", 2);
+    assert_eq!(
+        record.stage(Stage::CloneJudge).unwrap().models,
+        map(&[("acme-judge", 3)])
+    );
+    assert_eq!(
+        record.stage(Stage::CloneJudge).unwrap().modes,
+        map(&[("live", 3)])
+    );
+    assert_eq!(
+        record.stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+        vec![Stage::ScanPass, Stage::Calibration, Stage::CloneJudge]
+    );
+    assert_eq!(
+        record.stage(Stage::Calibration).unwrap().models,
+        map(&[("acme-cal (requested)", 2)])
+    );
+}
+
+/// A record started for a run saved before the record existed says so through a save, and a
+/// later stage folded in keeps it partial.
+#[test]
+fn a_partial_record_stays_partial_through_a_save_and_a_later_stage() {
+    let mut record = RecordedStageModels::partial();
+    let later = StageMeter::default();
+    later.record(Stage::DuplicateCheck, &call("acme-dup", "api"));
+    record.absorb(&later.snapshot(0));
+    let back: RecordedStageModels =
+        serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+    assert!(back.partial);
+    assert_eq!(back.stages.len(), 1);
+    let full = RecordedStageModels::from_telemetry(&later.snapshot(0));
+    assert!(!serde_json::to_string(&full).unwrap().contains("partial"));
+}

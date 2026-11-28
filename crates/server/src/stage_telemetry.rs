@@ -175,17 +175,29 @@ pub fn now_unix_ms() -> u64 {
 /// backend reports it (the API does), else the requested id marked `(requested)` (the CLI
 /// backend echoes the id it was asked for and never says what served the call).
 fn model_key(r: &LlmResponse) -> String {
-    if r.backend == "cli" {
-        format!("{} (requested)", r.model)
+    model_key_of(&r.model, &r.backend)
+}
+
+/// [`model_key`] for a call known by its model id and backend name: the one naming every record of
+/// a call's model uses, so a call counted outside [`StageMeter`] (a recheck's re-asked part) is
+/// named as the meter names it.
+pub fn model_key_of(model: &str, backend: &str) -> String {
+    if backend == "cli" {
+        format!("{model} (requested)")
     } else {
-        r.model.clone()
+        model.to_string()
     }
 }
 
 /// The key a call is counted under in [`StageUsage::modes`]: `batch` for a Message Batches row,
 /// `live` for every other call.
 fn mode_key(r: &LlmResponse) -> &'static str {
-    if r.backend == BATCH_BACKEND {
+    mode_key_of(&r.backend)
+}
+
+/// [`mode_key`] for a call known by its backend name.
+pub fn mode_key_of(backend: &str) -> &'static str {
+    if backend == BATCH_BACKEND {
         MODE_BATCH
     } else {
         MODE_LIVE

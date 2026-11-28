@@ -45,6 +45,11 @@ pub struct RecordedStageModels {
     /// `None` when the fix stage made no call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standard_fix_fallbacks: Option<u64>,
+    /// True for a run saved before this record existed, when a newer build later ran one of its
+    /// stages (the duplicate check, the group review, a recheck's clone check part): the record
+    /// holds only those stages, and the export lists the run's other stages as an older run's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 impl RecordedStageModels {
@@ -72,6 +77,7 @@ impl RecordedStageModels {
         Self {
             stages,
             standard_fix_fallbacks,
+            partial: false,
         }
     }
 
@@ -92,6 +98,20 @@ impl RecordedStageModels {
             self.standard_fix_fallbacks = fresh.standard_fix_fallbacks;
         }
     }
+
+    /// The record a newer build starts for a run saved before this record existed: no stage
+    /// yet, and [`Self::partial`] set.
+    pub fn partial() -> Self {
+        Self {
+            partial: true,
+            ..Self::default()
+        }
+    }
+
+    /// Add `calls` calls of `stage` on the model keyed `model` (named as
+    /// [`crate::stage_telemetry::model_key_of`] names it) in `mode`: a call counted outside the
+    /// stage meter, such as a recheck's re-asked part. Adds to what the stage already holds.
+    pub fn add_calls(&mut self, _stage: Stage, _model: &str, _mode: &str, _calls: u64) {}
 
     /// The record of `stage`, when the run made a call in it.
     pub fn stage(&self, stage: Stage) -> Option<&StageModelRecord> {

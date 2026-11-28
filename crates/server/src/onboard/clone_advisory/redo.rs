@@ -152,6 +152,9 @@ fn read_stored(run_dir: &Path, rule: CloneRule, batch: &JudgeBatch) -> Option<Pa
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpentCall {
     pub model: String,
+    /// The backend that served the call (`api`, `cli`, ...), so the run's records name its model
+    /// as every other call's model is named (`stage_telemetry::model_key_of`).
+    pub backend: String,
     pub cost_usd: Option<f64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -190,6 +193,7 @@ pub async fn ask_once(llm: &dyn LlmPort, rule: CloneRule, batch: &PlannedBatch) 
     };
     let spent = Some(SpentCall {
         model: response.model.clone(),
+        backend: response.backend.clone(),
         cost_usd: response.cost_usd,
         input_tokens: response.input_tokens.unwrap_or(0),
         output_tokens: response.output_tokens.unwrap_or(0),
