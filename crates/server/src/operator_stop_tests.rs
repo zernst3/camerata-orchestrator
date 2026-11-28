@@ -365,3 +365,33 @@ fn a_hook_added_after_the_trip_runs_at_once() {
     health.on_trip(Box::new(move || r.store(true, Ordering::SeqCst)));
     assert!(ran.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn after_the_outage_stop_the_seam_sends_nothing_and_submits_no_batch() {
+    // The stage's own admission refuses first; this is the seam's own refusal underneath it,
+    // for a call that was already past admission.
+    let provider = Arc::new(Provider::default());
+    let control = Arc::new(RunControl::new());
+    let seam = seam(provider.clone(), &control);
+    control.note_outage_stop();
+    let e = seam
+        .complete(LlmRequest::new("after"))
+        .await
+        .expect_err("a send after the outage stop is refused");
+    assert_eq!(
+        crate::failure::classify_error(&e),
+        FailureClass::OutageStop,
+        "{e:#}"
+    );
+    assert!(e.to_string().contains("could not be reached"), "{e:#}");
+    let mut sink = |_: &str| {};
+    assert!(seam
+        .complete_streaming(LlmRequest::new("after"), &mut sink)
+        .await
+        .is_err());
+    assert!(api_of(seam.as_ref()).submit(Vec::new()).await.is_err());
+    assert_eq!(provider.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.submits.load(Ordering::SeqCst), 0);
+    // Nothing is canceled: an outage stop is not the operator's stop.
+    assert!(!control.is_stopped());
+}
