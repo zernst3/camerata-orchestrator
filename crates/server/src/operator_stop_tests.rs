@@ -29,7 +29,7 @@ fn reply() -> LlmResponse {
     }
 }
 
-/// A provider whose batches stay in progress until cancelled.
+/// A provider whose batches stay in progress until canceled.
 #[derive(Default)]
 struct Provider {
     submits: AtomicUsize,
@@ -128,15 +128,15 @@ async fn the_stop_cancels_every_live_batch_at_the_provider() {
     assert_eq!(control.live_batches(), vec![a.clone(), b.clone()]);
 
     let report = control.stop().await;
-    assert_eq!(report.cancelled, vec![a.clone(), b.clone()]);
-    assert!(report.not_cancelled.is_empty());
+    assert_eq!(report.canceled, vec![a.clone(), b.clone()]);
+    assert!(report.not_canceled.is_empty());
     let mut asked = provider.cancels.lock().unwrap().clone();
     asked.sort();
     assert_eq!(asked, vec![a, b]);
     assert!(control.live_batches().is_empty());
     // A second stop cancels nothing twice.
     let again = control.stop().await;
-    assert!(again.cancelled.is_empty());
+    assert!(again.canceled.is_empty());
     assert_eq!(provider.cancels.lock().unwrap().len(), 2);
 }
 
@@ -152,13 +152,13 @@ async fn a_batch_the_provider_will_not_cancel_is_listed_with_its_id() {
     api.submit(Vec::new()).await.unwrap();
     api.submit(Vec::new()).await.unwrap();
     let report = control.stop().await;
-    assert_eq!(report.cancelled, vec!["msgbatch_acme_0".to_string()]);
-    assert_eq!(report.not_cancelled.len(), 1);
-    assert_eq!(report.not_cancelled[0].batch_id, "msgbatch_acme_1");
+    assert_eq!(report.canceled, vec!["msgbatch_acme_0".to_string()]);
+    assert_eq!(report.not_canceled.len(), 1);
+    assert_eq!(report.not_canceled[0].batch_id, "msgbatch_acme_1");
     assert!(
-        report.not_cancelled[0].error.contains("HTTP 500"),
+        report.not_canceled[0].error.contains("HTTP 500"),
         "{:?}",
-        report.not_cancelled[0]
+        report.not_canceled[0]
     );
 }
 
@@ -174,12 +174,12 @@ async fn a_cancel_that_never_answers_is_listed_after_the_timeout() {
     let started = tokio::time::Instant::now();
     let report = control.stop().await;
     assert_eq!(started.elapsed(), CANCEL_TIMEOUT);
-    assert_eq!(report.not_cancelled.len(), 1);
-    assert_eq!(report.not_cancelled[0].batch_id, "msgbatch_acme_0");
+    assert_eq!(report.not_canceled.len(), 1);
+    assert_eq!(report.not_canceled[0].batch_id, "msgbatch_acme_0");
 }
 
 #[tokio::test]
-async fn a_batch_that_ended_or_was_fetched_is_not_cancelled() {
+async fn a_batch_that_ended_or_was_fetched_is_not_canceled() {
     let provider = Arc::new(Provider {
         ended: vec!["msgbatch_acme_0".to_string()],
         ..Provider::default()
@@ -202,7 +202,7 @@ async fn a_batch_that_ended_or_was_fetched_is_not_cancelled() {
         ]
     );
     let report = control.stop().await;
-    assert_eq!(report.cancelled, vec![live, "msgbatch_earlier".to_string()]);
+    assert_eq!(report.canceled, vec![live, "msgbatch_earlier".to_string()]);
 }
 
 #[tokio::test]
@@ -249,7 +249,7 @@ async fn a_stop_cancels_the_live_batches_before_the_run_is_dropped() {
     })
     .await;
     match ended {
-        Ended::Stopped(report) => assert_eq!(report.cancelled, vec!["msgbatch_acme_0".to_string()]),
+        Ended::Stopped(report) => assert_eq!(report.canceled, vec!["msgbatch_acme_0".to_string()]),
         Ended::Finished(()) => panic!("the run cannot finish"),
     }
 }
@@ -289,7 +289,7 @@ impl BatchApi for HeldSubmit {
 }
 
 #[tokio::test]
-async fn a_batch_accepted_as_the_run_stops_is_cancelled_too() {
+async fn a_batch_accepted_as_the_run_stops_is_canceled_too() {
     let provider = Arc::new(HeldSubmit {
         inner: Provider::default(),
         release: tokio::sync::Notify::new(),
@@ -310,13 +310,13 @@ async fn a_batch_accepted_as_the_run_stops_is_cancelled_too() {
     let (id, report) = tokio::join!(submit, stop_meanwhile);
     let id = id.expect("the provider accepted the batch");
     assert!(
-        report.cancelled.is_empty(),
+        report.canceled.is_empty(),
         "nothing was live when the stop began"
     );
     assert_eq!(
         *provider.inner.cancels.lock().unwrap(),
         vec![id],
-        "the batch accepted after the stop began is cancelled at once"
+        "the batch accepted after the stop began is canceled at once"
     );
     assert!(control.live_batches().is_empty());
 }
@@ -329,7 +329,7 @@ async fn a_meter_made_inside_the_run_links_its_outage_stop_to_the_run_control() 
     })
     .await;
     assert!(!control.refuses_sends());
-    // The outage stop trips: every wait ends, no send leaves, nothing is cancelled.
+    // The outage stop trips: every wait ends, no send leaves, nothing is canceled.
     meter.health().note_failure(
         FailureClass::AuthOrBilling,
         "Anthropic API HTTP 401: invalid x-api-key",

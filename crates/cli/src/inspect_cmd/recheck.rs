@@ -28,20 +28,26 @@ pub async fn run_recheck_saved(
 ) -> Result<InspectOutcome, InspectError> {
     let store = &camerata_server::credentials::KeyringCredentialStore;
     let has_api_key = api_key_present(store);
-    recheck_saved_inspect(
-        run,
-        repos,
-        export,
-        max_cost_usd,
-        reask,
-        has_api_key,
-        store,
-        Seams {
-            resume: None,
-            llm: None,
-            preflight_sink: &|text| print!("{text}"),
-        },
-    )
+    // Ctrl+C and SIGTERM stop a recheck's re-ask as they stop a run (#583).
+    super::operator_stop::run_stoppable(super::operator_stop::spawn_stop_listener(), |control| {
+        camerata_server::operator_stop::with_run_control(
+            control,
+            Box::pin(recheck_saved_inspect(
+                run,
+                repos,
+                export,
+                max_cost_usd,
+                reask,
+                has_api_key,
+                store,
+                Seams {
+                    resume: None,
+                    llm: None,
+                    preflight_sink: &|text| print!("{text}"),
+                },
+            )),
+        )
+    })
     .await
 }
 

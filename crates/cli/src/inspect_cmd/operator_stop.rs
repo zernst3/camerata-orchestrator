@@ -2,9 +2,9 @@
 //!
 //! The first SIGINT or SIGTERM stops the run the way the app's stop does, with the one server
 //! function both call ([`camerata_server::operator_stop::RunControl::stop`]): no new part is sent,
-//! every live batch is cancelled at the provider, and what finished is already saved in the run
+//! every live batch is canceled at the provider, and what finished is already saved in the run
 //! folder. The failure report beside the ledger records the stop and every batch that could not be
-//! cancelled, by id. The command exits with [`EXIT_OPERATOR_STOPPED`], and `--resume` runs what
+//! canceled, by id. The command exits with [`EXIT_OPERATOR_STOPPED`], and `--resume` runs what
 //! remains.
 //!
 //! A second SIGINT or SIGTERM while the stop is still at work (a provider slow to answer a
@@ -37,13 +37,13 @@ impl std::fmt::Display for OperatorStopped {
         write!(
             f,
             "STOPPED BY THE OPERATOR. No further part was sent, and {} live batch(es) were \
-             cancelled at the provider.",
-            self.report.cancelled.len()
+             canceled at the provider.",
+            self.report.canceled.len()
         )?;
-        for b in &self.report.not_cancelled {
+        for b in &self.report.not_canceled {
             write!(
                 f,
-                "\nbatch {} could NOT be cancelled ({}); it may still run and be billed. Cancel it \
+                "\nbatch {} could NOT be canceled ({}); it may still run and be billed. Cancel it \
                  in the Anthropic console.",
                 b.batch_id, b.error
             )?;

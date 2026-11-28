@@ -290,7 +290,7 @@ impl BatchApi for WaitingBatchApi {
             if let Err(e) = self.inner.cancel_batch(&id).await {
                 eprintln!(
                     "[camerata-server] batch {id} was accepted as the run stopped and could not \
-                     be cancelled ({e:#}); cancel it in the Anthropic console"
+                     be canceled ({e:#}); cancel it in the Anthropic console"
                 );
             } else {
                 self.control.note_batch_finished(&id);

@@ -97,8 +97,8 @@ fn request_of(item: &BatchItem) -> LlmRequest {
     req
 }
 
-/// A batch provider. While `hold` is set its batches stay in progress; a cancelled batch ends with
-/// no result for any item (it was cancelled before any finished).
+/// A batch provider. While `hold` is set its batches stay in progress; a canceled batch ends with
+/// no result for any item (it was canceled before any finished).
 struct Provider {
     model: Model,
     hold: AtomicBool,
@@ -106,7 +106,7 @@ struct Provider {
     refuse_cancel: Vec<String>,
     submits: AtomicUsize,
     items: Mutex<HashMap<String, Vec<BatchItem>>>,
-    cancelled: Mutex<Vec<String>>,
+    canceled: Mutex<Vec<String>>,
     /// Set once a batch was accepted: the operator presses Ctrl+C then.
     live: tokio::sync::Notify,
 }
@@ -119,13 +119,13 @@ impl Provider {
             refuse_cancel: refuse_cancel.iter().map(|s| (*s).to_string()).collect(),
             submits: AtomicUsize::new(0),
             items: Mutex::new(HashMap::new()),
-            cancelled: Mutex::new(Vec::new()),
+            canceled: Mutex::new(Vec::new()),
             live: tokio::sync::Notify::new(),
         })
     }
 
-    fn was_cancelled(&self, id: &str) -> bool {
-        self.cancelled.lock().unwrap().iter().any(|c| c == id)
+    fn was_canceled(&self, id: &str) -> bool {
+        self.canceled.lock().unwrap().iter().any(|c| c == id)
     }
 }
 
@@ -150,14 +150,14 @@ impl BatchApi for Shared {
         Ok(id)
     }
     async fn poll(&self, id: &str) -> anyhow::Result<BatchStatus> {
-        let running = self.0.hold.load(Ordering::SeqCst) && !self.0.was_cancelled(id);
+        let running = self.0.hold.load(Ordering::SeqCst) && !self.0.was_canceled(id);
         Ok(BatchStatus {
             processing_status: if running { "in_progress" } else { "ended" }.to_string(),
             request_counts: BatchRequestCounts::default(),
         })
     }
     async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
-        if self.0.was_cancelled(id) {
+        if self.0.was_canceled(id) {
             // As the provider does: every item the cancel caught comes back as a `canceled` row.
             let items = self
                 .0
@@ -199,7 +199,7 @@ impl BatchApi for Shared {
         if self.0.refuse_cancel.iter().any(|r| r == id) {
             anyhow::bail!("Message Batches API HTTP 500: internal error");
         }
-        self.0.cancelled.lock().unwrap().push(id.to_string());
+        self.0.canceled.lock().unwrap().push(id.to_string());
         Ok(())
     }
 }
@@ -409,13 +409,10 @@ async fn ctrl_c_during_a_live_batch_cancels_it_saves_the_run_and_a_resume_finish
     let provider = Provider::new(true, &[]);
     let (stopped, took) = stopped_run(&ws, &provider).await;
     assert!(took < Duration::from_secs(5), "the stop took {took:?}");
-    // The live batch was cancelled at the provider.
-    assert_eq!(
-        stopped.report.cancelled,
-        vec!["msgbatch_acme_0".to_string()]
-    );
-    assert!(provider.was_cancelled("msgbatch_acme_0"));
-    assert!(stopped.report.not_cancelled.is_empty());
+    // The live batch was canceled at the provider.
+    assert_eq!(stopped.report.canceled, vec!["msgbatch_acme_0".to_string()]);
+    assert!(provider.was_canceled("msgbatch_acme_0"));
+    assert!(stopped.report.not_canceled.is_empty());
     // The run was saved, and the failure report records the stop.
     let run_id = stopped.run_id.clone().expect("the run was saved");
     let failures = stopped
@@ -465,15 +462,15 @@ async fn ctrl_c_during_a_live_batch_cancels_it_saves_the_run_and_a_resume_finish
 
 #[tokio::test]
 #[serial_test::serial(process_env)]
-async fn a_batch_that_cannot_be_cancelled_is_listed_with_its_id_in_the_failure_report() {
-    if !camerata_test_env::typst_on_path_for("a_batch_that_cannot_be_cancelled") {
+async fn a_batch_that_cannot_be_canceled_is_listed_with_its_id_in_the_failure_report() {
+    if !camerata_test_env::typst_on_path_for("a_batch_that_cannot_be_canceled") {
         return;
     }
     let ws = Workspace::new();
     let provider = Provider::new(true, &["msgbatch_acme_0"]);
     let (stopped, _) = stopped_run(&ws, &provider).await;
-    assert_eq!(stopped.report.not_cancelled.len(), 1);
-    assert_eq!(stopped.report.not_cancelled[0].batch_id, "msgbatch_acme_0");
+    assert_eq!(stopped.report.not_canceled.len(), 1);
+    assert_eq!(stopped.report.not_canceled[0].batch_id, "msgbatch_acme_0");
     assert!(stopped.to_string().contains("msgbatch_acme_0"), "{stopped}");
     let failures = stopped
         .failure_report
@@ -483,5 +480,5 @@ async fn a_batch_that_cannot_be_cancelled_is_listed_with_its_id_in_the_failure_r
     assert!(json.contains("msgbatch_acme_0"), "{json}");
     let md = std::fs::read_to_string(failures.with_extension("md")).unwrap();
     assert!(md.contains("batch msgbatch_acme_0"), "{md}");
-    assert!(md.contains("could NOT be cancelled"), "{md}");
+    assert!(md.contains("could NOT be canceled"), "{md}");
 }

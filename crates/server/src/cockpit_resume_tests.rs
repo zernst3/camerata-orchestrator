@@ -2143,7 +2143,7 @@ impl crate::network_wait::Sleeper for CancelAtFirstWait {
                 tokio::task::yield_now().await;
             }
             let (jobs, id) = self.job.get().unwrap();
-            // What the cockpit's Stop does (`routes::onboarding`): the job is cancelled.
+            // What the cockpit's Stop does (`routes::onboarding`): the job is canceled.
             jobs.cancel(id);
             // A call already on its way when the Stop came lands in the log meanwhile.
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -2195,7 +2195,7 @@ async fn the_cockpit_stop_during_a_network_wait_sends_nothing_more() {
         .sent_at_cancel
         .lock()
         .unwrap()
-        .expect("a fix call waited for the network and the job was cancelled then");
+        .expect("a fix call waited for the network and the job was canceled then");
     let sent = read();
     assert_eq!(
         sent.lines().count(),

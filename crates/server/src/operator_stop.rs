@@ -15,7 +15,7 @@
 //! operator said stop. A batch the provider would not cancel comes back in the [`StopReport`],
 //! with its id, so it lands in the failure report. What the run already finished is in its run
 //! folder (the journal writes every reply as it comes), and `--resume` runs what remains; a
-//! cancelled batch's finished items are fetched by that resume, never paid for twice.
+//! canceled batch's finished items are fetched by that resume, never paid for twice.
 //!
 //! The app's stop calls the same [`RunControl::stop`] on the control it handed to its seam.
 
@@ -32,7 +32,7 @@ use crate::ai_audit::BatchApi;
 use crate::failure::{FailureClass, LlmCallFailure};
 
 /// The longest the stop waits on the provider to cancel one batch. A cancel that does not answer
-/// in time is recorded as not cancelled, so the operator knows to cancel it by hand.
+/// in time is recorded as not canceled, so the operator knows to cancel it by hand.
 pub const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a refused send says, once the run was stopped.
@@ -44,7 +44,7 @@ pub const OUTAGE_TEXT: &str =
 
 /// A batch the stop asked the provider to cancel and could not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UncancelledBatch {
+pub struct UncanceledBatch {
     pub batch_id: String,
     /// Why, in the provider's words where it gave any (scrubbed). Operator only.
     pub error: String,
@@ -55,10 +55,10 @@ pub struct UncancelledBatch {
 pub struct StopReport {
     /// RFC3339 UTC time of the stop.
     pub at: String,
-    /// Every live batch the provider cancelled.
-    pub cancelled: Vec<String>,
+    /// Every live batch the provider canceled.
+    pub canceled: Vec<String>,
     /// Every live batch it did not, with the reason. Each may still run and be billed.
-    pub not_cancelled: Vec<UncancelledBatch>,
+    pub not_canceled: Vec<UncanceledBatch>,
 }
 
 /// The run's control handle. See the module docs.
@@ -103,7 +103,7 @@ impl RunControl {
     }
 
     /// The run's outage stop tripped (the run's health record, #582): every network wait ends at
-    /// its next step and no further request is sent. Unlike [`Self::stop`], nothing is cancelled:
+    /// its next step and no further request is sent. Unlike [`Self::stop`], nothing is canceled:
     /// a batch the provider is running still finishes, and a resume reads it.
     pub fn note_outage_stop(&self) {
         self.outage.store(true, Ordering::SeqCst);
@@ -145,7 +145,7 @@ impl RunControl {
         }
     }
 
-    /// `batch_id` is no longer running at the provider (it ended, was fetched or cancelled).
+    /// `batch_id` is no longer running at the provider (it ended, was fetched or canceled).
     pub fn note_batch_finished(&self, batch_id: &str) {
         self.live_lock().retain(|(id, _)| id != batch_id);
     }
@@ -197,7 +197,7 @@ impl RunControl {
     }
 
     /// THE stop. From the first instruction no new send or batch leaves the run, and every network
-    /// wait ends at its next step. Then every live batch is cancelled at the provider, each within
+    /// wait ends at its next step. Then every live batch is canceled at the provider, each within
     /// [`CANCEL_TIMEOUT`], and the result says which were and which were not. Calling it again
     /// cancels nothing twice: a batch leaves the list once its cancel was asked.
     pub async fn stop(&self) -> StopReport {
@@ -214,15 +214,15 @@ impl RunControl {
         });
         for (id, outcome) in futures::future::join_all(cancels).await {
             match outcome {
-                Ok(Ok(())) => report.cancelled.push(id),
-                Ok(Err(e)) => report.not_cancelled.push(UncancelledBatch {
+                Ok(Ok(())) => report.canceled.push(id),
+                Ok(Err(e)) => report.not_canceled.push(UncanceledBatch {
                     batch_id: id,
                     error: crate::failure::scrub_message(
                         &crate::ai_audit::disclosable_error(&format!("{e:#}")),
                         crate::failure::MAX_RECORD_MESSAGE_CHARS,
                     ),
                 }),
-                Err(_elapsed) => report.not_cancelled.push(UncancelledBatch {
+                Err(_elapsed) => report.not_canceled.push(UncanceledBatch {
                     batch_id: id,
                     error: format!(
                         "the provider did not answer the cancel within {} seconds",
@@ -231,21 +231,21 @@ impl RunControl {
                 }),
             }
         }
-        report.cancelled.sort();
+        report.canceled.sort();
         report
-            .not_cancelled
+            .not_canceled
             .sort_by(|a, b| a.batch_id.cmp(&b.batch_id));
         // The run folder says it was stopped, and by whom, beside what the journal saved.
         if let Some(store) = self.store_lock().as_ref() {
             let mut note = format!("stopped by the operator at {}", report.at);
-            if !report.not_cancelled.is_empty() {
+            if !report.not_canceled.is_empty() {
                 let ids: Vec<&str> = report
-                    .not_cancelled
+                    .not_canceled
                     .iter()
                     .map(|b| b.batch_id.as_str())
                     .collect();
                 note.push_str(&format!(
-                    "; these batches could not be cancelled and may still be billed: {}",
+                    "; these batches could not be canceled and may still be billed: {}",
                     ids.join(", ")
                 ));
             }
@@ -267,7 +267,7 @@ pub enum Ended<T> {
 
 /// Drive `run` until it finishes or `stop` resolves (the operator's signal), whichever comes
 /// first. On a stop, [`RunControl::stop`] runs BEFORE `run` is dropped: dispatch is refused and
-/// every live batch is cancelled while the run is held still, then the run is dropped where it
+/// every live batch is canceled while the run is held still, then the run is dropped where it
 /// stood. Everything it finished is already in the run folder.
 pub async fn run_until_stopped<T>(
     control: &RunControl,
@@ -317,21 +317,21 @@ impl Drop for CancelWatch {
     }
 }
 
-/// Watch `cancelled` (the app's cancel: a flag on the job, set by the cockpit's Stop) and call
+/// Watch `canceled` (the app's cancel: a flag on the job, set by the cockpit's Stop) and call
 /// [`RunControl::stop`] once it reads true, so the cancel refuses every later send, ends every
 /// network wait without another send and cancels the live batches, exactly as the command
 /// line's Ctrl+C does. The run itself is left to end on its own (the job's own cancel handling
 /// saves what it finished). Must be called inside a Tokio runtime.
 pub fn stop_on_cancel(
     control: Arc<RunControl>,
-    cancelled: impl Fn() -> bool + Send + 'static,
+    canceled: impl Fn() -> bool + Send + 'static,
 ) -> CancelWatch {
     CancelWatch(tokio::spawn(async move {
         loop {
             if control.is_stopped() {
                 return;
             }
-            if cancelled() {
+            if canceled() {
                 control.stop().await;
                 return;
             }

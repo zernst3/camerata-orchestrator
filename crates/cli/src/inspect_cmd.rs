@@ -473,7 +473,7 @@ pub enum InspectError {
     /// `--resume` was given a run that is already complete: nothing to do, and it says so.
     AlreadyComplete(String),
     /// The operator stopped the run (Ctrl+C or SIGTERM, #583): nothing more was sent, the live
-    /// batches were cancelled, and `--resume` runs what remains.
+    /// batches were canceled, and `--resume` runs what remains.
     StoppedByOperator(Box<operator_stop::OperatorStopped>),
 }
 

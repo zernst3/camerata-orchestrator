@@ -1580,8 +1580,9 @@ Every inspection is saved part by part; failed or unrun parts are retried, not s
   ends with the same result as a run that was never interrupted. A login or billing failure never
   waits: waiting does not fix a key or a balance.
 - A part that fails after its retries makes the **run incomplete**. A run that hit an outage (15
-  minutes with no answer from the AI service, three failed calls in a row, or a login or billing
-  failure) stops and keeps its parts for later.
+  minutes with no answer from the AI service while no other call got through, three failed calls in
+  a row or a login or billing failure) stops at once and keeps its parts for later: a call that is
+  still waiting for the network sends nothing more.
 - **Once a run is incomplete or stopped, no later stage starts.** The group reviewer and the
   possible-duplicate check read every repository at once, so they wait until every repository's
   finder and fix text are complete; a resume runs them once, over all of them. An `--internal` export
@@ -2845,18 +2846,20 @@ command and has no button for it.
 | 1 | The run could not start or a resume was refused; the message says why. |
 | 3 | The release gate refused the export. Nothing was written. |
 | 4 | The spend limit stopped the run. Raise the limit and resume. |
-| 5 | The AI service could not be reached (a call waited 15 minutes for the network with no answer, three failed calls in a row, or a login or billing failure). Resume when it is back. |
+| 5 | The AI service could not be reached (a call waited 15 minutes for the network with no answer, three failed calls in a row or a login or billing failure). Resume when it is back. |
 | 6 | The run is incomplete for another reason (a part failed after its retries). A client export was refused. A finding whose tailored fix never passed the checks does not cause this: it ships a Standard fix and the run is complete. |
 | 7 | The operator stopped the run (Ctrl+C or SIGTERM). What finished is saved. Resume it to run what remains. |
 
 **Stopping a run from the command line.** Press **Ctrl+C** (or send SIGTERM) to stop `camerata
 inspect` cleanly, as the app's stop does: no further part is sent, every batch the AI service is
-still working on is cancelled there so it stops costing money, and what finished is already saved.
+still working on is canceled there so it stops costing money and what finished is already saved.
 The command prints the run id and exits with code 7; `camerata inspect --resume <ID>` runs what
 remains and gives the same result as an uninterrupted inspection. A batch the service would not
 cancel is printed with its id and listed in the failure report beside the ledger ("could NOT be
-cancelled"): cancel it by hand in the Anthropic console, since it may still run and be billed. If
-the stop is slow (the service is slow to answer a cancel), press Ctrl+C again to exit at once.
+canceled"): cancel it by hand in the Anthropic console, since it may still run and be billed. If
+the stop is slow (the service is slow to answer a cancel), press Ctrl+C again to exit at once. The
+app's Stop does the same for a scan the app started: nothing is sent after it and a call that is
+waiting for the network sends nothing more.
 
 Saved runs live in the Camerata state folder under `runs/`, one folder per run, readable only by
 the operator: they hold model answers derived from the code. Camerata keeps the newest five runs of each

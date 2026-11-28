@@ -783,7 +783,7 @@ fn report_progress<Id: Clone + Ord>(ctx: &StageCtx<'_>, stage: Stage, book: &Boo
 
 // ── cancel ──────────────────────────────────────────────────────────────────────────────────────
 
-/// True once the run sends nothing more: the job was cancelled, the run's outage stop tripped, or
+/// True once the run sends nothing more: the job was canceled, the run's outage stop tripped, or
 /// the run's control refuses sends (the operator's stop, #583).
 fn run_stopped(ctx: &StageCtx<'_>) -> bool {
     cancel_requested(ctx)

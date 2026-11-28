@@ -92,7 +92,7 @@ pub struct FailureReport {
     #[serde(default)]
     pub judged_not_a_problem: Vec<String>,
     /// The operator's stop (#583: Ctrl+C or SIGTERM on the command line, or the app's stop), when
-    /// the run was stopped: when, which live batches the provider cancelled, and every batch it
+    /// the run was stopped: when, which live batches the provider canceled, and every batch it
     /// did NOT cancel, by id, since each may still run and be billed. Kept as history by later
     /// attempts. Operator only. `serde(default)` so a report written before it existed still
     /// loads.
@@ -198,7 +198,7 @@ impl FailureReport {
             && self
                 .operator_stop
                 .as_ref()
-                .is_none_or(|s| s.not_cancelled.is_empty())
+                .is_none_or(|s| s.not_canceled.is_empty())
     }
 
     /// The entries that still fail.
@@ -209,17 +209,17 @@ impl FailureReport {
     /// One structured line per failure that still fails, for stderr: `key=value` pairs, stable
     /// order. A resolved entry is history and is not printed.
     pub fn stderr_lines(&self) -> Vec<String> {
-        let not_cancelled = self
+        let not_canceled = self
             .operator_stop
             .iter()
-            .flat_map(|s| s.not_cancelled.iter())
+            .flat_map(|s| s.not_canceled.iter())
             .map(|b| {
                 format!(
-                    "camerata failure: class=batch_not_cancelled batch={} message=\"{}\"",
+                    "camerata failure: class=batch_not_canceled batch={} message=\"{}\"",
                     b.batch_id, b.error
                 )
             });
-        not_cancelled
+        not_canceled
             .chain(self.unresolved().map(|e| {
                 format!(
                     "camerata failure: class={} repo={} part=\"{}\" files={} attempts={} first={} last={} message=\"{}\"",
@@ -257,16 +257,16 @@ impl FailureReport {
             out.push_str(&format!(
                 "\n## Stopped by the operator\n\nThe inspection was stopped by the operator at {}. \
                  What had finished is saved, and `camerata inspect --resume` runs what remains. \
-                 {} live batch(es) were cancelled at the provider.\n",
+                 {} live batch(es) were canceled at the provider.\n",
                 stop.at,
-                stop.cancelled.len()
+                stop.canceled.len()
             ));
-            if !stop.not_cancelled.is_empty() {
+            if !stop.not_canceled.is_empty() {
                 out.push_str(
-                    "\nThese batches could NOT be cancelled and may still run and be billed. \
+                    "\nThese batches could NOT be canceled and may still run and be billed. \
                      Cancel each in the Anthropic console:\n",
                 );
-                for b in &stop.not_cancelled {
+                for b in &stop.not_canceled {
                     out.push_str(&format!("\n- batch {}: {}", b.batch_id, b.error));
                 }
                 out.push('\n');

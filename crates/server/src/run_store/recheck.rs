@@ -505,7 +505,13 @@ pub async fn recheck_saved_run(
     let mut detail = RecheckDetail::default();
     let mut spent: Vec<redo::SpentCall> = Vec::new();
     {
-        let journaled = llm.map(|l| super::journal::wrap(l, store.clone()));
+        // The re-ask goes through the run's own seam, as every call of a run does: journaled,
+        // with the long network wait around it, on the run's control when one is in scope (the
+        // operator's stop refuses it and ends its wait).
+        let control = crate::operator_stop::current_run_control()
+            .unwrap_or_else(|| std::sync::Arc::new(crate::operator_stop::RunControl::new()));
+        let journaled = llm
+            .map(|l| crate::network_wait::run_model_seam(l, Some(store.clone()), control.clone()));
         for part in &parts {
             let mut got = Vec::new();
             let mut asked_again = 0usize;
