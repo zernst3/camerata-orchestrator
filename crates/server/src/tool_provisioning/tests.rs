@@ -134,11 +134,7 @@ fn the_committed_lockfile_and_manifest_agree_with_the_pins() {
         serde_json::from_str::<serde_json::Value>(&eslint_package_json()).unwrap(),
         "assets/eslint/package.json must equal the generated manifest"
     );
-    let lock: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(bundled_eslint_lock_src())
-            .expect("assets/eslint/package-lock.json is committed"),
-    )
-    .unwrap();
+    let lock: serde_json::Value = serde_json::from_str(ESLINT_LOCK).unwrap();
     assert!(lock["lockfileVersion"].as_u64().unwrap_or(0) >= 2);
     for spec in ESLINT_NPM_PACKAGES {
         let name = npm_package_name(spec);
@@ -162,30 +158,16 @@ fn the_committed_lockfile_and_manifest_agree_with_the_pins() {
     }
 }
 
-/// With the lockfile available provisioning installs exactly from it (`npm ci`, still
-/// `--prefer-offline`); without it (a packaging problem) it falls back to installing the
-/// exact pins, never to a range.
+/// Provisioning installs exactly the committed lockfile's tree (`npm ci`) and nothing else: there
+/// is no fallback to an unpinned `npm install` (review round 1 on #587), and no package script
+/// runs.
 #[test]
-fn eslint_installs_from_the_lockfile_and_falls_back_to_the_exact_pins() {
-    assert_eq!(eslint_install_args(true), ["ci", "--prefer-offline"]);
-    let fallback = eslint_install_args(false);
-    assert_eq!(
-        &fallback[..3],
-        ["install", "--save-dev", "--prefer-offline"]
-    );
-    assert!(
-        fallback.contains(&"eslint@9.39.5".to_string()),
-        "{fallback:?}"
-    );
-    assert!(
-        fallback[3..]
-            .iter()
-            .all(|a| npm_pinned_version(a).is_some()),
-        "every fallback package is an exact pin: {fallback:?}"
-    );
+fn eslint_installs_only_from_the_lockfile_never_an_unpinned_install() {
+    let args = eslint_install_args_now();
+    assert_eq!(args.first().map(String::as_str), Some("ci"), "{args:?}");
+    assert!(!args.iter().any(|a| a == "install"), "{args:?}");
+    assert!(args.iter().any(|a| a == "--ignore-scripts"), "{args:?}");
 }
-
-// ── path resolution (pure) ────────────────────────────────────────────────
 
 #[test]
 fn semgrep_bin_path_is_inside_venv() {
@@ -250,7 +232,7 @@ fn fully_provisioned_workspace() -> TempDir {
         )
         .unwrap();
     }
-    let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
+    let asset = ESLINT_CONFIG.as_bytes().to_vec();
     std::fs::write(eslint_config_path(ws), asset).unwrap();
     tmp
 }
@@ -377,7 +359,7 @@ fn stub_eslint_packages_and_config(ws: &Path) {
         )
         .unwrap();
     }
-    let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
+    let asset = ESLINT_CONFIG.as_bytes().to_vec();
     std::fs::write(eslint_config_path(ws), asset).unwrap();
 }
 
@@ -999,38 +981,89 @@ async fn ensure_calls_from_a_test_process_never_write_the_real_tooling_dir() {
 
 // ── bundled rules dir exists ──────────────────────────────────────────────
 
-#[test]
-fn bundled_semgrep_rules_dir_exists_in_dev() {
-    // In a dev build the assets live next to the crate source. Verify the
-    // path resolves to something that exists (catches typos / renames).
-    let dir = bundled_semgrep_rules_dir();
-    assert!(
-        dir.exists(),
-        "bundled semgrep rules dir not found at: {}",
-        dir.display()
-    );
-    // Must contain at least one YAML file.
-    let has_yaml = std::fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .any(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x == "yml" || x == "yaml")
-                .unwrap_or(false)
-        });
-    assert!(has_yaml, "no YAML rules found in: {}", dir.display());
-}
-
-#[test]
-fn bundled_eslint_config_src_exists_in_dev() {
-    let src = bundled_eslint_config_src();
-    assert!(
-        src.exists(),
-        "bundled eslint config not found at: {}",
-        src.display()
-    );
-}
-
 // ── osv-scanner path helpers ──────────────────────────────────────────────
+
+// ── review round 1: nothing the scan runs on is read from the source tree ─────────────────────
+
+/// The source of `file` up to its test module.
+fn product_source(file: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+    let text = std::fs::read_to_string(&path).unwrap();
+    match text.find("#[cfg(test)]\nmod tests") {
+        Some(i) => text[..i].to_string(),
+        None => text,
+    }
+}
+
+/// On a machine without the checkout the source tree does not exist, so the eslint lockfile, the
+/// eslint config and the semgrep rules are embedded in the binary. No product code names the
+/// manifest folder, except a `#[cfg(test)]` helper.
+#[test]
+fn no_product_code_reads_an_asset_from_the_source_tree() {
+    for file in ["src/tool_provisioning.rs", "src/scan_tools.rs"] {
+        let text = product_source(file);
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("CARGO_MANIFEST_DIR") || line.trim_start().starts_with("//") {
+                continue;
+            }
+            let guarded = lines[i.saturating_sub(4)..i]
+                .iter()
+                .any(|l| l.contains("#[cfg(test)]"));
+            assert!(guarded, "{file}:{}: {line}", i + 1);
+        }
+    }
+}
+
+#[test]
+fn the_embedded_semgrep_rules_are_exactly_the_assets_folder() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/semgrep-rules");
+    let mut on_disk: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read_to_string(&p).unwrap(),
+            )
+        })
+        .collect();
+    on_disk.sort();
+    let mut embedded: Vec<(String, String)> = SEMGREP_RULES
+        .iter()
+        .map(|(n, t)| ((*n).to_string(), (*t).to_string()))
+        .collect();
+    embedded.sort();
+    assert_eq!(
+        embedded.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        on_disk.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        "a rules file was added or removed without updating SEMGREP_RULES"
+    );
+    assert_eq!(embedded, on_disk);
+}
+
+#[test]
+fn the_semgrep_rules_are_written_into_the_tooling_folder_from_the_binary() {
+    let tooling = TempDir::new().unwrap();
+    let dir = semgrep_rules_dir(tooling.path()).unwrap();
+    assert!(dir.starts_with(tooling.path()), "{}", dir.display());
+    for (name, text) in SEMGREP_RULES {
+        assert_eq!(&std::fs::read_to_string(dir.join(name)).unwrap(), text);
+    }
+    assert!(!SEMGREP_RULES.is_empty());
+    // Idempotent: a second call reuses the same folder.
+    assert_eq!(semgrep_rules_dir(tooling.path()).unwrap(), dir);
+}
+
+#[test]
+fn the_eslint_config_and_lockfile_come_from_the_binary() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/eslint");
+    assert_eq!(
+        ESLINT_CONFIG,
+        std::fs::read_to_string(manifest.join("camerata.config.mjs")).unwrap()
+    );
+    assert_eq!(
+        ESLINT_LOCK,
+        std::fs::read_to_string(manifest.join("package-lock.json")).unwrap()
+    );
+}

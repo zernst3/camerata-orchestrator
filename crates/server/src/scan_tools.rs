@@ -2053,7 +2053,10 @@ async fn run_one_tool<'r>(
             let semgrep_bin = crate::pinned_tools::ensure_semgrep(tools)
                 .await
                 .map_err(|e| provisioning_error(ScanTool::Semgrep, e))?;
-            let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
+            // The embedded rules, written into the tooling folder (never read from the
+            // source tree, which an installed Camerata does not have).
+            let rules_dir = tool_provisioning::semgrep_rules_dir(&tools.tooling)
+                .map_err(|e| provisioning_error(ScanTool::Semgrep, e.into()))?;
             let rules_str = rules_dir.to_string_lossy().into_owned();
             let bin_str = semgrep_bin.to_string_lossy().into_owned();
             let args = semgrep_args(&rules_str);
@@ -4793,7 +4796,8 @@ def get_user_safe_constant():
 "#;
         std::fs::write(dir.path().join("t1.py"), src).expect("write fixture");
 
-        let rules_dir = crate::tool_provisioning::bundled_semgrep_rules_dir();
+        let rules_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/semgrep-rules");
         let config = rules_dir.join("taint-security.yml");
         assert!(
             config.exists(),

@@ -285,20 +285,69 @@ pub fn semgrep_bin(venv: &Path) -> PathBuf {
     bin
 }
 
-/// Path to the bundled semgrep ruleset shipped with the Camerata binary.
-/// The caller passes this to `semgrep --config <path>` so the scan runs
-/// fully offline, without pulling `p/ci` from the semgrep registry.
-///
-/// The rules live at `crates/server/assets/semgrep-rules/security.yml`
-/// at build time; `include_str!` / `include_bytes!` + a temp-copy (or an
-/// `OUT_DIR` embed) would be the production approach.  For now the path is
-/// resolved relative to the Cargo manifest so the dev binary finds them.
-pub fn bundled_semgrep_rules_dir() -> PathBuf {
-    // In production / installed binary: embed the YAML via include_str! and
-    // write it to a temp location inside the tooling dir.  In development
-    // builds the assets live next to the crate source.
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("assets").join("semgrep-rules")
+/// The eslint flat config, embedded in the binary: an installed Camerata has no source tree to
+/// read it from (review round 1 on #587).
+pub(crate) const ESLINT_CONFIG: &str = include_str!("../assets/eslint/camerata.config.mjs");
+
+/// The committed lockfile that pins the whole eslint tool tree, embedded for the same reason.
+pub(crate) const ESLINT_LOCK: &str = include_str!("../assets/eslint/package-lock.json");
+
+/// The bundled semgrep rules, embedded in the binary as `(file name, contents)`. The list is the
+/// manifest of `assets/semgrep-rules/`: a test holds it to exactly that folder's files, so a rule
+/// file added there without a line here fails the build's tests rather than going missing at run
+/// time. (A build-script manifest was not used: `build.rs` is shared with the app crate.)
+pub const SEMGREP_RULES: &[(&str, &str)] = &[
+    (
+        "security.yml",
+        include_str!("../assets/semgrep-rules/security.yml"),
+    ),
+    (
+        "taint-security.yml",
+        include_str!("../assets/semgrep-rules/taint-security.yml"),
+    ),
+];
+
+/// The folder `semgrep --config` is given: the embedded rules, written into the tooling folder
+/// (`<tooling>/semgrep-rules/<hash>/`, the hash of the rules, so a build with other rules never
+/// reads an older copy). Written to a staging folder and renamed into place, so a concurrent
+/// scan never reads half a ruleset. The scan runs offline against it: no registry pack is pulled.
+pub fn semgrep_rules_dir(tooling: &Path) -> std::io::Result<PathBuf> {
+    let mut all = String::new();
+    for (name, text) in SEMGREP_RULES {
+        all.push_str(name);
+        all.push('\n');
+        all.push_str(text);
+    }
+    let hash = crate::pinned_tools::fetch::sha256_hex(all.as_bytes());
+    let root = tooling.join("semgrep-rules");
+    let dir = root.join(&hash[..16]);
+    let complete = |d: &Path| {
+        SEMGREP_RULES
+            .iter()
+            .all(|(n, t)| std::fs::read_to_string(d.join(n)).is_ok_and(|have| have == *t))
+    };
+    if complete(&dir) {
+        return Ok(dir);
+    }
+    std::fs::create_dir_all(&root)?;
+    let staging = root.join(format!(".staging-{}-{:x}", &hash[..16], std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+    for (name, text) in SEMGREP_RULES {
+        std::fs::write(staging.join(name), text)?;
+    }
+    if std::fs::rename(&staging, &dir).is_err() {
+        // Another scan published the same rules first; ours is not needed.
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    if complete(&dir) {
+        Ok(dir)
+    } else {
+        Err(std::io::Error::other(format!(
+            "the semgrep rules could not be written to {}",
+            dir.display()
+        )))
+    }
 }
 
 // ─── eslint ──────────────────────────────────────────────────────────────────
@@ -384,15 +433,6 @@ pub async fn eslint_run_paths(tooling: &Path) -> std::io::Result<EslintRunPaths>
     })
 }
 
-/// Source path of the bundled eslint flat config inside the Camerata repo
-/// (used at provisioning time to copy the file into the tooling workspace).
-fn bundled_eslint_config_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("eslint")
-        .join("camerata.config.mjs")
-}
-
 /// Probe whether eslint is already provisioned and healthy.
 ///
 /// # Why the binary probe alone is NOT the health check (W6 / C11)
@@ -467,22 +507,11 @@ fn eslint_packages_installed(workspace: &Path) -> bool {
     })
 }
 
-/// `true` when the workspace's copy of the flat config is byte-identical to the
-/// bundled asset. A content comparison rather than an mtime one: the asset ships
-/// inside the binary, so its mtime on disk says nothing about which Camerata
-/// build wrote the workspace copy.
-///
-/// Returns `true` when the bundled asset cannot be read at all — a packaging
-/// problem must not put provisioning into a re-install loop on every scan.
+/// `true` when the workspace's copy of the flat config is byte-identical to the embedded
+/// [`ESLINT_CONFIG`]. A content comparison rather than an mtime one: the config ships inside the
+/// binary, so a file's mtime says nothing about which Camerata build wrote it.
 fn eslint_config_is_current(workspace: &Path) -> bool {
-    let src = bundled_eslint_config_src();
-    let Ok(want) = std::fs::read(&src) else {
-        return true;
-    };
-    match std::fs::read(eslint_config_path(workspace)) {
-        Ok(have) => have == want,
-        Err(_) => false,
-    }
+    std::fs::read(eslint_config_path(workspace)).is_ok_and(|have| have == ESLINT_CONFIG.as_bytes())
 }
 
 /// The npm packages Camerata installs for the eslint preview pass.
@@ -560,20 +589,21 @@ fn eslint_package_json() -> String {
     .to_string()
 }
 
-/// The `npm` arguments that install the workspace. With the committed lockfile in place,
-/// `npm ci` installs exactly that tree (and fails loudly if it disagrees with the manifest);
-/// without it (a packaging problem), install the exact pins. `--prefer-offline` either way: a
-/// warm npm cache needs no network.
-fn eslint_install_args(have_lockfile: bool) -> Vec<String> {
-    if have_lockfile {
-        return vec!["ci".to_string(), "--prefer-offline".to_string()];
-    }
-    let mut args: Vec<String> = ["install", "--save-dev", "--prefer-offline"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    args.extend(ESLINT_NPM_PACKAGES.iter().map(|s| (*s).to_string()));
-    args
+/// The `npm` arguments that install the workspace: `npm ci` from the embedded lockfile, exactly
+/// that tree (it fails loudly if the lockfile disagrees with the manifest). There is no fallback to
+/// an unpinned `npm install`. `--ignore-scripts`: no package's install script runs.
+/// `--prefer-offline`: a warm npm cache needs no network.
+fn eslint_install_args_now() -> Vec<String> {
+    [
+        "ci",
+        "--prefer-offline",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 /// Source path of the committed workspace manifest next to the bundled flat config. Provisioning
@@ -585,14 +615,6 @@ fn bundled_eslint_package_json_src() -> PathBuf {
         .join("assets")
         .join("eslint")
         .join("package.json")
-}
-
-/// Source path of the committed lockfile that pins the whole eslint tool tree.
-fn bundled_eslint_lock_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("eslint")
-        .join("package-lock.json")
 }
 
 /// The bare npm package name from an [`ESLINT_NPM_PACKAGES`] spec, dropping any
@@ -803,16 +825,13 @@ async fn install_eslint_generation(tooling: &Path, npm: &NpmCommand) -> Result<(
 async fn build_eslint_tree(dir: &Path, npm: &NpmCommand) -> Result<(), ProvisionError> {
     tokio::fs::create_dir_all(dir).await?;
 
-    // The manifest pins every package to its exact version, and the committed lockfile pins the
+    // The manifest pins every package to its exact version, and the embedded lockfile pins the
     // whole tree (transitive dependencies included): `npm ci` then installs the same tool on
-    // every machine. If the lockfile cannot be read (a packaging problem), fall back to
-    // installing the exact pins rather than failing to provision at all.
+    // every machine, and nothing else.
     tokio::fs::write(dir.join("package.json"), eslint_package_json()).await?;
-    let have_lockfile = tokio::fs::copy(bundled_eslint_lock_src(), dir.join("package-lock.json"))
-        .await
-        .is_ok();
+    tokio::fs::write(dir.join("package-lock.json"), ESLINT_LOCK).await?;
 
-    let npm_args = eslint_install_args(have_lockfile);
+    let npm_args = eslint_install_args_now();
 
     let npm_out = npm
         .command()
@@ -830,11 +849,8 @@ async fn build_eslint_tree(dir: &Path, npm: &NpmCommand) -> Result<(), Provision
         });
     }
 
-    // Copy the bundled flat config into the tree so eslint can find it.
-    let config_src = bundled_eslint_config_src();
-    if config_src.exists() {
-        tokio::fs::copy(&config_src, eslint_config_path(dir)).await?;
-    }
+    // The embedded flat config, so eslint can find it.
+    tokio::fs::write(eslint_config_path(dir), ESLINT_CONFIG).await?;
     Ok(())
 }
 
