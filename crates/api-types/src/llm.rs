@@ -59,6 +59,11 @@ pub struct LlmResponse {
     /// it does not know at a default (Opus-class) rate. `None` on every other backend.
     #[serde(default)]
     pub cli_cost_usd: Option<f64>,
+    /// Wall-clock milliseconds the call took, measured with a monotonic clock where the backend
+    /// call returns. `None` for a response that did not come from a timed backend call (a
+    /// replayed or absorbed record, a test stub). Operator telemetry only; never exported.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
 }
 
 impl LlmResponse {
@@ -101,6 +106,7 @@ mod tests {
         LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".to_string(),
             backend: "test".to_string(),

@@ -20,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::onboard::scope::RepoScope;
+
 use regex::Regex;
 
 /// A runtime or framework whose end-of-life dates come from endoflife.date.
@@ -1052,8 +1054,40 @@ const FRAMEWORK_LOCKFILES: &[&str] = &[
     "gradle.lockfile",
 ];
 
-fn read_beside(dir: &Path, name: &str) -> Option<String> {
-    std::fs::read_to_string(dir.join(name)).ok()
+/// What a read of a sibling manifest needs: the repo root and the project's Excluded by
+/// agreement list, passed explicitly (never ambient) so no reader can skip it.
+#[derive(Clone, Copy)]
+struct SiblingReader<'a> {
+    root: &'a Path,
+    scope: &'a RepoScope,
+}
+
+impl SiblingReader<'_> {
+    /// The text of `dir/name`, unless the list names it (then nothing is read).
+    fn beside(&self, dir: &Path, name: &str) -> Option<String> {
+        let path = dir.join(name);
+        // A path that cannot be made relative to the root cannot be judged: not read.
+        let rel = path.strip_prefix(self.root).ok()?;
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if self.scope.excludes(&rel) {
+            return None;
+        }
+        // A sibling that is a symbolic link, or sits behind one, is not read: it can point at a
+        // file outside the repository. Local twin of `onboard::files::is_regular_file_inside`.
+        if !crate::scan_mirror::is_regular_file_inside(self.root, &rel) {
+            return None;
+        }
+        // Never through a link: the sibling may point outside the repository.
+        if !crate::onboard::files::is_regular_file_inside(self.root, &path) {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()
+    }
+
+    fn json_beside(&self, dir: &Path, name: &str) -> Option<serde_json::Value> {
+        self.beside(dir, name)
+            .and_then(|t| serde_json::from_str(&t).ok())
+    }
 }
 
 /// How a package.json lists a package, strongest first. Only `Direct` is shipped code.
@@ -1082,15 +1116,11 @@ fn npm_listing(manifest: &serde_json::Value, name: &str) -> NpmListing {
     }
 }
 
-fn read_json_beside(dir: &Path, name: &str) -> Option<serde_json::Value> {
-    read_beside(dir, name).and_then(|t| serde_json::from_str(&t).ok())
-}
-
 /// The package patterns a workspace root lists: `workspaces` in its `package.json` (an array, or
 /// an object with a `packages` array) and `packages` in `pnpm-workspace.yaml`.
-fn workspace_patterns(dir: &Path) -> Vec<String> {
+fn workspace_patterns(rd: SiblingReader, dir: &Path) -> Vec<String> {
     let mut patterns: Vec<String> = Vec::new();
-    if let Some(manifest) = read_json_beside(dir, "package.json") {
+    if let Some(manifest) = rd.json_beside(dir, "package.json") {
         let list = manifest
             .get("workspaces")
             .and_then(|w| w.get("packages").or(Some(w)))
@@ -1101,7 +1131,7 @@ fn workspace_patterns(dir: &Path) -> Vec<String> {
                 .filter_map(|p| p.as_str().map(str::to_string)),
         );
     }
-    if let Some(yaml) = read_beside(dir, "pnpm-workspace.yaml") {
+    if let Some(yaml) = rd.beside(dir, "pnpm-workspace.yaml") {
         let mut in_packages = false;
         for line in yaml.lines() {
             let code = line.split(" #").next().unwrap_or("").trim_end();
@@ -1175,10 +1205,10 @@ fn expand_workspace(base: &Path, segments: &[&str], depth: usize, out: &mut Vec<
 }
 
 /// The folders a workspace root's patterns name, less the ones its `!` patterns remove.
-fn workspace_dirs(root: &Path) -> Vec<PathBuf> {
+fn workspace_dirs(rd: SiblingReader, root: &Path) -> Vec<PathBuf> {
     let mut included: Vec<PathBuf> = Vec::new();
     let mut removed: Vec<PathBuf> = Vec::new();
-    for pattern in workspace_patterns(root) {
+    for pattern in workspace_patterns(rd, root) {
         let (negated, pattern) = match pattern.strip_prefix('!') {
             Some(rest) => (true, rest.to_string()),
             None => (false, pattern),
@@ -1199,15 +1229,16 @@ fn workspace_dirs(root: &Path) -> Vec<PathBuf> {
 
 /// How the package.json files of a project list `name`: the one beside the lockfile and, for a
 /// workspace root, those of its workspace packages. The strongest listing wins.
-fn npm_project_listing(dir: &Path, name: &str) -> NpmListing {
-    let own =
-        read_json_beside(dir, "package.json").map_or(NpmListing::Absent, |m| npm_listing(&m, name));
+fn npm_project_listing(rd: SiblingReader, dir: &Path, name: &str) -> NpmListing {
+    let own = rd
+        .json_beside(dir, "package.json")
+        .map_or(NpmListing::Absent, |m| npm_listing(&m, name));
     if own == NpmListing::Direct {
         return own;
     }
-    workspace_dirs(dir)
+    workspace_dirs(rd, dir)
         .iter()
-        .filter_map(|d| read_json_beside(d, "package.json"))
+        .filter_map(|d| rd.json_beside(d, "package.json"))
         .map(|m| npm_listing(&m, name))
         .fold(own, NpmListing::min)
 }
@@ -1215,41 +1246,42 @@ fn npm_project_listing(dir: &Path, name: &str) -> NpmListing {
 /// Why `product`, found in a lockfile in `dir`, is not checked, or `None` when the manifest in the
 /// same folder lists it as a direct, non-dev dependency. Anything only transitive, only a dev
 /// dependency, or with no manifest beside the lockfile to show otherwise is not.
-fn exclusion_reason(dir: &Path, product: Product) -> Option<&'static str> {
+fn exclusion_reason(rd: SiblingReader, dir: &Path, product: Product) -> Option<&'static str> {
     if let Product::Next | Product::React | Product::Express = product {
         let name = match product {
             Product::Next => "next",
             Product::React => "react",
             _ => "express",
         };
-        return match npm_project_listing(dir, name) {
+        return match npm_project_listing(rd, dir, name) {
             NpmListing::Direct => None,
             NpmListing::Optional => Some(OPTIONAL_DEPENDENCY),
             NpmListing::Peer => Some(PEER_DEPENDENCY),
             NpmListing::Absent => Some(NOT_DIRECT),
         };
     }
-    (!is_direct_dependency(dir, product)).then_some(NOT_DIRECT)
+    (!is_direct_dependency(rd, dir, product)).then_some(NOT_DIRECT)
 }
 
 /// Whether `product` is a direct, non-dev dependency declared by the manifest in `dir`, for the
 /// ecosystems that have no optional or peer kind to report.
-fn is_direct_dependency(dir: &Path, product: Product) -> bool {
+fn is_direct_dependency(rd: SiblingReader, dir: &Path, product: Product) -> bool {
     match product {
-        Product::Laravel => read_beside(dir, "composer.json")
+        Product::Laravel => rd
+            .beside(dir, "composer.json")
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .is_some_and(|v| {
                 v.get("require")
                     .and_then(|d| d.get("laravel/framework"))
                     .is_some()
             }),
-        Product::Rails => {
-            read_beside(dir, "Gemfile").is_some_and(|t| gemfile_lists_directly(&t, "rails"))
-        }
-        Product::Django => python_project_lists_django(dir),
+        Product::Rails => rd
+            .beside(dir, "Gemfile")
+            .is_some_and(|t| gemfile_lists_directly(&t, "rails")),
+        Product::Django => python_project_lists_django(rd, dir),
         Product::SpringBoot => ["build.gradle", "build.gradle.kts"]
             .iter()
-            .filter_map(|f| read_beside(dir, f))
+            .filter_map(|f| rd.beside(dir, f))
             .any(|t| gradle_applies_spring_boot(&t)),
         _ => true,
     }
@@ -1397,8 +1429,9 @@ fn requirement_name(requirement: &str) -> String {
 /// Whether the project file beside a Python lockfile lists Django as a direct, non-dev
 /// dependency: `project.dependencies` or `tool.poetry.dependencies` in `pyproject.toml`, or
 /// `[packages]` in a `Pipfile`.
-fn python_project_lists_django(dir: &Path) -> bool {
-    let in_pyproject = read_beside(dir, "pyproject.toml")
+fn python_project_lists_django(rd: SiblingReader, dir: &Path) -> bool {
+    let in_pyproject = rd
+        .beside(dir, "pyproject.toml")
         .and_then(|t| t.parse::<toml::Table>().ok())
         .is_some_and(|doc| {
             let pep621 = doc
@@ -1419,7 +1452,8 @@ fn python_project_lists_django(dir: &Path) -> bool {
             pep621 || poetry
         });
     in_pyproject
-        || read_beside(dir, "Pipfile")
+        || rd
+            .beside(dir, "Pipfile")
             .and_then(|t| t.parse::<toml::Table>().ok())
             .and_then(|doc| doc.get("packages").and_then(|p| p.as_table()).cloned())
             .is_some_and(|pkgs| pkgs.keys().any(|k| requirement_name(k) == "django"))
@@ -1430,7 +1464,7 @@ fn python_project_lists_django(dir: &Path) -> bool {
 type Reader = fn(&str, &str) -> Vec<Declaration>;
 
 /// The reader for a file name, or `None` when the file declares nothing this module reads.
-fn reader_for(name: &str) -> Option<Reader> {
+pub(super) fn reader_for(name: &str) -> Option<Reader> {
     let lower = name.to_ascii_lowercase();
     if lower == "dockerfile" || lower.starts_with("dockerfile.") || lower.ends_with(".dockerfile") {
         return Some(read_dockerfile);
@@ -1470,14 +1504,16 @@ fn reader_for(name: &str) -> Option<Reader> {
 
 /// Read every declaration under `root`. Files and directories are visited in sorted order so the
 /// result is the same on every run.
-pub fn detect_declarations(root: &Path) -> Detected {
+///
+/// A file the project's exclusion list names ([`RepoScope`]) is never read.
+pub fn detect_declarations(root: &Path, scope: &RepoScope) -> Detected {
     let mut detected = Detected::default();
     let mut visited = 0usize;
-    walk(root, root, &mut visited, &mut detected);
+    walk(root, root, scope, &mut visited, &mut detected);
     detected
 }
 
-fn walk(root: &Path, dir: &Path, visited: &mut usize, out: &mut Detected) {
+fn walk(root: &Path, dir: &Path, scope: &RepoScope, visited: &mut usize, out: &mut Detected) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1496,7 +1532,7 @@ fn walk(root: &Path, dir: &Path, visited: &mut usize, out: &mut Detected) {
         };
         if kind.is_dir() {
             if !SKIP_DIRS.contains(&name.as_str()) {
-                walk(root, &path, visited, out);
+                walk(root, &path, scope, visited, out);
             }
             continue;
         }
@@ -1506,22 +1542,27 @@ fn walk(root: &Path, dir: &Path, visited: &mut usize, out: &mut Detected) {
         let Some(reader) = reader_for(&name) else {
             continue;
         };
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if scope.excludes(&rel) {
+            continue;
+        }
         if entry.metadata().map_or(true, |m| m.len() > MAX_FILE_BYTES) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
         let mut found = reader(&rel, &text);
         if FRAMEWORK_LOCKFILES.contains(&name.as_str()) {
             let folder = path.parent().unwrap_or(root);
             for d in &mut found {
-                if let Some(why) = exclusion_reason(folder, d.product) {
+                if let Some(why) =
+                    exclusion_reason(SiblingReader { root, scope }, folder, d.product)
+                {
                     d.version = Version::Excluded(why.to_string());
                 }
             }

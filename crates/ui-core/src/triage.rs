@@ -586,6 +586,9 @@ pub struct RuleHubView {
     /// Where "take me to this rule" goes: the Queue (filtered to the rule) or the panel that
     /// holds it. Exactly one destination, because the rule has exactly one surface.
     pub jump: KindSurface,
+    /// The convention record of this rule with options, when the scan has one (convention model
+    /// design, section 8). A rule with a record has a hub even with no rows.
+    pub convention: Option<camerata_api_types::audit::RuleConvention>,
 }
 
 /// Build the hub for one `(repo, rule_id)` out of the scan's rows.
@@ -599,12 +602,45 @@ pub struct RuleHubView {
 /// rule it never touched has nothing to describe. (That is also why there is no "0 findings"
 /// hub — an empty strip is a dead affordance.)
 pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<RuleHubView> {
+    rule_hub_with_conventions(findings, &[], repo, rule_id)
+}
+
+/// [`rule_hub`] with the scan's convention records: the hub carries the record of the rule, and
+/// a rule that has a record has a hub even with no rows (its places, standard and controls are
+/// worth showing on their own).
+pub fn rule_hub_with_conventions(
+    findings: &[FindingView],
+    conventions: &[camerata_api_types::audit::RuleConvention],
+    repo: &str,
+    rule_id: &str,
+) -> Option<RuleHubView> {
     use camerata_api_types::audit::FindingKind;
+    let convention = conventions
+        .iter()
+        .find(|c| c.repo == repo && c.rule_id == rule_id)
+        .cloned();
     let rows: Vec<&FindingView> = findings
         .iter()
         .filter(|f| f.repo == repo && f.rule_id == rule_id)
         .collect();
-    let first = *rows.first()?;
+    let Some(first) = rows.first().copied() else {
+        let c = convention?;
+        return Some(RuleHubView {
+            repo: repo.to_string(),
+            rule_id: rule_id.to_string(),
+            surface: KindSurface::Conventions,
+            kind_tag: "convention_observed",
+            outcome: crate::convention_view::engine_line(&c),
+            row_count: 0,
+            site_count: 0,
+            convention_label: None,
+            evaluated_option_id: None,
+            conforming: None,
+            conflict_surfaces: Vec::new(),
+            jump: KindSurface::Conventions,
+            convention: Some(c),
+        });
+    };
     let surface = kind_surface(first);
     let conflict_surfaces = rules_on_multiple_surfaces(findings)
         .into_iter()
@@ -647,7 +683,7 @@ pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<R
         ),
         Some(FindingKind::NotAssessed(na)) => format!(
             "Not assessed \u{2014} {}{}",
-            na.reason.as_str(),
+            na.reason.heading(),
             if na.reason_detail.is_empty() {
                 String::new()
             } else {
@@ -678,6 +714,7 @@ pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<R
         conforming: headline.as_ref().and_then(DeviationHeadline::conforming),
         conflict_surfaces,
         jump: surface,
+        convention,
     })
 }
 
@@ -4562,6 +4599,25 @@ mod tests {
         let h = rule_hub(&na, "o/r", "NA-1").expect("present");
         assert_eq!(h.surface, KindSurface::NotAssessed);
         assert!(h.outcome.contains("tool_failed"), "{:?}", h.outcome);
+    }
+
+    /// The hub's outcome line for the model's honest "unsure" reads "Not settled", never the wire
+    /// string "model_declined".
+    #[test]
+    fn the_hub_outcome_for_an_unsure_answer_reads_not_settled() {
+        let rows = vec![hub_row(
+            "o/r",
+            "CLONE-1",
+            "-",
+            serde_json::json!({
+                "kind": "not_assessed", "reason": "model_declined",
+                "reason_detail": "the model was unsure about 1 of 3 candidates; 2 judged"
+            }),
+        )];
+        let h = rule_hub(&rows, "o/r", "CLONE-1").expect("present");
+        assert!(h.outcome.contains("Not settled"), "{:?}", h.outcome);
+        assert!(!h.outcome.contains("model_declined"), "{:?}", h.outcome);
+        assert!(h.outcome.contains("unsure about 1 of 3"), "{:?}", h.outcome);
     }
 
     /// req_pass2_12: the hub SURFACES the one-rule-one-surface invariant rather than

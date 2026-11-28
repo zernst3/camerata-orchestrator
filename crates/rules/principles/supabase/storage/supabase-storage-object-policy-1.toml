@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
-version = 5
+version = 6
 title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
 domain = "supabase:storage"
 layer = "platform"
@@ -23,7 +23,7 @@ max_severity = "high"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RLS-PERMISSIVE-TRUE-1, specialized to storage.objects: a policy on storage.objects with USING (true) / WITH CHECK (true), or with no owner/folder scoping (no predicate referencing auth.uid() = owner, or a bucket_id + folder-prefix check) targeting anon or public, is flagged — with the finding naming the specific BUCKET (extracted from the policy's bucket_id predicate) rather than a generic table. Write/delete matches are high severity; read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity split. Conformance holds when every storage.objects policy scopes write/delete operations to the resource's owner or an equivalent folder/ownership predicate."
+qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RLS-PERMISSIVE-TRUE-1, specialized to storage.objects: a policy on storage.objects with USING (true) / WITH CHECK (true), or with no owner/folder scoping (no predicate referencing auth.uid() = owner, or a bucket_id + folder-prefix check) targeting anon or public, is flagged, with the finding naming the specific BUCKET (extracted from the policy's bucket_id predicate) rather than a generic table. Write/delete matches are high severity; read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity split. Conformance holds when every storage.objects policy scopes write/delete operations to the resource's owner or an equivalent folder/ownership predicate."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/storage/security/access-control"
@@ -41,7 +41,7 @@ Supabase documents storage authorization explicitly as RLS applied to the storag
 "By default Storage does not allow any uploads to buckets without RLS policies. You selectively
 allow certain operations by creating RLS policies on the storage.objects table." That means every
 concern that applies to a table-level policy (SUPABASE-RLS-PERMISSIVE-TRUE-1) applies identically
-here — a policy with USING (true) / WITH CHECK (true), or one that grants INSERT/UPDATE/DELETE to
+here: a policy with USING (true) / WITH CHECK (true), or one that grants INSERT/UPDATE/DELETE to
 anon/public with no ownership scoping (no auth.uid() = owner check, no folder-prefix-per-user
 convention), lets anyone upload into, overwrite, or delete from the bucket, not just the object's
 own owner. This is the same OWASP A01:2021 Broken Access Control category as its table-policy

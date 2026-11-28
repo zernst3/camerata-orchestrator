@@ -26,6 +26,8 @@ use super::{
     hex, now, read_json, write_atomic, FinishFailure, PartKind, PartStatus, ResumeEstimate,
     RunRecord, RunStore,
 };
+use camerata_llm::failure::FailureClass;
+
 use crate::ai_audit::BatchApi;
 use crate::llm::{
     BatchItem, BatchRequestCounts, BatchResultRow, BatchStatus, CacheTtl, LlmPort, LlmRequest,
@@ -110,10 +112,18 @@ pub struct StoredResponse {
     /// `LlmResponse::cli_cost_usd`).
     #[serde(default)]
     pub cli_cost_usd: Option<f64>,
+    /// How long the call took in the session that made it (`LlmResponse::elapsed_ms`). Kept so a
+    /// resume's saved journal still holds the earlier sessions' timings; a replay returns none of
+    /// it, so live telemetry counts only what the session itself sends. Operator-only.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+    /// Unix milliseconds at which the call ended, in the session that made it.
+    #[serde(default)]
+    pub ended_unix_ms: Option<u64>,
 }
 
 impl StoredResponse {
-    fn of(r: &LlmResponse) -> Self {
+    pub(crate) fn of(r: &LlmResponse) -> Self {
         Self {
             text: r.text.clone(),
             model: r.model.clone(),
@@ -127,17 +137,20 @@ impl StoredResponse {
             truncated: r.truncated,
             reported_model: r.reported_model.clone(),
             cli_cost_usd: r.cli_cost_usd,
+            elapsed_ms: r.elapsed_ms,
+            ended_unix_ms: Some(crate::stage_telemetry::now_unix_ms()),
         }
     }
 
     /// The reply as a replay returns it: the same text, and no cost, because this attempt did not
     /// pay for it. The usage meter therefore counts only what this attempt sends; a spend limit
     /// adds the stored cost separately (`RunControls::stored_spend_usd`).
-    fn replayed(&self) -> LlmResponse {
+    pub(crate) fn replayed(&self) -> LlmResponse {
         LlmResponse {
             reported_model: self.reported_model.clone(),
             // Replayed at no cost, so there is no CLI figure to compare either.
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: self.text.clone(),
             model: self.model.clone(),
             backend: self.backend.clone(),
@@ -214,8 +227,34 @@ pub struct CallFile {
     /// The file paths framed in the prompt, for matching a failed pass to the calls over its files.
     #[serde(default)]
     pub files: Vec<String>,
+    /// The stage that owns the call when it records its own rejected replies at the point of
+    /// rejection ([`reject_reply`]). `None` for every other call and for a file written before
+    /// this existed (those keep the blanket set-aside of [`quarantine_rejected`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<CallOwner>,
     /// By occurrence (0 is the first time the request was asked).
     pub entries: BTreeMap<usize, CallEntry>,
+}
+
+/// A stage that records its own rejected replies, so no other stage's failure may set its calls
+/// aside as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallOwner {
+    /// The clone judge (`onboard::clone_advisory`).
+    CloneJudge,
+}
+
+impl CallOwner {
+    /// The owner of a request, from its system prompt.
+    fn of(req: &LlmRequest) -> Option<Self> {
+        req.system
+            .as_deref()
+            .is_some_and(|s| {
+                s.starts_with(crate::onboard::clone_advisory::prompt::JUDGE_SYSTEM_PREFIX)
+            })
+            .then_some(Self::CloneJudge)
+    }
 }
 
 fn call_path(dir: &Path, key: &str) -> std::path::PathBuf {
@@ -391,15 +430,23 @@ pub(crate) fn entry_replays(entry: &CallEntry, kind: PartKind) -> bool {
     if replays_on_resume(entry.status, kind) {
         return true;
     }
-    // `Other` (the clone judge, the deep lenses) has no parser a resume can run: the request that
-    // would say which shape the reply should have is not stored. An unusable `Other` reply is
-    // always asked again.
-    entry.status == EntryStatus::Unusable
-        && kind != PartKind::Other
-        && entry
-            .response
-            .as_ref()
-            .is_some_and(|stored| reply_is_good(kind, &stored.replayed()))
+    // `Other` (the clone judge, the deep lenses) has no per-request parser a resume can run: the
+    // request that would say which shape the reply should have is not stored. What can be said
+    // is whether the reply holds a verdict object, the clone judge's shape. An unusable `Other`
+    // reply the judge's parser reads is good (so it is not paid for twice when the parser was
+    // fixed since); any other unusable `Other` reply is always asked again.
+    if entry.status != EntryStatus::Unusable {
+        return false;
+    }
+    let Some(stored) = entry.response.as_ref() else {
+        return false;
+    };
+    let reply = stored.replayed();
+    if kind == PartKind::Other {
+        return !reply.truncated
+            && crate::onboard::clone_advisory::prompt::find_verdict_object(&reply.text).is_some();
+    }
+    reply_is_good(kind, &reply)
 }
 
 /// True when a reply is one a resume may return again: finished, with a JSON object that parses.
@@ -411,6 +458,14 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
     let parses = !resp.truncated
         && crate::ai_audit::extract_json_object(&resp.text)
             .is_some_and(|json| serde_json::from_str::<serde_json::Value>(json).is_ok());
+    // A clone judge reply with braces in prose around its verdict object does not parse as one
+    // span but is read by the judge's own parser; the other `Other` calls have no such shape.
+    if kind == PartKind::Other {
+        return !resp.truncated
+            && (parses
+                || crate::onboard::clone_advisory::prompt::find_verdict_object(&resp.text)
+                    .is_some());
+    }
     if !parses {
         return false;
     }
@@ -437,6 +492,26 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
 enum Planned {
     Replay(Box<LlmResponse>),
     Fresh(FreshCall),
+    /// A rerun (#588) holds no stored reply for the request and may not ask a model: the miss is
+    /// recorded in the run's list and the call fails. Nothing is stored and no part is started.
+    Missing,
+}
+
+/// How a missing reply is named in a rerun's refusal: the stage, the repo and the files its
+/// request framed.
+pub(crate) fn describe_missing(kind: PartKind, repo: &str, files: &[String]) -> String {
+    let mut out = format!("{} reply", kind.label());
+    if !repo.is_empty() {
+        out.push_str(&format!(" for {repo}"));
+    }
+    match files {
+        [] => {}
+        [one] => out.push_str(&format!(" (file {one})")),
+        [first, rest @ ..] => {
+            out.push_str(&format!(" (file {first} and {} more)", rest.len()));
+        }
+    }
+    out
 }
 
 struct FreshCall {
@@ -448,6 +523,74 @@ struct FreshCall {
     kind: PartKind,
     repo: String,
     files: Vec<String>,
+    owner: Option<CallOwner>,
+}
+
+/// The slots of `file` a request is answered from, in the order they answer. A resume answers
+/// from the good replies only. A rerun answers the same way and falls back to a reply the run
+/// stored but a resume would ask again (rejected, unusable) only when the request has no good one,
+/// so a bad first attempt never comes before a good later one.
+fn replayable_slots(file: &CallFile, rerun: bool) -> Vec<usize> {
+    let kind = file.kind;
+    let good: Vec<usize> = file
+        .entries
+        .iter()
+        .filter(|(_, e)| entry_replays(e, kind) && e.response.is_some())
+        .map(|(s, _)| *s)
+        .collect();
+    if rerun && good.is_empty() {
+        return file
+            .entries
+            .iter()
+            .filter(|(_, e)| e.response.is_some())
+            .map(|(s, _)| *s)
+            .collect();
+    }
+    good
+}
+
+/// What a stage sees when a rerun has no stored reply for its request.
+pub(crate) fn missing_reply_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "this is a rerun of the deterministic stages: it answers only from the run's stored \
+         replies and never asks a model, and this reply is not stored"
+    )
+}
+
+/// Every stored reply under the request digest `key` in the run folder `dir`, oldest first,
+/// whatever became of it (a reply a stage turned down is still the model's reply). A reply that
+/// was cut off at the output limit is left out. Nothing is changed: this reads the folder and
+/// takes no part in the run's own bookkeeping.
+pub fn stored_reply_texts(dir: &Path, key: &str) -> Vec<String> {
+    let Some(file) = load_call_file(dir, key) else {
+        return Vec::new();
+    };
+    file.entries
+        .values()
+        .filter_map(|e| e.response.as_ref())
+        .filter(|r| !r.truncated)
+        .map(|r| r.text.clone())
+        .collect()
+}
+
+/// Whether the run stored any call at all (answered, failed or turned down) under `key`.
+pub fn has_stored_call(dir: &Path, key: &str) -> bool {
+    load_call_file(dir, key).is_some_and(|f| !f.entries.is_empty())
+}
+
+/// Every stored reply under `key` with what became of it, oldest first (a reply cut off at the
+/// output limit is left out). A reply stored as [`EntryStatus::Done`] was accepted and used by the
+/// stage that asked; any other status was turned down or unusable. Nothing is changed.
+pub fn stored_replies(dir: &Path, key: &str) -> Vec<(EntryStatus, String)> {
+    let Some(file) = load_call_file(dir, key) else {
+        return Vec::new();
+    };
+    file.entries
+        .values()
+        .filter_map(|e| e.response.as_ref().map(|r| (e.status, r)))
+        .filter(|(_, r)| !r.truncated)
+        .map(|(status, r)| (status, r.text.clone()))
+        .collect()
 }
 
 fn load_call_file(dir: &Path, key: &str) -> Option<CallFile> {
@@ -473,22 +616,25 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 kind,
                 repo: repo.clone(),
                 files: files.clone(),
+                owner: CallOwner::of(req),
                 entries: BTreeMap::new(),
             })
         });
         // The idx-th ask is answered by the idx-th good reply, in the order they were stored.
         let file_kind = file.kind;
-        let good_slot = file
-            .entries
-            .iter()
-            .filter(|(_, e)| entry_replays(e, file_kind) && e.response.is_some())
-            .map(|(slot, _)| *slot)
-            .nth(idx);
+        // A rerun keeps the model work as the saved run made it: every stored reply is the answer,
+        // whatever the stage made of it (a reply the stage turned down is turned down again, the
+        // way it was). Only a call that never got a reply is missing. A resume asks those again.
+        let rerun = store.rerun_misses().is_some();
+        let good_slot = replayable_slots(file, rerun).into_iter().nth(idx);
         let good = good_slot.and_then(|slot| {
             // A refused reply the current parser accepts is a good reply from here on: stored as
             // one, so the run's accounting (a later set-aside, the counts) agrees with the replay.
+            // A rerun changes nothing it stored.
             let entry = file.entries.get_mut(&slot)?;
-            if entry.status == EntryStatus::Unusable && !replays_on_resume(entry.status, file_kind)
+            if !rerun
+                && entry.status == EntryStatus::Unusable
+                && !replays_on_resume(entry.status, file_kind)
             {
                 entry.status = EntryStatus::Done;
                 entry.reason = None;
@@ -510,6 +656,12 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 Planned::Replay(Box::new(replay))
             }
             None => {
+                // A rerun answers from the store alone: a missing reply is recorded by name
+                // and the call fails before anything is stored or started.
+                if let Some(misses) = store.rerun_misses() {
+                    misses.record(describe_missing(kind, &repo, &files));
+                    return Planned::Missing;
+                }
                 // A fresh call is stored in the next free slot of the file, never over an
                 // existing entry (a good one at a later slot must stay).
                 let next = st
@@ -526,6 +678,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                     kind,
                     repo,
                     files,
+                    owner: CallOwner::of(req),
                 })
             }
         }
@@ -540,6 +693,15 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
 /// position among this attempt's asks, the same test of a stored reply, with nothing recorded.
 /// A spend limit asks this before admitting a call, because a replay costs nothing and refusing
 /// it would drop a reply the run already paid for.
+/// Whether a fresh journal over the run folder `dir` would answer `req` from a stored reply, so
+/// sending it would be no call: what [`JournalLlm::replays`] says for the first occurrence of the
+/// request, read from the folder alone.
+pub(crate) fn stored_would_replay(dir: &Path, req: &LlmRequest) -> bool {
+    let req = camerata_llm::model_input::guarded(req);
+    load_call_file(dir, &request_key(&req))
+        .is_some_and(|file| !replayable_slots(&file, false).is_empty())
+}
+
 fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
     let req = camerata_llm::model_input::guarded(req);
     let key = request_key(&req);
@@ -554,15 +716,12 @@ fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
             kind,
             repo: repo.clone(),
             files: files.clone(),
+            owner: CallOwner::of(&req),
             entries: BTreeMap::new(),
         })
     });
-    let file_kind = file.kind;
-    file.entries
-        .values()
-        .filter(|e| entry_replays(e, file_kind) && e.response.is_some())
-        .nth(idx)
-        .is_some()
+    let rerun = store.rerun_misses().is_some();
+    replayable_slots(file, rerun).get(idx).is_some()
 }
 
 impl FreshCall {
@@ -591,6 +750,7 @@ fn record_entry(store: &RunStore, call: &FreshCall, entry: CallEntry) {
             kind: call.kind,
             repo: call.repo.clone(),
             files: call.files.clone(),
+            owner: call.owner,
             entries: BTreeMap::new(),
         });
     file.entries
@@ -636,7 +796,11 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
                     crate::failure::MAX_RECORD_MESSAGE_CHARS,
                 )),
                 class: Some(class.as_str().to_string()),
-                cost_usd: 0.0,
+                // A refusal carries what the call was billed: the money was paid, so a resumed
+                // run's starting spend must hold it.
+                cost_usd: crate::llm::refusal_billed(e)
+                    .and_then(|b| b.cost_usd)
+                    .unwrap_or(0.0),
                 reason: None,
                 output_path: None,
             }
@@ -676,6 +840,10 @@ const MAX_REASON_CHARS: usize = 1_500;
 /// key) instead of paying for the whole reply again. A reply that was already unusable keeps
 /// its status and gains the reason after the one it has. No reply is touched except that one.
 pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str, whole: bool) {
+    // A rerun keeps the saved run's replies exactly as they are stored.
+    if store.rerun_misses().is_some() {
+        return;
+    }
     let reason = crate::failure::scrub_message(reason, MAX_REASON_CHARS);
     let dir = store.dir().to_path_buf();
     let mut st = store.lock_state();
@@ -722,6 +890,7 @@ impl LlmPort for JournalLlm<'_> {
         let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.complete(req).await;
                 after_call(&self.store, call, &result);
@@ -742,6 +911,7 @@ impl LlmPort for JournalLlm<'_> {
                 on_delta(&resp.text);
                 Ok(*resp)
             }
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.complete_streaming(req, on_delta).await;
                 after_call(&self.store, call, &result);
@@ -778,6 +948,7 @@ impl LlmPort for JournalRealtime {
         let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self.inner.realtime().complete(req).await;
                 after_call(&self.store, call, &result);
@@ -798,6 +969,7 @@ impl LlmPort for JournalRealtime {
                 on_delta(&resp.text);
                 Ok(*resp)
             }
+            Planned::Missing => Err(missing_reply_error()),
             Planned::Fresh(call) => {
                 let result = self
                     .inner
@@ -865,10 +1037,87 @@ struct BatchFile {
     /// The fetched results, once there are some.
     #[serde(default)]
     rows: Option<Vec<StoredRow>>,
+    /// The batch a later attempt sent for this one's rows that were refused for
+    /// billing (no reply, nothing billed): its file's `(key, n)`. That batch is an ordinary batch file
+    /// and may carry a follow-up of its own, so the files form a chain from the batch the stage
+    /// first submitted. The chain is read as ONE set of rows ([`merged_rows`]).
+    #[serde(default)]
+    follow: Option<(String, usize)>,
+}
+
+impl StoredRow {
+    /// Whether the row is sent again on a resume: only a row the account refused for billing
+    /// (the class that stops a run, [`FailureClass::AuthOrBilling`]) with no reply and nothing
+    /// billed. Such a row never ran, and the stage did not send it again in its attempt.
+    ///
+    /// Every other row stays as it was stored and is replayed as before: a reply is `Done`
+    /// ([`replays_on_resume`]); a refusal or any other error was already dealt with by the
+    /// stage in that attempt (it resent the item as a batch of its own, which is stored under
+    /// its own hash and found by the stage on the resume), and sending it from here too would
+    /// pay for it twice or duplicate a batch that may be running. What a row was billed stays in
+    /// the stored spend ([`stored_spend`]).
+    fn needs_resend(&self) -> bool {
+        self.response.is_none()
+            && self.billed.is_none()
+            && self.error.as_deref().is_some_and(|e| {
+                camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
+            })
+    }
+}
+
+/// The files of a batch and of every batch sent after it for its failed rows, oldest first.
+fn batch_chain(dir: &Path, key: &str, n: usize) -> Vec<(String, usize, BatchFile)> {
+    let mut chain = Vec::new();
+    let mut next = Some((key.to_string(), n));
+    while let Some((k, i)) = next {
+        let Some(file) = read_json::<BatchFile>(&batch_path(dir, &k, i)) else {
+            break;
+        };
+        // A chain is as long as a run has resumes; the bound only stops a damaged loop.
+        if chain.len() >= 1_000 {
+            break;
+        }
+        next = file.follow.clone();
+        chain.push((k, i, file));
+    }
+    chain
+}
+
+/// The rows of a chain as one set, in the order of the first batch: a row that is not to be sent
+/// again ([`StoredRow::needs_resend`]) wins over the rows after it, and an item with none carries
+/// its latest row. `None` when the first batch has no
+/// fetched rows.
+fn merged_rows(chain: &[(String, usize, BatchFile)]) -> Option<Vec<StoredRow>> {
+    let mut merged = chain.first()?.2.rows.clone()?;
+    for (_, _, file) in &chain[1..] {
+        for row in file.rows.iter().flatten() {
+            match merged.iter_mut().find(|m| m.custom_id == row.custom_id) {
+                Some(m) if m.needs_resend() => *m = row.clone(),
+                Some(_) => {}
+                None => merged.push(row.clone()),
+            }
+        }
+    }
+    Some(merged)
+}
+
+fn hash_items(items: &[BatchItem]) -> String {
+    let mut h = Sha256::new();
+    h.update(serde_json::to_vec(items).unwrap_or_default());
+    hex(&h.finalize())
 }
 
 fn batch_path(dir: &Path, key: &str, n: usize) -> std::path::PathBuf {
     dir.join("batches").join(format!("{key}-{n}.json"))
+}
+
+/// Where a batch id is stored: its own file `(key, n)`, and the first batch of its chain `view`,
+/// whose rows the caller of `fetch` gets (the same file for a batch that was never resent).
+#[derive(Debug, Clone)]
+struct Slot {
+    key: String,
+    n: usize,
+    view: (String, usize),
 }
 
 /// The batch calls of a run, stored. A batch already submitted is never submitted again: its id is
@@ -878,8 +1127,8 @@ pub struct JournalBatchApi {
     inner: Arc<dyn BatchApi>,
     store: Arc<RunStore>,
     realtime: JournalRealtime,
-    /// Batch id -> (key, n), for the batches this attempt submitted or found.
-    by_id: std::sync::Mutex<HashMap<String, (String, usize)>>,
+    /// Batch id -> where it is stored, for the batches this attempt submitted or found.
+    by_id: std::sync::Mutex<HashMap<String, Slot>>,
 }
 
 impl JournalBatchApi {
@@ -895,9 +1144,16 @@ impl JournalBatchApi {
         }
     }
 
-    fn remember(&self, batch_id: &str, key: &str, n: usize) {
+    fn remember(&self, batch_id: &str, key: &str, n: usize, view: (&str, usize)) {
         if let Ok(mut map) = self.by_id.lock() {
-            map.insert(batch_id.to_string(), (key.to_string(), n));
+            map.insert(
+                batch_id.to_string(),
+                Slot {
+                    key: key.to_string(),
+                    n,
+                    view: (view.0.to_string(), view.1),
+                },
+            );
         }
     }
 }
@@ -918,9 +1174,7 @@ impl BatchApi for JournalBatchApi {
 
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
         require_seed(&self.store)?;
-        let mut h = Sha256::new();
-        h.update(serde_json::to_vec(&items).unwrap_or_default());
-        let key = hex(&h.finalize());
+        let key = hash_items(&items);
         let n = {
             let mut st = self.store.lock_state();
             let n = st.submitted.entry(key.clone()).or_insert(0);
@@ -929,10 +1183,76 @@ impl BatchApi for JournalBatchApi {
             this
         };
         let dir = self.store.dir().to_path_buf();
-        if let Some(stored) = read_json::<BatchFile>(&batch_path(&dir, &key, n)) {
-            // Submitted before, perhaps finished and already billed: never submit it again.
-            self.remember(&stored.batch_id, &key, n);
-            return Ok(stored.batch_id);
+        let chain = batch_chain(&dir, &key, n);
+        if let Some((tail_key, tail_n, tail)) = chain.last() {
+            if tail.rows.is_none() {
+                // Submitted before and not fetched (the batch itself, or the one sent for its
+                // failed rows): it may be running or finished and billed. Never submit it again.
+                self.remember(&tail.batch_id, tail_key, *tail_n, (key.as_str(), n));
+                return Ok(tail.batch_id.clone());
+            }
+            let merged = merged_rows(&chain).unwrap_or_default();
+            let again: Vec<BatchItem> = items
+                .iter()
+                .filter(|i| {
+                    merged
+                        .iter()
+                        .find(|r| r.custom_id == i.custom_id)
+                        .is_some_and(StoredRow::needs_resend)
+                })
+                .cloned()
+                .collect();
+            if again.is_empty() {
+                // No row is to be sent again: the stored rows answer it, nothing is sent.
+                self.remember(&chain[0].2.batch_id, &key, n, (key.as_str(), n));
+                return Ok(chain[0].2.batch_id.clone());
+            }
+            // Some rows were refused for billing: only those go out again, as a new batch stored
+            // like any other and chained to this one. A row the batch left out is not one of them:
+            // the stage retries a missing item itself, as a batch of its own that is stored under
+            // its own hash. The caller gets the new id, and its fetch returns the stored rows with
+            // the new rows.
+            let key2 = hash_items(&again);
+            let mut link_to = None;
+            let mut n2 = 0;
+            while let Some(file) = read_json::<BatchFile>(&batch_path(&dir, &key2, n2)) {
+                // A batch of these very items that was submitted and never linked or fetched (a
+                // kill between its record and the link, or the stage's own batch of them) may be
+                // running and billed: adopt it, never submit the items twice.
+                if file.rows.is_none() && !chain.iter().any(|(k, i, _)| *k == key2 && *i == n2) {
+                    link_to = Some(file.batch_id.clone());
+                    break;
+                }
+                n2 += 1;
+            }
+            let batch_id = match link_to {
+                Some(id) => id,
+                None => {
+                    let custom_ids = again.iter().map(|i| i.custom_id.clone()).collect();
+                    let batch_id = self.inner.submit(again).await?;
+                    let record = BatchFile {
+                        key: key2.clone(),
+                        n: n2,
+                        batch_id: batch_id.clone(),
+                        submitted_at: now(),
+                        attempt: self.store.record().attempt,
+                        custom_ids,
+                        rows: None,
+                        follow: None,
+                    };
+                    if let Ok(bytes) = serde_json::to_vec(&record) {
+                        let _ = write_atomic(&batch_path(&dir, &key2, n2), &bytes);
+                    }
+                    batch_id
+                }
+            };
+            let mut linked = tail.clone();
+            linked.follow = Some((key2.clone(), n2));
+            if let Ok(bytes) = serde_json::to_vec(&linked) {
+                let _ = write_atomic(&batch_path(&dir, tail_key, *tail_n), &bytes);
+            }
+            self.remember(&batch_id, &key2, n2, (key.as_str(), n));
+            return Ok(batch_id);
         }
         let custom_ids = items.iter().map(|i| i.custom_id.clone()).collect();
         let batch_id = self.inner.submit(items).await?;
@@ -944,11 +1264,12 @@ impl BatchApi for JournalBatchApi {
             attempt: self.store.record().attempt,
             custom_ids,
             rows: None,
+            follow: None,
         };
         if let Ok(bytes) = serde_json::to_vec(&record) {
             let _ = write_atomic(&batch_path(&dir, &key, n), &bytes);
         }
-        self.remember(&batch_id, &key, n);
+        self.remember(&batch_id, &key, n, (key.as_str(), n));
         Ok(batch_id)
     }
 
@@ -973,28 +1294,87 @@ impl BatchApi for JournalBatchApi {
             return Ok(rows.iter().map(StoredRow::replayed).collect());
         }
         let rows = self.inner.fetch(batch_id, ttl).await?;
-        let found = self
-            .by_id
-            .lock()
-            .ok()
-            .and_then(|m| m.get(batch_id).cloned());
-        if let Some((key, n)) = found {
-            let dir = self.store.dir().to_path_buf();
-            if let Some(mut stored) = read_json::<BatchFile>(&batch_path(&dir, &key, n)) {
-                stored.rows = Some(rows.iter().map(StoredRow::of).collect());
-                if let Ok(bytes) = serde_json::to_vec(&stored) {
-                    let _ = write_atomic(&batch_path(&dir, &key, n), &bytes);
-                }
+        let found = self.slot_of(batch_id);
+        let Some(slot) = found else {
+            return Ok(rows);
+        };
+        let dir = self.store.dir().to_path_buf();
+        if let Some(mut stored) = read_json::<BatchFile>(&batch_path(&dir, &slot.key, slot.n)) {
+            stored.rows = Some(rows.iter().map(StoredRow::of).collect());
+            if let Ok(bytes) = serde_json::to_vec(&stored) {
+                let _ = write_atomic(&batch_path(&dir, &slot.key, slot.n), &bytes);
             }
         }
-        Ok(rows)
+        if (slot.key.as_str(), slot.n) == (slot.view.0.as_str(), slot.view.1) {
+            return Ok(rows);
+        }
+        // A batch sent for the failed rows of an earlier one: the caller submitted the whole set
+        // and gets the whole set. The new rows are live (this attempt paid for them); the rows
+        // answered by the store are replayed.
+        let chain = batch_chain(&dir, &slot.view.0, slot.view.1);
+        let Some(merged) = merged_rows(&chain) else {
+            return Ok(rows);
+        };
+        Ok(merged
+            .iter()
+            .map(|m| {
+                rows.iter()
+                    .find(|r| r.custom_id == m.custom_id)
+                    .cloned()
+                    .unwrap_or_else(|| m.replayed())
+            })
+            .collect())
     }
 }
 
 impl JournalBatchApi {
+    /// Where `batch_id` is stored. This attempt's submits are remembered; an id from an earlier
+    /// process (a stage polls and fetches the batches it left running by id, without a submit) is
+    /// found in the stored batch files, with the first batch of its chain as the view, so its
+    /// fetch still returns the stored good rows with the new ones.
+    fn slot_of(&self, batch_id: &str) -> Option<Slot> {
+        if let Some(slot) = self.by_id.lock().ok()?.get(batch_id).cloned() {
+            return Some(slot);
+        }
+        let dir = self.store.dir();
+        let files: Vec<BatchFile> = std::fs::read_dir(dir.join("batches"))
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|e| read_json::<BatchFile>(&e.path()))
+            .collect();
+        let own = files.iter().find(|f| f.batch_id == batch_id)?;
+        let mut view = (own.key.clone(), own.n);
+        // Walk back to the batch the stage first submitted (a bounded walk).
+        for _ in 0..1_000 {
+            match files
+                .iter()
+                .find(|f| f.follow.as_ref() == Some(&(view.0.clone(), view.1)))
+            {
+                Some(before) => view = (before.key.clone(), before.n),
+                None => break,
+            }
+        }
+        let slot = Slot {
+            key: own.key.clone(),
+            n: own.n,
+            view,
+        };
+        self.remember(
+            batch_id,
+            &slot.key,
+            slot.n,
+            (slot.view.0.as_str(), slot.view.1),
+        );
+        Some(slot)
+    }
+
+    /// The stored rows a fetch of `batch_id` answers: the batch is fetched and stored, and the
+    /// rows are those of its whole chain ([`merged_rows`]).
     fn stored_rows(&self, batch_id: &str) -> Option<Vec<StoredRow>> {
-        let (key, n) = self.by_id.lock().ok()?.get(batch_id).cloned()?;
-        read_json::<BatchFile>(&batch_path(self.store.dir(), &key, n))?.rows
+        let slot = self.slot_of(batch_id)?;
+        let dir = self.store.dir();
+        read_json::<BatchFile>(&batch_path(dir, &slot.key, slot.n))?.rows?;
+        merged_rows(&batch_chain(dir, &slot.view.0, slot.view.1))
     }
 }
 
@@ -1040,9 +1420,9 @@ fn all_call_files(store: &RunStore) -> Vec<CallFile> {
 /// pass that failed for a CONTENT reason (the reply parsed but held nothing usable) is the case:
 /// its replies are marked rejected. A scan pass names the files it did not review, so only the
 /// calls over those files are set aside; every other stage is set aside as a whole for the repo,
-/// with the failed part named as the reason. The fix and detail stages are NOT set aside here:
-/// each of their replies was marked at the point of rejection ([`reject_reply`]), with its
-/// reason, and a reply with an accepted entry in it stays good.
+/// with the failed part named as the reason. The fix and detail stages, and the clone judge, are
+/// NOT set aside here: each of their replies was marked at the point of rejection
+/// ([`reject_reply`]), with its reason, and a reply with an accepted entry in it stays good.
 pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) {
     let rejected: Vec<&FinishFailure> = failures
         .iter()
@@ -1063,7 +1443,12 @@ pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) 
             continue;
         }
         let hit = rejected.iter().find(|f| {
-            PartKind::of_pass_name(&f.pass) == file.kind
+            // A stage that records each rejected reply itself keeps the replies that parsed, and
+            // its calls are never set aside by another stage's failure. (A file written before
+            // owners were recorded has none and keeps the blanket set-aside.)
+            !(file.kind == PartKind::Other
+                && (f.per_reply_rejections || file.owner == Some(CallOwner::CloneJudge)))
+                && PartKind::of_pass_name(&f.pass) == file.kind
                 && (f.repo.is_empty() || file.repo.is_empty() || f.repo == file.repo)
                 && (file.kind != PartKind::Scan
                     || f.files.is_empty()

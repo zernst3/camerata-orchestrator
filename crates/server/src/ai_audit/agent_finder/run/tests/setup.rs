@@ -238,6 +238,7 @@ fn creds_with_key(key: Option<&str>) -> crate::credentials::MemoryCredentialStor
 
 fn agent_controls() -> RunControls {
     RunControls {
+        scope: Default::default(),
         finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
         ..RunControls::default()
     }
@@ -361,4 +362,43 @@ fn only_the_shared_function_builds_a_finder_setup() {
         hits.is_empty(),
         "built outside the shared function: {hits:?}"
     );
+}
+
+/// A rerun (#588) whose finder has lost its store-only twin never falls through to building a real
+/// agent: it refuses, and the factory is never called.
+#[tokio::test]
+async fn a_rerun_without_its_store_only_twin_refuses_instead_of_building_an_agent() {
+    let meter = Arc::new(UsageMeter::default());
+    let built = std::sync::atomic::AtomicUsize::new(0);
+    let factory = |_c: &RunControls,
+                   _b: &super::super::AgentBuild,
+                   m: Arc<UsageMeter>|
+     -> anyhow::Result<Box<dyn PieceAgent>> {
+        built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(SelfMetering {
+            inner: ScriptedAgent::new(good_script(vec![], vec![])).with_usage(usage(1.0)),
+            meter: m,
+        }))
+    };
+    let result = crate::checkpoint::with_rerun_scope(
+        true,
+        with_finder_setup(
+            setup(EngagementKind::Internal),
+            find_repo_for_run_with(
+                &NoModel,
+                REPO,
+                &repo_files(),
+                &rules(),
+                Some(&corpus()),
+                &RunControls::default(),
+                &HashMap::new(),
+                &BackendResolution::Api,
+                Some(&meter),
+                &factory,
+            ),
+        ),
+    )
+    .await;
+    assert!(result.is_err(), "a rerun with no store-only twin refuses");
+    assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

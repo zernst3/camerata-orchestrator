@@ -33,7 +33,7 @@
 //!
 //! The viewer keys its amber banner on `source == "working_tree"`.
 //!
-//! A file up to `MAX_FILE_BYTES` (400 KB) is returned whole. A larger one, up to 4 MB, is
+//! A file up to `MAX_FILE_BYTES` (1 MB) is returned whole. A larger one, up to 4 MB, is
 //! returned as an 800-line window centred on `around`, with `window` saying which lines; only
 //! the window (plus [`HIGHLIGHT_CONTEXT_LINES`] lines before it) is highlighted.
 //!
@@ -584,6 +584,18 @@ pub async fn source_file_with(
         Err(refusal) => return no_store(refusal.into_response()),
     };
     let (around, path) = (params.around, params.path.as_str());
+    // A file the project's exclusion list names is not shown: the inspection did not read it.
+    if matches!(
+        read,
+        SourceRead::Git { .. } | SourceRead::WorkingTree { .. }
+    ) && super::scope::scope_for_read(state, params.project.as_deref())
+        .excludes(&params.repo, path)
+    {
+        return respond(
+            StatusCode::OK,
+            FindingContextOutcome::ExcludedByAgreement.to_json(),
+        );
+    }
     match read {
         SourceRead::Deleted {
             deleted_at,
@@ -596,10 +608,11 @@ pub async fn source_file_with(
             }
             .to_json(),
         ),
-        // Not linked / not on disk: indistinguishable from "file missing" to the UI.
-        SourceRead::Unresolved { .. } => {
-            respond(StatusCode::OK, FindingContextOutcome::FileMissing.to_json())
-        }
+        // Not linked / no local folder: its own status and reason, never "file missing".
+        SourceRead::Unresolved { reason } => respond(
+            StatusCode::OK,
+            FindingContextOutcome::RepoUnlinked { reason }.to_json(),
+        ),
         // No commit is known for this inspection: the working tree, labelled.
         SourceRead::WorkingTree { dir } => {
             match read_rendered(Origin::WorkingTree(&dir), path, around, limits).await {
@@ -707,10 +720,10 @@ mod tests {
 
     #[test]
     fn a_file_between_the_two_caps_is_windowed_around_the_line() {
-        let body: String = (1..=40_000).map(|n| format!("let v{n} = {n};\n")).collect();
+        let body: String = (1..=70_000).map(|n| format!("let v{n} = {n};\n")).collect();
         assert!(body.len() > MAX_FILE_BYTES && body.len() < MAX_VIEWER_BYTES);
         let (p, d) = render(body.into_bytes(), "src/big.rs", Some(10_000)).unwrap();
-        assert_eq!(p.lines.len(), 40_000);
+        assert_eq!(p.lines.len(), 70_000);
         assert_eq!((p.from, p.to), (9_600, 10_399));
         assert_eq!(d.lines.len(), 800);
         assert_eq!(text(&d, 0), "let v9600 = 9600;");

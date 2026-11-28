@@ -29,6 +29,9 @@ pub enum PurgedKind {
     ServerScanCache,
     CliScanCache,
     CliLedger,
+    /// The sealed report an internal `camerata inspect` run with no run folder saved beside its
+    /// ledger (`<key>.report.json`).
+    CliSavedReport,
     SavedRun,
     ModelSessionFile,
     InMemory,
@@ -43,6 +46,7 @@ impl PurgedKind {
             PurgedKind::ServerScanCache => "scan cache entry",
             PurgedKind::CliScanCache => "CLI scan cache",
             PurgedKind::CliLedger => "CLI ledger",
+            PurgedKind::CliSavedReport => "CLI saved report",
             PurgedKind::SavedRun => "saved run",
             PurgedKind::ModelSessionFile => "model session file",
             PurgedKind::InMemory => "in-memory copy",

@@ -147,7 +147,7 @@ fn the_system_prompt_is_pinned_to_the_prompt_schema_version() {
             crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
             digest.as_str()
         ),
-        (5, "a46a9cedc3a8fa97"),
+        (7, "82875645ddfec1dc"),
         "the audit system prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }
@@ -191,7 +191,7 @@ fn the_terse_prompts_are_pinned_to_the_prompt_schema_version() {
             hash(crate::ai_audit::detail_regen::detail_regen_system_prompt()).as_str(),
         ),
         (
-            5,
+            7,
             "5bc27c39facb8c9d",
             "fb0d0667d9ea0281",
             "6892c53159a68e5f"

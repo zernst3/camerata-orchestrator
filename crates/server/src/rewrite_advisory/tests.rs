@@ -217,6 +217,8 @@ fn observed() -> FindingKind {
     FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "a".to_string(),
         convention_label: "A".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     })
 }
 
@@ -226,12 +228,16 @@ fn departed() -> FindingKind {
         assessed_sites: Some(10),
         convention_option_id: Some("a".to_string()),
         convention_label: "A".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     })
 }
 
 fn none_kept() -> FindingKind {
     FindingKind::NoConvention(NoConventionKind {
         observed_options: Vec::new(),
+        left_to_client: false,
     })
 }
 

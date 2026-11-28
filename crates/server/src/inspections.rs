@@ -259,6 +259,12 @@ impl InspectionStore {
         self.dir.as_deref().map(PathBuf::as_path)
     }
 
+    /// Drop everything held IN MEMORY for `project_id` (the file is removed by the caller). Used
+    /// when a project and all its data are deleted, so nothing is served or written back after.
+    pub fn forget_project(&self, project_id: &str) {
+        self.lock().remove(project_id);
+    }
+
     /// The file one project's entries are persisted in, if the store is file-backed. The
     /// project id is encoded so any id is a safe single path component and distinct ids can
     /// never collide.
@@ -290,6 +296,46 @@ impl InspectionStore {
     /// The newest entry for a project.
     pub fn latest(&self, project_id: &str) -> Option<InspectionEntry> {
         self.lock().get(project_id).and_then(|l| l.last()).cloned()
+    }
+
+    /// Whether any entry of `project_id` audited `repo` (case-insensitive). Answered under the
+    /// lock without cloning any entry or report.
+    pub fn any_audits(&self, project_id: &str, repo: &str) -> bool {
+        self.lock()
+            .get(project_id)
+            .is_some_and(|l| l.iter().any(|e| e.audited_ref(repo).is_some()))
+    }
+
+    /// Every repo any entry of `project_id` audited, in first-seen order, one spelling each
+    /// (case-insensitive).
+    pub fn audited_repos(&self, project_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(list) = self.lock().get(project_id) {
+            for r in list.iter().flat_map(|e| e.repos.iter()) {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&r.repo)) {
+                    out.push(r.repo.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The spelling of `repo` that one of `project_id`'s entries audited (matched
+    /// case-insensitively), when any did.
+    pub fn audited_spelling(&self, project_id: &str, repo: &str) -> Option<String> {
+        self.lock().get(project_id).and_then(|l| {
+            l.iter()
+                .find_map(|e| e.audited_ref(repo).map(|r| r.repo.clone()))
+        })
+    }
+
+    /// The newest entry of `project_id` that covers `repo` with a commit. Clones only that one
+    /// entry, not the whole list.
+    pub fn newest_with_sha(&self, project_id: &str, repo: &str) -> Option<InspectionEntry> {
+        self.lock()
+            .get(project_id)
+            .and_then(|l| l.iter().rev().find(|e| e.sha_for(repo).is_some()))
+            .cloned()
     }
 
     /// Every entry for a project, newest first.

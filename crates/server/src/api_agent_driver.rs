@@ -1404,6 +1404,7 @@ async fn call_openrouter_with_tools(
     policy: &crate::provider_policy::ProviderPolicy,
     registry: &crate::model_registry::ModelRegistry,
 ) -> anyhow::Result<LlmResponse> {
+    let started = std::time::Instant::now();
     // Resolve the provider-safety constraint BEFORE building the request body — see
     // `crate::provider_policy::provider_constraint_for_request` for the fail-closed
     // contract (never an unconstrained request while safe_mode is on).
@@ -1473,6 +1474,7 @@ async fn call_openrouter_with_tools(
     Ok(LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         text: raw_json,
         model: model_returned,
         backend: "openrouter/api/agentic".to_string(),
@@ -1661,9 +1663,17 @@ async fn call_anthropic_with_tools(
     tool_schemas: &[Value],
 ) -> anyhow::Result<LlmResponse> {
     let (body, use_caching) = build_anthropic_request_body(model, system, messages, tool_schemas);
-    post_anthropic_body(api_key, &body, use_caching)
-        .await
-        .map_err(AnthropicPostError::into_anyhow)
+    // The agent driver keeps its own client and its 600 s bound; only the finder has the 30
+    // minute one ([`post_anthropic_body`]).
+    post_anthropic_body_to(
+        agent_http_client(),
+        ANTHROPIC_MESSAGES_URL,
+        api_key,
+        &body,
+        use_caching,
+    )
+    .await
+    .map_err(AnthropicPostError::into_anyhow)
 }
 
 /// Why one POST of a Messages body did not give a usable reply. The finder loop needs the parts
@@ -1679,6 +1689,10 @@ pub(crate) enum AnthropicPostError {
     },
     /// The request never got an answer (connect, timeout, dropped connection).
     Network(String),
+    /// The request was sent and the wait for its reply (or its body) timed out: past connecting,
+    /// so the provider took the request and did not answer in time. A connect time-out is
+    /// [`Self::Network`].
+    ReplyTimeout(String),
     /// HTTP 200 with `stop_reason: "refusal"`: the whole reply, usage included.
     Refusal(Value),
     /// A success status with a body that is not JSON.
@@ -1692,7 +1706,9 @@ impl AnthropicPostError {
             Self::Http { status, body, .. } => {
                 anyhow::anyhow!("Anthropic API HTTP {}: {body}", status_text(status))
             }
-            Self::Network(e) => anyhow::anyhow!("Anthropic API request failed: {e}"),
+            Self::Network(e) | Self::ReplyTimeout(e) => {
+                anyhow::anyhow!("Anthropic API request failed: {e}")
+            }
             Self::Refusal(v) => crate::llm::refusal_error(&v)
                 .unwrap_or_else(|| anyhow::anyhow!("the model refused the request")),
             Self::BadReply(e) => anyhow::anyhow!("parse Anthropic response JSON: {e}"),
@@ -1705,6 +1721,9 @@ fn status_text(status: u16) -> String {
     reqwest::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string())
 }
 
+/// The Messages endpoint.
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
 /// POST an already built Messages `body` and read the reply: the second half of
 /// [`call_anthropic_with_tools`], reachable on its own so a caller that builds the body itself
 /// (the finder loop) sees the typed failure.
@@ -1714,8 +1733,8 @@ pub(crate) async fn post_anthropic_body(
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
     post_anthropic_body_to(
-        agent_http_client(),
-        "https://api.anthropic.com/v1/messages",
+        finder_http_client(),
+        ANTHROPIC_MESSAGES_URL,
         api_key,
         body,
         use_caching,
@@ -1731,6 +1750,7 @@ pub(crate) async fn post_anthropic_body_to(
     body: &Value,
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
+    let started = std::time::Instant::now();
     let model = body["model"].as_str().unwrap_or_default().to_string();
     let mut builder = client
         .post(url)
@@ -1744,7 +1764,18 @@ pub(crate) async fn post_anthropic_body_to(
 
     let (status, headers, text) = send_and_read_with_headers(builder.json(body), "Anthropic API")
         .await
-        .map_err(|e| AnthropicPostError::Network(format!("{e:#}")))?;
+        .map_err(|e| {
+            // Past connecting, a timed out wait for the reply or its body is the provider's.
+            let reply_timeout = e.chain().any(|c| {
+                c.downcast_ref::<reqwest::Error>()
+                    .is_some_and(|r| r.is_timeout() && !r.is_connect())
+            });
+            if reply_timeout {
+                AnthropicPostError::ReplyTimeout(format!("{e:#}"))
+            } else {
+                AnthropicPostError::Network(format!("{e:#}"))
+            }
+        })?;
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
@@ -1780,6 +1811,7 @@ pub(crate) async fn post_anthropic_body_to(
     Ok(LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         text: raw_json,
         model: model_returned,
         backend: "anthropic/api/agentic".to_string(),
@@ -3775,6 +3807,36 @@ fn agent_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// The most one finder call may take in all, from the request to the last byte of the reply. A
+/// turn with long thinking and a large file can take close to ten minutes without streaming.
+pub(crate) const FINDER_TOTAL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+/// How long the finder waits to connect (the same as the agent driver's client).
+pub(crate) const FINDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often the finder's connections send a keep-alive probe, so a long silent wait for the
+/// reply is not dropped by a middlebox.
+const FINDER_TCP_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A client for the finder's calls with the given limits (a test passes short ones) and TCP
+/// keep-alive.
+pub(crate) fn build_finder_http_client(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .tcp_keepalive(FINDER_TCP_KEEPALIVE)
+        .build()
+        .expect("failed to build the finder HTTP client")
+}
+
+/// The finder's own HTTP client ([`FINDER_TOTAL_TIMEOUT`], [`FINDER_CONNECT_TIMEOUT`]).
+fn finder_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| build_finder_http_client(FINDER_TOTAL_TIMEOUT, FINDER_CONNECT_TIMEOUT))
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3919,6 +3981,7 @@ mod tests {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: self.0.clone(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -4003,6 +4066,7 @@ mod tests {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: raw,
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -4520,6 +4584,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "message": {"role": "assistant", "content": "Task complete!"}
             })
@@ -4545,6 +4610,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "message": {
                     "role": "assistant",
@@ -4585,6 +4651,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "content": [
                     {
@@ -4622,6 +4689,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: "plain response with no JSON".to_string(),
             model: "m".into(),
             backend: "b".into(),
@@ -4887,6 +4955,7 @@ mod tests {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: tc.to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -5209,6 +5278,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: "t".to_string(),
             model: "m".to_string(),
             backend: "stub".to_string(),
@@ -5787,6 +5857,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "id": "msg_01",
                 "type": "message",

@@ -9,7 +9,7 @@
 //! # The problem this exists to solve
 //!
 //! Every defect in that tracker — architecture rules silenced, rows injected into the PDF
-//! only, `findings.json` contradicting itself, a merge losing rows, a whole tool tier never
+//! only, `json/inspection.json` contradicting itself, a merge losing rows, a whole tool tier never
 //! running — was found by paying for an external graded run against benchmark repos. The
 //! in-repo suite was green throughout. The engine has elaborate HONESTY machinery
 //! ([`crate::scan_ledger::ScanLedger`], [`crate::ai_audit::FailedPass`]) and no
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     /// req_i2 + B1/B2/B3: the ADDITION direction. Rows appended with no disclosed reason —
-    /// the defect that put rows in the PDF only and made findings.json contradict itself —
+    /// the defect that put rows in the PDF only and made json/inspection.json contradict itself —
     /// must fail the gate too, not just row losses.
     #[test]
     fn req_i2_b2_a_stage_that_adds_rows_with_no_disclosed_reason_fails_the_gate() {

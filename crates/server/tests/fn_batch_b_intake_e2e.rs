@@ -81,6 +81,7 @@ impl LlmPort for Script {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: self.reply.clone(),
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -160,6 +161,7 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls() -> RunControls {
     RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

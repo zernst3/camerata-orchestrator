@@ -44,6 +44,10 @@ pub enum OpError {
     Unreachable(String),
     /// The store answered and said no. `message` is its reason.
     Refused { status: u16, message: String },
+    /// Only a draft migration meets this: the project has no scan rows yet, so the server holds
+    /// the old decisions back (`409 no_rows`). The store is reachable and correct; it is not an
+    /// outage, and the draft's queue stays as it is until rows exist.
+    NoRows(String),
 }
 
 /// The store, as the UI reaches it.
@@ -97,21 +101,25 @@ pub async fn load_decisions<T: DecisionTransport>(t: &T, queue: &DraftQueue) -> 
         return unreachable_store(queue);
     };
     let mut migrated_now = false;
+    let mut held_back = false;
     if !got.migrated_from_draft {
         let req = migration_request(&queue.pending).unwrap_or(MigrateDraftReq {
             migrated_from_draft: true,
             dispositions: Default::default(),
         });
-        // A refusal (no scan rows yet) or a failure leaves the draft exactly as it was.
-        if t.migrate(&req).await.is_err() {
-            return unreachable_store(queue);
-        }
-        match t.fetch().await {
-            Some(again) => {
-                got = again;
-                migrated_now = true;
-            }
-            None => return unreachable_store(queue),
+        // A refusal for want of scan rows is the server working as designed: the store is Live
+        // with what it returned and the draft's queue waits, to be migrated on a later load.
+        // Any other refusal or failure leaves the draft as it was and shows the banner.
+        match t.migrate(&req).await {
+            Ok(()) => match t.fetch().await {
+                Some(again) => {
+                    got = again;
+                    migrated_now = true;
+                }
+                None => return unreachable_store(queue),
+            },
+            Err(OpError::NoRows(_)) => held_back = true,
+            Err(_) => return unreachable_store(queue),
         }
     }
     let stored = dispositions_from_decisions(&got.decisions);
@@ -124,6 +132,11 @@ pub async fn load_decisions<T: DecisionTransport>(t: &T, queue: &DraftQueue) -> 
     };
     let mut bridge = DecisionBridge::from_decisions(&got.decisions);
     bridge.restore_stamps(&queue.stamps, &pending);
+    if held_back {
+        // Under their old keys these entries would be posted as site decisions that match no
+        // row; they wait, untouched, for the migration.
+        bridge.hold_legacy(queue);
+    }
     bridge.set_run_id(&got.latest_run_id);
     Loaded {
         shown: overlay_pending(stored, &pending),
@@ -223,7 +236,7 @@ where
                     out.stored_any = true;
                 }
                 (Ok(None), BridgeOp::Post { .. }) => {}
-                (Err(OpError::Refused { message, .. }), op) => {
+                (Err(OpError::Refused { message, .. } | OpError::NoRows(message)), op) => {
                     let key = match op {
                         BridgeOp::Post { key, .. } | BridgeOp::Revoke { key, .. } => key,
                     };

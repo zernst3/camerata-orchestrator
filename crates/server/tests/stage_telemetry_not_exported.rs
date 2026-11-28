@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 //! Per-stage cost telemetry is operator-only. The export format (manifest, README, workbook,
-//! findings.json) is a protected area, so recording telemetry on the scan ledger must not change
+//! json/inspection.json) is a protected area, so recording telemetry on the scan ledger must not change
 //! one byte of it. This pins that: the same scan, with and without telemetry on its ledger,
 //! produces identical export content, and no cost term appears in it.
 
@@ -19,6 +19,7 @@ fn report(ledger: ScanLedger) -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
@@ -93,8 +94,9 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         &camerata_server::llm::LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: Some(4_321),
             text: String::new(),
-            model: "m".to_string(),
+            model: "telemetry-only-model-id".to_string(),
             backend: "api".to_string(),
             cost_usd: Some(1.25),
             input_tokens: Some(9_000),
@@ -105,8 +107,21 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
             truncated: false,
         },
     );
+    // The run's own timing, as `run.json` saves it: its keys and values must not reach the export.
+    let segment = camerata_server::run_store::RunSegment {
+        started_unix_ms: 1_700_000_123_456,
+        finished_unix_ms: 1_700_000_130_000,
+        elapsed_ms: 6_544,
+    };
+    let segment_json = serde_json::to_string(&segment).unwrap();
+    assert!(segment_json.contains("started_unix_ms"), "{segment_json}");
+    // #243: the cache hit share (4,000 of 9,000 billed input tokens) is operator-only too.
+    let snapshot = meter.snapshot(400);
+    let share = snapshot.cache_hit_share(Stage::ScanPass).unwrap();
+    assert!((share - 4_000.0 / 9_000.0).abs() < 1e-9, "{share}");
+    assert!(snapshot.render_table().contains("44.4%"));
     let mut with = ScanLedger::new();
-    with.record_stage_telemetry(meter.snapshot(400));
+    with.record_stage_telemetry(snapshot);
     with.record_ai_key(camerata_server::scan_cache::AiScanKey::new(
         "claude-sonnet-5",
         None,
@@ -118,7 +133,10 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     let (report_without, findings_without) = exported(report(ScanLedger::new()));
 
     assert_eq!(report_with, report_without, "report.json changed");
-    assert_eq!(findings_with, findings_without, "findings.json changed");
+    assert_eq!(
+        findings_with, findings_without,
+        "json/inspection.json changed"
+    );
     for term in [
         "stage_telemetry",
         "ai_key",
@@ -128,6 +146,25 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         "wasted",
         "cost_per_1k",
         "1.25",
+        // The run figures: timing, and the model ids the telemetry names.
+        "elapsed_ms",
+        "busy_ms",
+        "cache_miss_turns",
+        "first_call_unix_ms",
+        "last_call_unix_ms",
+        "started_unix_ms",
+        "finished_unix_ms",
+        "phases",
+        "telemetry-only-model-id",
+        "4321",
+        "1700000123456",
+        "1700000130000",
+        "6544",
+        // The cache hit share: its name, the table label, and the figure itself.
+        "cache_hit_share",
+        "cache-hit",
+        "44.4%",
+        "0.4444",
     ] {
         assert!(
             !report_with.contains(term) && !findings_with.contains(term),
@@ -178,7 +215,10 @@ fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_exp
     let (report_with, findings_with) = exported(report(capped));
     let (report_without, findings_without) = exported(report(ScanLedger::new()));
     assert_eq!(report_with, report_without, "report.json changed");
-    assert_eq!(findings_with, findings_without, "findings.json changed");
+    assert_eq!(
+        findings_with, findings_without,
+        "json/inspection.json changed"
+    );
     for term in [
         "7.77",
         "8.88",

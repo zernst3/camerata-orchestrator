@@ -217,7 +217,7 @@ async fn a_deleted_source_reports_the_date_and_reads_nothing() {
 }
 
 #[tokio::test]
-async fn an_unlinked_repo_is_file_missing() {
+async fn an_unlinked_repo_is_repo_unlinked_not_file_missing() {
     let fx = fixture();
     let (status, _, json) = get(
         &fx,
@@ -225,7 +225,11 @@ async fn an_unlinked_repo_is_file_missing() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["status"], "file_missing");
+    assert_eq!(json["status"], "repo_unlinked", "{json}");
+    assert!(json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not linked to any project"));
 }
 
 #[tokio::test]
@@ -353,12 +357,12 @@ async fn a_path_that_starts_with_a_dash_is_a_file_name_not_an_option() {
 #[tokio::test]
 async fn size_policy_whole_then_windowed_then_refused() {
     let fx = fixture();
-    // 600 KB of short lines: windowed around the requested line.
-    let windowed: String = (1..=30_000).map(|n| format!("let v{n} = {n};\n")).collect();
-    assert!(windowed.len() > 400_000 && windowed.len() < 4_000_000);
+    // About 1.3 MB of short lines (over the read limit): windowed around the requested line.
+    let windowed: String = (1..=70_000).map(|n| format!("let v{n} = {n};\n")).collect();
+    assert!(windowed.len() > crate::onboard::files::MAX_FILE_BYTES && windowed.len() < 4_000_000);
     write_file(&fx.checkout, "src/windowed.rs", &windowed);
     // Just under the whole-file cap: returned whole.
-    let whole = "x\n".repeat(150_000);
+    let whole = "x\n".repeat(500_000);
     write_file(&fx.checkout, "src/whole.txt", &whole);
     // Over 4 MB: refused.
     write_file(
@@ -378,12 +382,12 @@ async fn size_policy_whole_then_windowed_then_refused() {
     let (_, _, json) = get(&fx, &uri("src/whole.txt", "&around=5")).await;
     assert_eq!(json["status"], "ok");
     assert_eq!(json["window"]["from"], 1);
-    assert_eq!(json["window"]["to"], 150_000);
-    assert_eq!(file_lines(&json).len(), 150_000);
+    assert_eq!(json["window"]["to"], 500_000);
+    assert_eq!(file_lines(&json).len(), 500_000);
 
     let (_, _, json) = get(&fx, &uri("src/windowed.rs", "&around=15000")).await;
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["total_lines"], 30_000);
+    assert_eq!(json["total_lines"], 70_000);
     assert_eq!(json["window"]["from"], 14_600);
     assert_eq!(json["window"]["to"], 15_399);
     let lines = file_lines(&json);
@@ -510,7 +514,7 @@ async fn a_repo_that_escapes_the_workspace_is_refused_on_both_endpoints() {
             ] {
                 let (status, _, json) = get(&fx, &endpoint).await;
                 assert_eq!(status, StatusCode::OK, "{endpoint}: {json}");
-                assert_eq!(json["status"], "file_missing", "{endpoint}: {json}");
+                assert_eq!(json["status"], "repo_unlinked", "{endpoint}: {json}");
                 assert!(json.get("lines").is_none(), "{endpoint}: {json}");
             }
         }
@@ -607,12 +611,12 @@ async fn a_pem_block_straddling_the_window_edge_is_redacted_on_both_sides() {
     let pem_lines: Vec<String> = pem.lines().map(str::to_string).collect();
     // around=15000 windows lines 14600..15399. Start the block 3 lines above the window.
     let start = 14_598;
-    let mut lines: Vec<String> = (1..=30_000).map(|n| format!("let v{n} = {n};")).collect();
+    let mut lines: Vec<String> = (1..=70_000).map(|n| format!("let v{n} = {n};")).collect();
     for (i, l) in pem_lines.iter().enumerate() {
         lines[start - 1 + i] = l.clone();
     }
     let body = lines.join("\n") + "\n";
-    assert!(body.len() > 400_000);
+    assert!(body.len() > crate::onboard::files::MAX_FILE_BYTES);
     write_file(&fx.checkout, "src/straddle.rs", &body);
     let committed = commit_all(&fx.checkout, "straddle");
     fx.inspect_at(&committed);

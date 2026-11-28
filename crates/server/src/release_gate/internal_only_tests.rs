@@ -6,7 +6,7 @@
 //! listed fails there; this file pins that no listed name, and none of the internal view's
 //! phrases, appears in anything a client receives:
 //!
-//! * every member of the released zip: `findings.json`, `manifest.json`, `README.txt`, every CSV
+//! * every member of the released zip: `json/inspection.json`, `manifest.json`, `README.txt`, every CSV
 //!   and JSON dataset, the workbook (every part of it: sheet names, cells, shared strings,
 //!   document properties) and the PDF member;
 //! * the PDF's data (`data.json`, the only data the Typst template reads) and the shipped
@@ -16,7 +16,7 @@
 //! A detector that finds nothing proves nothing, so `the_scan_reaches_every_surface` plants a
 //! listed name on each surface and demands the scan find it there. That test is also how to prove
 //! the guard works end to end by hand: temporarily add one of the listed names to a client
-//! export (a `serde` field on the `findings.json` row, say) and `no_review_time_data_reaches_a_client_export`
+//! export (a `serde` field on the `json/inspection.json` row, say) and `no_review_time_data_reaches_a_client_export`
 //! fails naming the artifact.
 
 use camerata_api_types::review_timing::{INTERNAL_ONLY_KEYS, INTERNAL_ONLY_PHRASES};
@@ -77,7 +77,7 @@ fn released_hits(package: ProductPackage) -> Vec<(String, &'static str)> {
     hits(&released.bytes, &data_json, &stem)
 }
 
-/// THE TEST: a real package (workbook, `findings.json`, datasets, manifest, README, PDF data)
+/// THE TEST: a real package (workbook, `json/inspection.json`, datasets, manifest, README, PDF data)
 /// carries none of the internal review-time names or phrases.
 #[test]
 fn no_review_time_data_reaches_a_client_export() {

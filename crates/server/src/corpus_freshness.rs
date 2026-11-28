@@ -108,7 +108,8 @@ pub(crate) async fn log_at_startup() {
     if !corpus_path.exists() {
         return;
     }
-    let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    crate::log_corpus_load_errors("startup freshness", &errors);
     if let Some(line) = startup_log_line(
         &corpus,
         &camerata_rules::corpus_freshness_path(),

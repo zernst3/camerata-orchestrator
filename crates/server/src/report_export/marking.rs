@@ -30,6 +30,10 @@ pub struct EscalatedSiteJson {
     pub rules_line: String,
     /// The Fix's change in at most two sentences.
     pub what_to_do: String,
+    /// `what_to_do` as text and code runs, built from the RAW fix text. The PDF sets these and
+    /// parses nothing itself. Not serialized: [`render_data_json`] hands it to the template.
+    #[serde(skip)]
+    pub what_to_do_segments: Vec<fix_text::Seg>,
     /// The Fix's effort band, in words; empty when it is not estimated.
     pub effort: String,
 }
@@ -47,6 +51,9 @@ pub struct EscalationsJson {
     pub more_line: String,
     /// The sentence above the entries.
     pub intro: String,
+    /// How many places were reviewed in person and the review budget, so a blank "Reviewed in
+    /// person" cell is explained. The workbook's Start here prints the same words.
+    pub review_line: String,
 }
 
 /// The most entries the PDF's "The most serious problems" section prints.
@@ -714,6 +721,10 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
                 // Withheld on purpose (a client engagement with no opt-in), not a tool failure:
                 // the note's own text names the step and why.
                 client_tooling_text(notes, tool)
+            } else if tool == crate::scan_mirror::MIRROR_NOTE_TOOL {
+                // Not a tool either: files that could not be copied into the private copy the
+                // tools run on. The note already names them in client words.
+                every_note_text(notes, tool)
             } else if crate::runtime_audit::is_runtime_note_tool(tool) {
                 // Not a tool either: the runtime end-of-life and runtime vulnerability pass. Its
                 // notes are already written for the reader and name what was not checked.

@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use camerata_api_types::review::{DisagreementField, EscalationReason, OutlierReason};
 
-use super::stage_batch::{run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings};
+use super::stage_batch::{
+    self, run_stage, ItemReject, StageCtx, StageFeedback, StageItems, StageSettings,
+};
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::onboard::{Finding, ScanReport};
@@ -432,7 +434,7 @@ fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
     text_of(obj, key, at).map(|text| {
         // Redacted first, then rewritten for the client: no em dash, no en dash, no
         // multiplication sign, and a problem in a whole file is "whole file", not `path:0`.
-        crate::report_export::client_prose(&camerata_secrets::redact_str(&text))
+        crate::report_export::client_prose(&camerata_secrets::redact_str_for_client(&text))
     })
 }
 
@@ -442,7 +444,7 @@ fn optional_prose_of(obj: &Obj, key: &str) -> String {
     obj.get(key)
         .and_then(serde_json::Value::as_str)
         .map(|text| {
-            crate::report_export::client_prose(&camerata_secrets::redact_str(text))
+            crate::report_export::client_prose(&camerata_secrets::redact_str_for_client(text))
                 .trim()
                 .to_string()
         })
@@ -878,6 +880,12 @@ struct RuleWork {
     hints: Vec<Hint>,
     /// The member indexes each call is asked about; set when the requests are planned.
     chunks: Vec<Vec<usize>>,
+    /// The id of each call, in the order of `chunks`; set when the requests are planned. It
+    /// carries a digest of the call's content, so a stored reply is never applied to a group
+    /// whose rows changed since it was asked.
+    chunk_ids: Vec<String>,
+    /// The id of the rule-level summary call: the node and a digest of the ids of its parts.
+    summary_id: String,
 }
 
 fn build_works(report: &ScanReport) -> Vec<RuleWork> {
@@ -957,6 +965,8 @@ fn build_works(report: &ScanReport) -> Vec<RuleWork> {
             members,
             hints,
             chunks: Vec::new(),
+            chunk_ids: Vec::new(),
+            summary_id: String::new(),
         });
     }
     works
@@ -1020,6 +1030,13 @@ pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
     camerata_secrets::redact_str(&line).into_owned()
 }
 
+/// The lines every call of a run opens with: the repository and its shape. The same bytes lead
+/// every chunk request and every rule summary request of the run, so the cached prefix
+/// (the system prompt, then this) is read from the cache by every call after the first.
+fn shared_prefix(ctx: &PromptContext<'_>) -> String {
+    format!("Repository: {}\n{}\n", ctx.repo, ctx.repo_shape)
+}
+
 /// The user prompt for one chunk of a rule group.
 fn chunk_prompt(
     ctx: &PromptContext<'_>,
@@ -1034,7 +1051,7 @@ fn chunk_prompt(
         .collect::<BTreeSet<_>>()
         .len()
         > 1;
-    let mut p = format!("Repository: {}\n{}\n", ctx.repo, ctx.repo_shape);
+    let mut p = shared_prefix(ctx);
     p.push_str(&format!("Rule group: {}\n", work.label));
     p.push_str(&format!("Rule group node: {}\n", work.node_id));
     if let Some((i, n)) = part {
@@ -1107,6 +1124,7 @@ fn chunk_request(
 ) -> LlmRequest {
     with_stage_effort(
         LlmRequest::new(chunk_prompt(ctx, work, findings, chunk, part))
+            .with_cache_breakpoints([shared_prefix(ctx).len()])
             .with_system(ctx.system.clone())
             .with_max_tokens(staged_max_tokens(
                 chunk.len(),
@@ -1118,6 +1136,13 @@ fn chunk_request(
             .with_model(stage_model(Some(ctx.model))),
         Stage::GroupReview,
     )
+}
+
+/// A short digest of `parts`, for the ids of the calls.
+fn content_digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let key = crate::checkpoint::batch_key("g", parts.into_iter());
+    key.split_once(':')
+        .map_or(key.clone(), |(_, d)| d.to_string())
 }
 
 /// Plan the chunks of every rule group and build their requests. A chunk whose request does not
@@ -1148,11 +1173,27 @@ fn plan_chunks(
             }
         }
         let n = final_chunks.len();
+        let mut ids = Vec::new();
         for (ci, chunk) in final_chunks.iter().enumerate() {
             let part = (n > 1).then_some((ci + 1, n));
             let req = chunk_request(ctx, work, findings, chunk, part);
-            out.push((format!("{}#{ci}", work.node_id), wi, chunk.clone(), req));
+            // The id names the content: the prompt without the run's delimiter token, which
+            // differs from one attempt to the next whenever any row of the report does.
+            let stable = req.prompt.replace(ctx.nonce.as_str(), "");
+            let id = format!(
+                "{}#{ci}@{}",
+                work.node_id,
+                content_digest([stable.as_str()])
+            );
+            ids.push(id.clone());
+            out.push((id, wi, chunk.clone(), req));
         }
+        work.summary_id = format!(
+            "{}@{}",
+            work.node_id,
+            content_digest(ids.iter().map(String::as_str))
+        );
+        work.chunk_ids = ids;
         work.chunks = final_chunks;
     }
     out
@@ -1794,8 +1835,14 @@ pub struct GroupReviewConfig<'a> {
     /// The model runs through the Claude Code CLI (no tools, but it can drift into agent mode):
     /// the prompts say outright that no tools exist.
     pub cli_backend: bool,
+    /// The run is a Message Batch run (the scan mode resolved to Batch): the stage's calls go
+    /// out as provider batches when the model seam carries a batch API, at the batch price. Off
+    /// for the CLI backend and for a run that must answer now (no job to record a batch id on).
+    pub batch: bool,
     /// The job the stage reports to: its activity is touched and its progress set as calls end.
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
+    /// Where the stage shows in Agent activity: the transcript store and the key the panel reads.
+    pub feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
 }
 
 /// What a group review run came to.
@@ -1825,7 +1872,7 @@ fn summary_prompt(
     chunk_summaries: &[String],
     chunks: &[ChunkReply<'_>],
 ) -> String {
-    let mut p = format!("Repository: {}\n{}\n", ctx.repo, ctx.repo_shape);
+    let mut p = shared_prefix(ctx);
     p.push_str(&format!("Rule group: {}\n", work.label));
     p.push_str(&format!("Rule group node: {}\n", work.node_id));
     p.push_str(&format!(
@@ -1885,6 +1932,23 @@ fn summary_prompt(
     p
 }
 
+/// Every text the group reviewer's prompts frame for `findings`: the path, detail and snippet, and
+/// the whole site line (it adds the per-site reviewer's reason, the effort and the flags). The
+/// run's frame token is drawn to occur in none of them.
+pub(super) fn texts_to_frame(findings: &[Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .flat_map(|f| {
+            [
+                f.path.clone(),
+                f.detail.clone(),
+                f.snippet.clone(),
+                member_line(f, 0, true),
+            ]
+        })
+        .collect()
+}
+
 /// Run the group reviewer over `report`'s tree: one call per rule group (more for a big one),
 /// then the escalation formula over what they asked for. Writes the summaries, sub-groups,
 /// outliers, escalation candidates and the rows' columns, records the stage and the escalation
@@ -1907,11 +1971,7 @@ pub async fn review_groups(
     }
 
     // One delimiter token for every call of the run, drawn so it occurs in no text it frames.
-    let texts: Vec<String> = report
-        .findings
-        .iter()
-        .flat_map(|f| [f.path.clone(), f.detail.clone(), f.snippet.clone()])
-        .collect();
+    let texts = texts_to_frame(&report.findings);
     let avoid: Vec<&str> = texts.iter().map(String::as_str).collect();
     let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(&avoid);
     let repo_label = report.repos.join(", ");
@@ -1957,18 +2017,24 @@ pub async fn review_groups(
     // the ones it skips (design 6.2). The rule-level summary calls have a checkpoint of their own.
     let chunk_checkpoint = crate::checkpoint::stage_checkpoint("group-review");
     let summary_checkpoint = crate::checkpoint::stage_checkpoint("group-review-summary");
+    // A Message Batch when the run is a batch run on the API backend and the seam carries a
+    // batch API; real time otherwise (the CLI backend has no batches).
+    let (mode, batch_api) =
+        stage_batch::mode_and_api(llm, cfg.batch && !cfg.cli_backend, cfg.max_in_flight);
     let stage_ctx = StageCtx {
         repo: &repo_label,
         model: cfg.model,
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter,
         job: cfg.job,
         checkpoint: chunk_checkpoint.as_ref(),
         settings: StageSettings::default(),
-    };
-    let mode = StageMode::Parallel {
-        max_in_flight: cfg.max_in_flight.max(1),
+        feedback: cfg.feedback.map(|(store, key)| StageFeedback {
+            store,
+            key,
+            name: "Group review",
+        }),
     };
     let ran = run_stage(Stage::GroupReview, &mut items, mode, &stage_ctx).await;
     // A lone sub-group that left `members` out holds every index of its part.
@@ -2022,7 +2088,7 @@ pub async fn review_groups(
             .enumerate()
             .map(|(ci, idxs)| ChunkReply {
                 idxs,
-                reply: items.replies.get(&format!("{}#{ci}", work.node_id)),
+                reply: work.chunk_ids.get(ci).and_then(|id| items.replies.get(id)),
             })
             .collect();
         let chunk_summaries: Vec<String> = chunk_replies
@@ -2034,6 +2100,7 @@ pub async fn review_groups(
         }
         let req = with_stage_effort(
             LlmRequest::new(summary_prompt(&ctx, work, &chunk_summaries, &chunk_replies))
+                .with_cache_breakpoints([shared_prefix(&ctx).len()])
                 .with_system(ctx.rule_system.clone())
                 .with_max_tokens(staged_max_tokens(
                     1,
@@ -2048,7 +2115,7 @@ pub async fn review_groups(
         outcome
             .prompt_bytes
             .push((work.node_id.clone(), req.prompt.len()));
-        summaries.requests.insert(work.node_id.clone(), req);
+        summaries.requests.insert(work.summary_id.clone(), req);
     }
     let summary_ran = if summaries.requests.is_empty() {
         None
@@ -2056,6 +2123,11 @@ pub async fn review_groups(
         let summary_ctx = StageCtx {
             checkpoint: summary_checkpoint.as_ref(),
             settings: stage_ctx.settings.clone(),
+            feedback: cfg.feedback.map(|(store, key)| StageFeedback {
+                store,
+                key,
+                name: "Group review, rule summaries",
+            }),
             ..stage_ctx
         };
         Some(run_stage(Stage::GroupReview, &mut summaries, mode, &summary_ctx).await)
@@ -2063,7 +2135,12 @@ pub async fn review_groups(
 
     // Apply every rule group's replies to the rows and to the tree the final build starts from.
     let mut tree = report.tree.clone().unwrap_or_default();
-    let mut prev_failed: Vec<(usize, String)> = Vec::new();
+    let mut prev_failed: Vec<(
+        usize,
+        String,
+        FailureClass,
+        Vec<camerata_llm::failure::AttemptRecord>,
+    )> = Vec::new();
     for (wi, work) in works.iter().enumerate() {
         let chunk_replies: Vec<ChunkReply<'_>> = work
             .chunks
@@ -2071,10 +2148,10 @@ pub async fn review_groups(
             .enumerate()
             .map(|(ci, idxs)| ChunkReply {
                 idxs,
-                reply: items.replies.get(&format!("{}#{ci}", work.node_id)),
+                reply: work.chunk_ids.get(ci).and_then(|id| items.replies.get(id)),
             })
             .collect();
-        let rule_summary = summaries.summaries.get(&work.node_id).cloned();
+        let rule_summary = summaries.summaries.get(&work.summary_id).cloned();
         let applied = apply_rule(
             work,
             &chunk_replies,
@@ -2093,9 +2170,13 @@ pub async fn review_groups(
     }
     if let Some(ran) = &summary_ran {
         for f in &ran.failed {
+            // The class the runner gave the failure (a credit stop stays a credit stop), as for
+            // a failed chunk above, never a blanket Content.
             prev_failed.push((
-                works.iter().position(|w| w.node_id == f.id).unwrap_or(0),
+                works.iter().position(|w| w.summary_id == f.id).unwrap_or(0),
                 f.reason.clone(),
+                f.class,
+                f.attempts.clone(),
             ));
         }
     }
@@ -2136,7 +2217,7 @@ pub async fn review_groups(
             scope_note: false,
         });
     }
-    for (wi, reason) in prev_failed {
+    for (wi, reason, class, attempts) in prev_failed {
         let work = &works[wi];
         report.failed_passes.push(FailedPass {
             repo: repo_label.clone(),
@@ -2147,9 +2228,9 @@ pub async fn review_groups(
                 work.label, work.node_id
             ),
             files_not_reviewed: 0,
-            class: FailureClass::Content,
+            class,
             files: Vec::new(),
-            attempts: Vec::new(),
+            attempts,
             scope_note: false,
         });
     }
@@ -2281,12 +2362,14 @@ pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter
 }
 
 /// What the group review is estimated to cost for `sites` rows and `rules` rules on `model`, in
-/// dollars, by the pre-flight's own estimate. `None` when the model has no list price.
+/// dollars, by the pre-flight's own estimate; at the batch price when the stage will run as a
+/// Message Batch. `None` when the model has no list price.
 pub(crate) fn group_review_estimate_usd(
     model: &str,
     sites: usize,
     rules: usize,
     cli_backend: bool,
+    batched: bool,
 ) -> Option<f64> {
     use camerata_api_types::project::ProjectBackend;
     let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
@@ -2297,7 +2380,12 @@ pub(crate) fn group_review_estimate_usd(
     };
     let e = camerata_ui_core::scan::group_review_estimate(sites as f64, rules, backend);
     let out = e.output_tokens * camerata_ui_core::scan::output_scale(model);
-    Some((e.input_tokens * price.price_in + out * price.price_out) / 1_000_000.0)
+    let usd = (e.input_tokens * price.price_in + out * price.price_out) / 1_000_000.0;
+    Some(if batched {
+        usd * crate::llm::BATCH_MULT
+    } else {
+        usd
+    })
 }
 
 /// [`review_groups`] on a meter that continues the scan's own: the whole run's spend counts toward
@@ -2331,11 +2419,16 @@ pub async fn review_groups_metered(
     }
     let repo = report.repos.join(", ");
     // The stage is priced from the rows it will read; over the approved amount, it does not start.
+    let batched = matches!(
+        stage_batch::mode_and_api(llm, cfg.batch && !cfg.cli_backend, 1).0,
+        stage_batch::StageMode::Batch
+    );
     let stage_usd = group_review_estimate_usd(
         cfg.model,
         report.findings.len(),
         cfg.rules.len(),
         cfg.cli_backend,
+        batched,
     );
     let paused = if meter.checkpoint_stopped() {
         meter.record_stage_not_run(&repo, STAGE_GROUP_REVIEW, false);
@@ -2392,13 +2485,16 @@ pub async fn review_groups_metered(
 /// Last, the severities and kinds follow what the reviewers said
 /// ([`crate::follow_reviewers::follow_reviewers`], owner ruling R-7): `corpus` is the run's rule
 /// set, the one its severity bounds were applied with.
+#[allow(clippy::too_many_arguments)]
 pub async fn review_scan_report(
     report: &mut ScanReport,
     llm: &dyn LlmPort,
     controls: &crate::cost_cap::RunControls,
     rules: &[(String, String)],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<GroupReviewOutcome> {
     if report.findings.is_empty() {
@@ -2428,7 +2524,9 @@ pub async fn review_scan_report(
             stage_batch::DEFAULT_MAX_IN_FLIGHT
         },
         cli_backend,
+        batch: batch && !cli_backend,
         job,
+        feedback,
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);

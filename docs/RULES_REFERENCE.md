@@ -133,7 +133,7 @@ fastest way to predict what changing it does.
 6. **Export** (`report_export.rs`, `xlsx_export.rs`). The severity floor/ceilings
    (`min_severity`, `max_severity`, `deviation_ceiling`) are applied here, at both exporters'
    partitions; `remediation`, `finding_headline`/`finding_detail`, `effort`, and `sources`
-   resolve into the client artifacts (PDF, xlsx, `findings.json`). Bucket routing
+   resolve into the client artifacts (PDF, xlsx, `json/inspection.json`). Bucket routing
    (`effective_bucket`, `report_export.rs:2607-2652`) decides whether a row is an action item,
    informational, or held for review.
 
@@ -234,7 +234,7 @@ fastest way to predict what changing it does.
   - `AI-` prefixed ids are invented by the model for novel findings (`ai_audit.rs:642`);
     they never resolve in the corpus and ride the P3 citation-class fallback instead.
 - **Client-facing?** Yes: rule ids appear in every artifact (PDF citations, xlsx columns,
-  `findings.json`).
+  `json/inspection.json`).
 
 ### 3.2 `title`
 
@@ -696,7 +696,7 @@ role.
     A grounded citation is what keeps an AI-tier finding out of the uncited-AI held/informational
     routing (`is_uncited_ai_finding`, `report_export.rs:1993-2010`) and what ranks the row in
     the provenance-tier sort (`provenance_tier_rank`, `report_export.rs:2837-2843`). Titles
-    and URLs reach the PDF, xlsx, and `findings.json`.
+    and URLs reach the PDF, xlsx, and `json/inspection.json`.
   - **Preview-tool wiring.** `sources[].linter` is how a mechanical rule gets a scan-time
     preview tool: `tool_for_rule` maps the first routable `linter` string through
     `tool_for_linter` (clippy/ruff/eslint-family/semgrep), with a fallback that claims Semgrep
@@ -718,7 +718,7 @@ role.
   via -tags flag at build/test time..."*). 19 sources across the 7 `go/testing/` rules carry
   one. **Parsed and reachable, but deliberately consumed by nothing today** - it is
   author/reviewer-facing provenance for re-verifying a citation without re-reading the source,
-  not deliverable text. It does NOT reach the PDF, xlsx, `findings.json`, the proposal
+  not deliverable text. It does NOT reach the PDF, xlsx, `json/inspection.json`, the proposal
   `RuleSourceView`, or `Rule::summary`, and it must never be concatenated into any of them.
   Added by W18; see the "artifact reach" note at the end of this bullet list.
 - **`qualifies` inside a `[[sources]]` block is a real trap, it bit 10 rules, and it is now a
@@ -827,7 +827,7 @@ role.
   word in the ordinary chain:
   - PDF/JSON partition: normalize -> floor -> unlocated downgrade -> **max clamp** ->
     deviation clamp (`report_export.rs:3772-3789`).
-  - xlsx/`findings.json` partition: normalize -> floor -> **max clamp** -> deviation clamp
+  - xlsx/`json/inspection.json` partition: normalize -> floor -> **max clamp** -> deviation clamp
     (`xlsx_export.rs:325-342`).
   (The deviation clamp runs after it, but being itself a ceiling it can only go lower; the
   gate at `lib.rs:2457-2465` rejects a `deviation_ceiling` ranking ABOVE `max_severity` as
@@ -1118,7 +1118,7 @@ then never engages.
 
 - Required string; the human name. **Client-facing in several places:** the alternatives
   prompt (`ai_audit.rs:2318-2327`), and VERBATIM (corpus text, never model prose) in the
-  structured kind payloads that reach `findings.json`/xlsx - `DeviationKind::
+  structured kind payloads that reach `json/inspection.json`/xlsx - `DeviationKind::
   convention_label`, `ConventionObservedKind::convention_label`, `ObservedOptionUsage::label`
   (`api-types/src/audit.rs:154-207`; populated at `ai_audit.rs:6403-6410, 6494-6500,
   2529-2535`). Also the snippet fallback for a violates-option or convention-observed finding
@@ -1177,7 +1177,7 @@ then never engages.
   `chosen_option`, (3) the rule's `default_option` - and instantiates placeholder tokens from
   the finding's own `path`/`captures` (`instantiate_remediation`,
   `report_export.rs:2262-2313`). Surfaced as the PDF "Fix:" line, the workbook's
-  "Recommended Fix" column, and `findings.json`'s `fix` field - the same join for all three.
+  "Recommended Fix" column, and `json/inspection.json`'s `fix` field - the same join for all three.
 - **Placeholders.** `<path>`/`<file>` fill from the finding's path; any other
   `<token>` fills from `captures[token]`, else a readable generic
   (`generic_placeholder_filler`, `report_export.rs:2175-2199`). Tokens are lowercase
@@ -1408,7 +1408,7 @@ marked points.
    (`ai_audit.rs:6312, 7160-7178`).
 
 **The bound chain, applied identically by the live scan, the PDF/JSON partition and the
-xlsx/`findings.json` partition (`severity_bounds::bounded_severity`), per finding:**
+xlsx/`json/inspection.json` partition (`severity_bounds::bounded_severity`), per finding:**
 1. `normalize_severity` (`report_export.rs:468-479`) - casing fixed; UNRECOGNIZED -> `"low"`.
 2. **`min_severity` raise** (`raise_to_rule_min_severity`) - only accusing-kinded, located
    rows.
@@ -1418,7 +1418,7 @@ xlsx/`findings.json` partition (`severity_bounds::bounded_severity`), per findin
 5. **`deviation_ceiling` clamp** (`clamp_deviation_severity`) - Deviation-kinded rows only.
 
 Until 2026-10-21 step 3 ran in the PDF partition only; it now runs in the shared chain, so
-the live scan, the PDF, the workbook, the CSV/JSON exports and `findings.json` all agree on an
+the live scan, the PDF, the workbook, the CSV/JSON exports and `json/inspection.json` all agree on an
 unlocated row (it is `info` everywhere). See `severity_bounds.rs` and section 11.
 
 Rank order for every comparison: `critical(0) < high(1) < medium(2) < low/info/anything(3)`
@@ -1457,7 +1457,7 @@ the informational appendix, NOT `curated_findings` - a test (or reader) consumin
 
 What reaches which artifact, per corpus field: see the per-field sections; summary table:
 
-| Corpus field | PDF | xlsx / findings.json | Prompt-only | Internal-only |
+| Corpus field | PDF | xlsx / json/inspection.json | Prompt-only | Internal-only |
 |---|---|---|---|---|
 | `title`, `id` | yes | yes | yes | |
 | `sources` (url/title/linter) | yes (citations) | yes | | linter also drives tooling |
@@ -2084,7 +2084,7 @@ block above so an old cross-reference still resolves.
 
 5. **Unlocated rows are `info` on every surface (fixed 2026-10-21).** This was an open
    cross-artifact asymmetry: the PDF/JSON partition applied the C4-R1 unlocated downgrade and
-   the live scan and xlsx/`findings.json` partition did not, so an unlocated
+   the live scan and xlsx/`json/inspection.json` partition did not, so an unlocated
    above-informational row (e.g. an operator-forced `violates` finding, which carries no
    evidence and anchors at high, `ai_audit.rs:6271-6278`) rendered `info` in the PDF and `high`
    elsewhere. C4-R1's rationale is about the finding (nothing concrete was established, so it

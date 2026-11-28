@@ -185,7 +185,7 @@ async fn finding_context_never_reads_fs_when_directory_missing() {
     other.inspect_at(&other.head);
     std::fs::remove_dir_all(&other.checkout).unwrap();
     let (_, _, missing) = get(&other, QUERY_BASE).await;
-    assert_eq!(missing["status"], "file_missing");
+    assert_eq!(missing["status"], "repo_unlinked");
 
     assert_eq!(
         WORKING_TREE_READS.with(std::cell::Cell::get),
@@ -240,7 +240,11 @@ async fn finding_context_git_read_rejects_dotdot_and_absolute_paths() {
 async fn finding_context_git_read_applies_too_large_cap_and_redaction() {
     let fx = fixture();
     // A blob over the cap, and one that carries a secret-shaped value.
-    write_file(&fx.checkout, "src/huge.rs", &"x".repeat(400_001));
+    write_file(
+        &fx.checkout,
+        "src/huge.rs",
+        &"x".repeat(crate::onboard::files::MAX_FILE_BYTES + 1),
+    );
     let token = format!("ghp_{}", "Zq9Xk3Pm7Rt2Vw5Yb8Nc4Jd6Hf1Ga0Lo3Ue9");
     write_file(
         &fx.checkout,
@@ -342,4 +346,157 @@ async fn the_resolver_says_where_code_may_be_read_from() {
     delete_the_source(&fx).await;
     let read = source_for_read(&fx.state, None, REPO, None).await.unwrap();
     assert!(matches!(read, SourceRead::Deleted { .. }));
+}
+
+// ── A project owns the repos of its own saved inspections (2026-11-20) ───────────────────────
+//
+// Onboarding adds repos to `project.repos` only when the rules are applied, which is AFTER
+// triage, so the review screen read nothing for a project still in onboarding.
+
+fn unlink_repos(fx: &Fx) {
+    fx.state
+        .projects
+        .update(&fx.project_id, |p| p.repos.clear())
+        .expect("project exists");
+}
+
+#[tokio::test]
+async fn a_project_with_no_repos_reads_the_repo_of_its_saved_inspection() {
+    let fx = fixture();
+    unlink_repos(&fx);
+    fx.inspect_at(&fx.head);
+
+    let (status, _, json) = get(&fx, &format!("{QUERY_BASE}&project={}", fx.project_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(json["source"], "git", "{json}");
+    assert!(lines(&json).contains("println!(\"hi\")"), "{json}");
+
+    // The same with no project hint (the active project, then any that owns the repo).
+    let (_, _, unhinted) = get(&fx, QUERY_BASE).await;
+    assert_eq!(unhinted["status"], "ok", "{unhinted}");
+
+    // And through the resolver every code endpoint shares.
+    let read = source_for_read(&fx.state, Some(&fx.project_id), REPO, None)
+        .await
+        .unwrap();
+    assert!(matches!(read, SourceRead::Git { .. }), "{read:?}");
+}
+
+#[tokio::test]
+async fn a_repo_in_no_project_and_no_inspection_is_still_refused() {
+    let fx = fixture();
+    unlink_repos(&fx);
+    fx.inspect_at(&fx.head);
+    for repo in ["acme%2Fnever-linked", "..%2F..%2Fetc", "acme", "a%2Fb%2Fc"] {
+        let uri = format!("/api/onboard/finding-context?repo={repo}&path=a.rs&line=1");
+        let (status, _, json) = get(&fx, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{repo}");
+        assert_eq!(json["status"], "repo_unlinked", "{repo}: {json}");
+        assert!(json.get("lines").is_none(), "{repo}: {json}");
+    }
+    let read = source_for_read(&fx.state, None, "acme/never-linked", None)
+        .await
+        .unwrap();
+    assert!(matches!(read, SourceRead::Unresolved { .. }), "{read:?}");
+}
+
+#[tokio::test]
+async fn an_inspection_naming_a_traversal_repo_does_not_make_it_readable() {
+    let fx = fixture();
+    // A saved inspection that (wrongly) names a non owner/name repo must not open a path.
+    fx.state.set_last_scan(
+        fx.project_id.clone(),
+        super::test_support::report_at("../../etc", &fx.head),
+    );
+    WORKING_TREE_READS.with(|c| c.set(0));
+    let read = source_for_read(&fx.state, Some(&fx.project_id), "../../etc", None)
+        .await
+        .unwrap();
+    // Refused by the NAME check (the "not linked" words), not merely by a later folder lookup.
+    let SourceRead::Unresolved { reason } = read else {
+        panic!("a traversal name must be refused: {read:?}");
+    };
+    assert!(reason.contains("not linked to this project"), "{reason}");
+    for endpoint in [
+        "/api/onboard/finding-context?repo=..%2F..%2Fetc&path=passwd&line=1",
+        "/api/onboard/finding-context?repo=..%2F..%2Fetc&path=passwd&line=1&project=",
+    ] {
+        let (_, _, json) = get(&fx, endpoint).await;
+        assert_eq!(json["status"], "repo_unlinked", "{json}");
+        assert!(
+            json["reason"].as_str().unwrap().contains("not linked to"),
+            "{json}"
+        );
+    }
+    assert_eq!(
+        WORKING_TREE_READS.with(std::cell::Cell::get),
+        0,
+        "no filesystem read for a refused name"
+    );
+}
+
+#[tokio::test]
+async fn a_hinted_project_does_not_borrow_another_projects_repo() {
+    let fx = fixture();
+    fx.inspect_at(&fx.head);
+    let other = fx
+        .state
+        .projects
+        .create("Other", vec!["acme/else".to_string()])
+        .expect("second project");
+
+    // The repo belongs to the first project only; naming the second as the project reads nothing.
+    let (_, _, borrowed) = get(&fx, &format!("{QUERY_BASE}&project={}", other.id)).await;
+    assert_eq!(borrowed["status"], "repo_unlinked", "{borrowed}");
+    let read = source_for_read(&fx.state, Some(&other.id), REPO, None)
+        .await
+        .unwrap();
+    assert!(matches!(read, SourceRead::Unresolved { .. }), "{read:?}");
+
+    // Same when the owning project owns the repo only through its inspection.
+    unlink_repos(&fx);
+    let (_, _, still) = get(&fx, &format!("{QUERY_BASE}&project={}", other.id)).await;
+    assert_eq!(still["status"], "repo_unlinked", "{still}");
+    let (_, _, own) = get(&fx, &format!("{QUERY_BASE}&project={}", fx.project_id)).await;
+    assert_eq!(own["status"], "ok", "{own}");
+}
+
+#[tokio::test]
+async fn an_unlinked_repo_and_a_repo_without_a_folder_say_so_in_plain_words() {
+    let fx = fixture();
+    // Not linked to any project.
+    let (_, _, unlinked) = get(
+        &fx,
+        "/api/onboard/finding-context?repo=acme%2Fnever-linked&path=a.rs&line=1",
+    )
+    .await;
+    assert_eq!(unlinked["status"], "repo_unlinked", "{unlinked}");
+    let reason = unlinked["reason"].as_str().unwrap();
+    assert!(reason.contains("not linked to any project"), "{reason}");
+    assert!(!reason.contains("changed since scan"), "{reason}");
+
+    // Linked, but its folder is gone: the status is still not `file_missing`, and the path it
+    // looked for is in the words.
+    std::fs::remove_dir_all(&fx.checkout).unwrap();
+    let (_, _, nofolder) = get(&fx, QUERY_BASE).await;
+    assert_eq!(nofolder["status"], "repo_unlinked", "{nofolder}");
+    let reason = nofolder["reason"].as_str().unwrap();
+    assert!(reason.contains("no local folder"), "{reason}");
+    assert!(
+        reason.contains(&fx.checkout.to_string_lossy().to_string()),
+        "{reason}"
+    );
+    assert!(!reason.contains("changed since scan"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_file_really_absent_in_a_resolved_folder_stays_file_missing() {
+    let fx = fixture();
+    let (_, _, json) = get(
+        &fx,
+        "/api/onboard/finding-context?repo=acme%2Fapp&path=src%2Fnope.rs&line=1",
+    )
+    .await;
+    assert_eq!(json["status"], "file_missing", "{json}");
 }

@@ -365,7 +365,7 @@ mod tests {
             spawn.mcp_config.display().to_string()
         );
         // The driver's argv must lock the agent to the governed write tool.
-        let args = spawn.driver.build_args(&role(), "task");
+        let args = spawn.driver.build_args(&role());
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert!(args[allowed_idx + 1].contains(GATED_WRITE_TOOL));
         // No worktree passed -> the driver has no --add-dir (orchestrator cwd; read scope
@@ -389,7 +389,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let args = spawn.driver.build_args(&role(), "task");
+        let args = spawn.driver.build_args(&role());
         let idx = args
             .iter()
             .position(|a| a == "--add-dir")
@@ -426,7 +426,7 @@ mod tests {
         .unwrap();
 
         // READ scope: every dir (worktree + both siblings) appears as an `--add-dir`.
-        let args = spawn.driver.build_args(&role(), "task");
+        let args = spawn.driver.build_args(&role());
         let add_dirs: Vec<&String> = args
             .iter()
             .enumerate()

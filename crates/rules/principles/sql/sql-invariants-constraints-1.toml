@@ -1,5 +1,5 @@
 id = "SQL-INVARIANTS-CONSTRAINTS-1"
-version = 3
+version = 4
 title = "Domain invariants that matter (required fields, valid ranges/enums, uniqueness) are declared as NOT NULL/CHECK/UNIQUE constraints, not left to application code alone"
 domain = "sql"
 layer = "universal"
@@ -8,7 +8,7 @@ kind = "defect"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Prose check: which columns genuinely represent an invariant worth enforcing at the database (a required field, a bounded/valid range, a value that must be unique across rows) versus a column that is legitimately optional or whose validity is contextual and not expressible as a simple predicate, is a judgment call over the schema and its surrounding application logic, not a regex. The realistic mechanism is a migration-review checklist plus a periodic schema audit comparing application-level validation (model-layer 'required'/'unique' declarations, request-body validators) against what the database itself enforces, surfacing columns validated only in application code with no matching database constraint. Conformance holds when every invariant the application code treats as load-bearing (required, bounded, or unique) has a matching database-level constraint; it fails when application code is the ONLY layer enforcing an invariant the schema itself stays silent on."
+qualifies = "Prose check: which columns genuinely represent an invariant worth enforcing at the database (a required field, a bounded/valid range, a value that must be unique across rows) versus a column that is legitimately optional or whose validity is contextual and not expressible as a simple predicate, is a judgment call over the schema and its surrounding application logic, not a regex. The realistic mechanism is a migration-review checklist plus a periodic schema audit comparing application-level validation (model-layer 'required'/'unique' declarations, request-body validators) against what the database itself enforces, surfacing columns validated only in application code with no matching database constraint. Conformance holds when every invariant the application code treats as load-bearing (required, bounded or unique) has a matching database-level constraint; it fails when application code is the ONLY layer enforcing an invariant the schema itself stays silent on."
 [[sources]]
 url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
 title = "PostgreSQL: Constraints: 'constraints give you as much control over the data in your tables as you wish... this applies even if the value came from the default value definition'; NOT NULL, CHECK and UNIQUE constraints enforce invariants regardless of which code path produced the write"
@@ -18,12 +18,12 @@ question = "Does every domain invariant the application treats as load-bearing (
 default = "constraints-enforce-invariants-the-app-cannot-bypass"
 why = """
 PostgreSQL's own documentation is explicit that the point of a constraint is enforcement that holds 'even if the
-value came from the default value definition' — i.e. a constraint is the one place an invariant holds regardless
+value came from the default value definition': i.e. a constraint is the one place an invariant holds regardless
 of which code path produced the write. Application-level validation (a model's 'required: true', a request
 validator checking a field is one of a fixed set of strings, an ORM-level uniqueness check) is necessary for good
 error messages and early feedback, but it only runs for requests that go through that specific validation path. A
 data migration, a bulk import script, a different service writing to the same table, an admin tool, or simply a
-second code path a future developer adds without remembering the original validation, all bypass it entirely — the
+second code path a future developer adds without remembering the original validation, all bypass it entirely: the
 database accepts the write regardless, silently entrenching exactly the kind of invalid state the validation was
 meant to prevent.
 
@@ -32,7 +32,7 @@ application always expects to be populated but the schema allows to be empty; CH
 within a valid range or match one of a fixed set of options (the 'documentation says the status is only ever
 pending/active/closed, but the column accepts any string' gap); UNIQUE for a value the application assumes is
 one-of-a-kind (an email, a slug, an external-id) but the schema does not actually guarantee is. PostgreSQL's
-documentation notes that 'in most database designs the majority of columns should be marked not null' — the
+documentation notes that 'in most database designs the majority of columns should be marked not null': the
 unusual case is the nullable column, not the required one.
 
 This is a judgment-heavy rule, not a mechanical one: deciding WHICH columns genuinely represent an invariant worth

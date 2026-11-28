@@ -35,6 +35,64 @@ pub(super) struct Shared<'a> {
     pub meter: Option<&'a UsageMeter>,
     /// How many pieces (and halves of refused pieces) the repository is reviewed in.
     pub n_pieces: usize,
+    /// The keys of the pieces that are halves of a piece cut in two on a resume.
+    pub halves: HashSet<String>,
+    /// Where each model call shows in Agent activity; `None` shows nothing.
+    pub activity: Option<super::FinderActivity>,
+}
+
+impl Shared<'_> {
+    /// The first run of a call, shown in Agent activity from the moment it starts.
+    pub(super) async fn run_shown(
+        &self,
+        stage: &str,
+        room: &Room,
+        brief: &str,
+        limits: &PieceLimits,
+    ) -> anyhow::Result<AgentRun> {
+        let session = self.session_for(stage);
+        if let Some(a) = &self.activity {
+            a.begin(&session, &self.role_for(stage), brief);
+        }
+        let result = self.agent.run(room, brief, limits).await;
+        if let Some(a) = &self.activity {
+            a.end(&session, &result);
+        }
+        result
+    }
+
+    /// One more turn on a conversation, shown in Agent activity the same way.
+    pub(super) async fn follow_up_shown(
+        &self,
+        stage: &str,
+        room: &Room,
+        prior: &AgentRun,
+        turn: &FollowUp,
+        limits: &PieceLimits,
+    ) -> anyhow::Result<AgentRun> {
+        let session = self.session_for(stage);
+        if let Some(a) = &self.activity {
+            let mut prompt = turn.message.clone();
+            if !turn.send_files.is_empty() {
+                prompt.push_str("\n\nFiles sent in full:\n");
+                prompt.push_str(&turn.send_files.join("\n"));
+            }
+            a.begin(&session, &self.role_for(stage), &prompt);
+        }
+        let result = self.agent.follow_up(room, prior, turn, limits).await;
+        if let Some(a) = &self.activity {
+            a.end(&session, &result);
+        }
+        result
+    }
+
+    fn session_for(&self, stage: &str) -> String {
+        format!("finder:{}:{stage}", self.repo)
+    }
+
+    fn role_for(&self, stage: &str) -> String {
+        format!("{stage} ({})", self.repo)
+    }
 }
 
 /// The recorded conversation of a finished piece: what a resume replays.
@@ -70,6 +128,10 @@ pub(super) struct PieceReport {
     pub runs: Vec<AgentRun>,
     /// True when the model refused the piece.
     pub refused: bool,
+    /// True when the piece ended on a stop that would repeat on a whole rerun (its turn limit,
+    /// its own spend ceiling, an output limit hit twice, a prompt too long, repeated time-outs, a
+    /// request that would pass the context window): a resume runs it in two halves.
+    pub split_on_resume: bool,
     pub replayed: bool,
     /// The rule ids on the piece's checklist.
     pub checklist_rules: Vec<String>,
@@ -85,6 +147,17 @@ pub(super) fn lines_of(files: &[(String, String)], paths: &[String]) -> usize {
         .iter()
         .filter(|(p, _)| wanted.contains(p.as_str()))
         .map(|(_, t)| t.lines().count())
+        .sum()
+}
+
+/// The Read calls needed to read every file of `paths` whole, in the room's pages
+/// ([`super::room::read_pages`]).
+pub(super) fn read_pages_of(files: &[(String, String)], paths: &[String]) -> usize {
+    let wanted: HashSet<&str> = paths.iter().map(String::as_str).collect();
+    files
+        .iter()
+        .filter(|(p, _)| wanted.contains(p.as_str()))
+        .map(|(_, t)| super::super::room::read_pages(t))
         .sum()
 }
 
@@ -512,8 +585,9 @@ pub(super) fn response_of(
     options: &FinderOptions,
     usage: &super::super::TurnUsage,
 ) -> crate::llm::LlmResponse {
-    let input =
-        usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+    // `TurnUsage::input_tokens` already holds the cache reads and writes (every transport
+    // stores it so, as `LlmResponse` does); adding them again counted the cache twice.
+    let input = usage.input_tokens;
     let cost = usage.cost_usd.or_else(|| {
         crate::llm::usage_cost_usd(
             &options.model,
@@ -540,6 +614,7 @@ pub(super) fn response_of(
         truncated: false,
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
     }
 }
 
@@ -592,13 +667,44 @@ fn rules_covering(shared: &Shared<'_>, checklist: &Checklist, files: &[String]) 
         .collect()
 }
 
-fn stop_class(stop: &AgentStop) -> FailureClass {
+pub(super) fn stop_class(stop: &AgentStop) -> FailureClass {
     match stop {
         AgentStop::Finished | AgentStop::TurnLimit(_) | AgentStop::Refused(_) => {
             FailureClass::Content
         }
         AgentStop::SpendLimit(_) => FailureClass::SpendLimit,
+        // The run's own stop, met between two turns of a conversation, keeps its class: it is
+        // not a content failure of the piece.
+        AgentStop::Failed(why) if why.starts_with(super::super::api_agent::RUN_STOPPED_PREFIX) => {
+            FailureClass::OutageStop
+        }
+        AgentStop::Failed(why) if why.starts_with(super::super::api_agent::CONTEXT_FULL_PREFIX) => {
+            FailureClass::Content
+        }
         AgentStop::Failed(why) => crate::ai_audit::classify_pass_error(&anyhow::anyhow!("{why}")),
+    }
+}
+
+/// Whether a piece that ended on `stop` would end the same way if run again whole, so a resume
+/// cuts it in two. A transient cause (a rate limit, an overload, a network failure, a credit,
+/// spend-limit or outage stop) never splits: those run whole again.
+pub(super) fn splits_on_resume(stop: &AgentStop) -> bool {
+    use super::super::api_agent::{
+        CONTEXT_FULL_PREFIX, CUT_OFF_TWICE_PREFIX, PIECE_CEILING_PREFIX, REPLY_TIMEOUT_PREFIX,
+        REQUEST_TOO_LARGE_PREFIX,
+    };
+    match stop {
+        AgentStop::TurnLimit(_) => true,
+        AgentStop::SpendLimit(why) => why.starts_with(PIECE_CEILING_PREFIX),
+        AgentStop::Failed(why) => [
+            CUT_OFF_TWICE_PREFIX,
+            CONTEXT_FULL_PREFIX,
+            REQUEST_TOO_LARGE_PREFIX,
+            REPLY_TIMEOUT_PREFIX,
+        ]
+        .iter()
+        .any(|p| why.starts_with(p)),
+        AgentStop::Finished | AgentStop::Refused(_) => false,
     }
 }
 
@@ -712,6 +818,7 @@ pub(super) fn report_of(
     let mut partial: Vec<(String, String)> = Vec::new();
     if let Some(run) = stopped {
         report.refused = matches!(run.stop, AgentStop::Refused(_));
+        report.split_on_resume = splits_on_resume(&run.stop);
         let kind = match run.stop {
             AgentStop::Refused(_) => "refused",
             AgentStop::TurnLimit(_) => "turn_limit",
@@ -1002,7 +1109,10 @@ pub(super) fn not_run_report(
         .meter
         .map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| m.stop_cause());
     let reason = if outage {
-        "NOT RUN: the run stopped because the model provider could not be reached before this part was reviewed. This inspection is incomplete.".to_string()
+        format!(
+            "NOT RUN: the run stopped because {} before this part was reviewed. This inspection is incomplete.",
+            shared.meter.map_or(crate::run_health::STOP_PHRASE_UNREACHABLE, |m| m.stop_phrase())
+        )
     } else {
         format!("NOT RUN: {cause} before this part was reviewed. This inspection is incomplete.")
     };
@@ -1026,9 +1136,9 @@ pub(super) async fn converse(
     limits: &PieceLimits,
 ) -> Result<Vec<AgentRun>, anyhow::Error> {
     let mut runs: Vec<AgentRun> = Vec::new();
+    let label = format!("Finder, piece {} of {}", index + 1, shared.n_pieces);
     let first = shared
-        .agent
-        .run(room, super::super::brief_text::PIECE_BRIEF, limits)
+        .run_shown(&label, room, super::super::brief_text::PIECE_BRIEF, limits)
         .await?;
     meter_turns(shared, &first);
     runs.push(first);
@@ -1042,20 +1152,27 @@ pub(super) async fn converse(
             break;
         }
         let view = interpret(room, not_served, checklist, piece, &runs);
-        let turn = if !repaired && view.needs_repair() {
+        let (turn, step) = if !repaired && view.needs_repair() {
             repaired = true;
-            FollowUp::text(repair_message(&view))
+            (FollowUp::text(repair_message(&view)), "repair turn")
         } else if !sent && !view.unread_sendable.is_empty() {
             sent = true;
-            FollowUp::with_files(SEND_AGAIN_MESSAGE, &view.unread_sendable)
+            (
+                FollowUp::with_files(SEND_AGAIN_MESSAGE, &view.unread_sendable),
+                "unread files sent again",
+            )
         } else if !asked && view.needs_rules_follow_up() {
             asked = true;
-            FollowUp::text(rules_message(&view))
+            (FollowUp::text(rules_message(&view)), "missing rules turn")
         } else {
             break;
         };
         let prior = runs.last().expect("one run").clone();
-        match shared.agent.follow_up(room, &prior, &turn, limits).await {
+        let stage = format!("{label}, {step}");
+        match shared
+            .follow_up_shown(&stage, room, &prior, &turn, limits)
+            .await
+        {
             Ok(run) => {
                 meter_turns(shared, &run);
                 live = run.conversation.clone();
@@ -1072,6 +1189,5 @@ pub(super) async fn converse(
         }
     }
     shared.agent.release(&live);
-    let _ = index;
     Ok(runs)
 }

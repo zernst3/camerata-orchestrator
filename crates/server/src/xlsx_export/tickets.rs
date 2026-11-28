@@ -11,7 +11,7 @@ use super::vocabulary as v;
 use crate::report_export::ReviewedReport;
 
 /// The archive path of the ticket file.
-pub const TICKETS_CSV: &str = "csv/tickets.csv";
+pub use camerata_api_types::package_paths::TICKETS_CSV;
 
 /// The most places a ticket's Places cell lists before it points at the All problems sheet.
 pub const INLINE_SITES: usize = 50;
@@ -177,7 +177,7 @@ pub fn tickets_csv(
     let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
     writer.write_record(TICKET_HEADERS)?;
     for g in &groups {
-        writer.write_record(ticket_row(g))?;
+        writer.write_record(crate::csv_cell::safe_record(ticket_row(g)))?;
     }
     Ok(writer.into_inner()?)
 }

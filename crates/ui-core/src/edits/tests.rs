@@ -32,6 +32,9 @@ fn deviation_row() -> SiteRow {
             assessed_sites: Some(40),
             convention_option_id: None,
             convention_label: "URI versioning".into(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         },
     ));
     row
@@ -2059,5 +2062,17 @@ fn two_bounds_on_one_row_are_worded_in_order_and_joined() {
             "capped from critical by the rule's ceiling (at most high), then capped from high: \
              a consistency deviation is at most medium"
         )
+    );
+}
+
+/// Review round 1, item 6: the same severity in another case is no change.
+#[test]
+fn a_severity_in_another_case_is_no_change() {
+    let row = plain();
+    let ctx = ctx();
+    let upper = row.severity.to_uppercase();
+    assert_eq!(
+        edit_request(&row, EditField::Severity, &upper, "why", &ctx, "r"),
+        Err(EditRefusal::Unchanged)
     );
 }

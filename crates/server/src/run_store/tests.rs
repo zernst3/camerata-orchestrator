@@ -12,6 +12,7 @@ fn response(text: &str, cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -116,6 +117,8 @@ fn models() -> ModelsRecord {
         resolved: true,
         group_review: String::new(),
         finder: String::new(),
+        finder_model: String::new(),
+        scan_exclusions: Vec::new(),
     }
 }
 
@@ -132,6 +135,7 @@ fn key() -> AiScanKey {
 
 fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: models(),
@@ -343,6 +347,7 @@ async fn a_content_failure_sets_aside_the_replies_of_its_stage_and_nothing_else(
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -387,6 +392,7 @@ async fn a_rejected_reply_of_a_failed_stage_is_asked_again_on_the_resume() {
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -531,6 +537,8 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
             ai_scan_key: key,
             models,
             trees: t,
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
         })
     };
     assert_eq!(ok(&record, &key(), &models(), trees(repo.path())), Ok(()));
@@ -568,6 +576,17 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
         ok(&record, &key(), &other_models, trees(repo.path())),
         Err(RunStoreError::Refused(m)) if m.contains("different models")
     ));
+    // Round 1 item 10: the Excluded by agreement list is part of the run's identity. Pieces
+    // checkpointed under another list may hold findings in files that are now excluded (or miss
+    // ones that are no longer), so a resume with a different list is refused.
+    let mut other_list = models();
+    other_list.scan_exclusions = vec!["app/seeds/**".to_string()];
+    let refused = ok(&record, &key(), &other_list, trees(repo.path()));
+    assert!(
+        matches!(&refused, Err(RunStoreError::Refused(m))
+            if m.contains("Excluded by agreement") && m.contains("start a new run")),
+        "{refused:?}"
+    );
     let mut other_rules = key();
     other_rules.directives_fingerprint = "fp2".to_string();
     assert!(matches!(
@@ -580,12 +599,50 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
         ok(&record, &other_prompt, &models(), trees(repo.path())),
         Err(RunStoreError::Refused(m)) if m.contains("scan asks the model")
     ));
-    let mut other_engine = record.clone();
-    other_engine.engine_version = "9.9.9+prompt1".to_string();
-    assert!(matches!(
-        ok(&other_engine, &key(), &models(), trees(repo.path())),
-        Err(RunStoreError::Refused(m)) if m.contains("another version")
-    ));
+}
+
+/// The tree-changed refusal names the changed paths of that repo, at most twenty, then how many
+/// more. An operator-only message.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_tree_changed_refusal_names_the_changed_paths_up_to_twenty() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    drop(store);
+    let record = read_record(&id).unwrap();
+    let refuse_now = || {
+        check_resume(&ResumeCheck {
+            record: &record,
+            ai_scan_key: &key(),
+            models: &models(),
+            trees: vec![("acme/api".to_string(), tree_state(repo.path()))],
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
+        })
+    };
+    // One stray file: named.
+    std::fs::write(repo.path().join("acme-stray.txt"), "x\n").unwrap();
+    let one = refuse_now();
+    assert!(
+        matches!(&one, Err(RunStoreError::Refused(m))
+            if m.contains("changed paths now") && m.contains("acme-stray.txt")
+                && !m.contains("more")),
+        "{one:?}"
+    );
+    // An edit and twenty-five strays: twenty named, then "and 6 more".
+    std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
+    for n in 1..=25 {
+        std::fs::write(repo.path().join(format!("acme-stray-{n:02}.txt")), "x\n").unwrap();
+    }
+    let many = refuse_now();
+    let Err(RunStoreError::Refused(message)) = &many else {
+        panic!("{many:?}")
+    };
+    // 27 changed paths in all: the edit, 26 strays (the first one too).
+    assert!(message.contains("and 7 more"), "{message}");
+    assert_eq!(message.matches(".txt").count(), 20, "{message}");
 }
 
 #[test]
@@ -614,6 +671,8 @@ fn the_tree_a_run_left_behind_is_accepted_and_a_complete_run_is_a_no_op() {
             ai_scan_key: &key(),
             models: &models(),
             trees: vec![("acme/api".to_string(), tree_state(repo.path()))],
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
         })
     };
     assert_eq!(
@@ -655,6 +714,7 @@ fn finish_marks_failed_parts_failed_and_not_run_parts_pending() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         not_run: vec![FinishNotRun {
             repo: "acme/api".to_string(),
@@ -754,6 +814,8 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         project_id: None,
         attempt: 1,
         engine_version: engine_version(),
+        pin: None,
+        reruns: Vec::new(),
         project_key: project.to_string(),
         repos: vec![RepoRecord {
             name: "a/b".to_string(),
@@ -772,6 +834,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         plan: Vec::new(),
         incomplete_reasons: Vec::new(),
         notes: Vec::new(),
+        segments: Vec::new(),
     };
     std::fs::write(dir.join("run.json"), serde_json::to_vec(&record).unwrap()).unwrap();
 }
@@ -812,6 +875,51 @@ fn cleanup_keeps_the_newest_and_never_drops_an_incomplete_run_without_a_newer_co
     let deleted = prune_runs_in(r, "p", 3);
     assert!(deleted.contains(&"20261004".to_string()), "{deleted:?}");
     assert!(!deleted.contains(&"20261002".to_string()), "{deleted:?}");
+}
+
+/// A client engagement's run holds the only copy of its sealed report until the app imports it:
+/// the cleanup never deletes it, however many newer runs there are. An internal run beside it
+/// still goes.
+#[test]
+fn cleanup_never_deletes_a_client_engagement_run() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    for id in [
+        "20261006", "20261005", "20261004", "20261003", "20261002", "20261001",
+    ] {
+        make_run(r, id, "p", "c0", RunStatus::Complete);
+    }
+    let record = r.join("20261001").join("run.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    value["args"] = serde_json::json!({ "client_engagement": true });
+    std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+    let deleted = prune_runs_in(r, "p", 3);
+    assert!(
+        r.join("20261001").exists(),
+        "the client engagement's run is kept: {deleted:?}"
+    );
+    assert!(deleted.contains(&"20261002".to_string()), "{deleted:?}");
+}
+
+/// A write that fails at the rename leaves no temporary file behind: it holds the content.
+#[test]
+fn a_failed_atomic_write_removes_its_temporary_file() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join(REPORT_FILE);
+    // A folder that is not empty squats on the name, so the rename fails.
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("occupied"), b"x").unwrap();
+    assert!(write_atomic(&target, b"excerpt of client code").is_err());
+    let names: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec![REPORT_FILE.to_string()],
+        "no temporary file is left"
+    );
 }
 
 #[tokio::test]
@@ -1060,6 +1168,495 @@ mod batches {
         })
         .await;
     }
+
+    const CREDIT: &str = "Your credit balance is too low to access the Anthropic API.";
+
+    /// A batch API that answers every item with a reply costing $0.50, except the items named in
+    /// `credit_fail`, which come back as a credit error. Each submit gets its own id and the fake
+    /// keeps what each one was sent.
+    #[derive(Default)]
+    struct Ledger {
+        sent: std::sync::Mutex<Vec<Vec<String>>>,
+        credit_fail: std::sync::Mutex<Vec<String>>,
+        /// Items whose next fetched row is a transient error (taken off the list as it is used).
+        transient_fail: std::sync::Mutex<Vec<String>>,
+        /// Items whose row is a refusal: an error with what the call was billed.
+        refused: std::sync::Mutex<Vec<String>>,
+        /// Items the next fetched batch leaves out (taken off the list as it is used).
+        omitted: std::sync::Mutex<Vec<String>>,
+        fetches: AtomicUsize,
+        realtime: Option<Scripted>,
+    }
+
+    impl Ledger {
+        fn failing(ids: &[&str]) -> Self {
+            Self {
+                credit_fail: std::sync::Mutex::new(ids.iter().map(|s| s.to_string()).collect()),
+                realtime: Some(Scripted::new()),
+                ..Self::default()
+            }
+        }
+        fn restore_credit(&self) {
+            self.credit_fail.lock().unwrap().clear();
+        }
+        fn fail_credit(&self, ids: &[&str]) {
+            *self.credit_fail.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn fail_once(&self, ids: &[&str]) {
+            *self.transient_fail.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn omit_once(&self, ids: &[&str]) {
+            *self.omitted.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn refuse(&self, ids: &[&str]) {
+            *self.refused.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn sent(&self) -> Vec<Vec<String>> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BatchApi for Ledger {
+        fn has_api_key(&self) -> bool {
+            true
+        }
+        fn realtime(&self) -> &dyn LlmPort {
+            self.realtime.as_ref().unwrap()
+        }
+        async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+            None
+        }
+        async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push(items.into_iter().map(|i| i.custom_id).collect());
+            Ok(format!("msgbatch_{}", sent.len()))
+        }
+        async fn poll(&self, _id: &str) -> anyhow::Result<BatchStatus> {
+            Ok(BatchStatus {
+                processing_status: "ended".to_string(),
+                request_counts: BatchRequestCounts::default(),
+            })
+        }
+        async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            let which: usize = id.trim_start_matches("msgbatch_").parse().unwrap();
+            let ids = self.sent.lock().unwrap()[which - 1].clone();
+            let failing = self.credit_fail.lock().unwrap().clone();
+            let refused = self.refused.lock().unwrap().clone();
+            let left_out: Vec<String> = std::mem::take(&mut *self.omitted.lock().unwrap());
+            Ok(ids
+                .into_iter()
+                .filter(|c| !left_out.contains(c))
+                .map(|custom_id| {
+                    if refused.contains(&custom_id) {
+                        return BatchResultRow {
+                            response: None,
+                            error: Some("the model declined to answer".to_string()),
+                            billed: Some(response("", 0.5)),
+                            custom_id,
+                        };
+                    }
+                    {
+                        let mut once = self.transient_fail.lock().unwrap();
+                        if let Some(at) = once.iter().position(|c| *c == custom_id) {
+                            once.remove(at);
+                            return BatchResultRow {
+                                response: None,
+                                error: Some("internal server error, please retry".to_string()),
+                                billed: None,
+                                custom_id,
+                            };
+                        }
+                    }
+                    let failed = failing.contains(&custom_id);
+                    BatchResultRow {
+                        response: (!failed).then(|| response(r#"{"findings":[]}"#, 0.5)),
+                        error: failed.then(|| CREDIT.to_string()),
+                        billed: None,
+                        custom_id,
+                    }
+                })
+                .collect())
+        }
+    }
+
+    fn named(cid: &str) -> BatchItem {
+        let mut i = item();
+        i.custom_id = cid.to_string();
+        i.params.messages[0].content = serde_json::json!(format!("ask {cid}"));
+        i
+    }
+
+    fn three() -> Vec<BatchItem> {
+        vec![named("i1"), named("i2"), named("i3")]
+    }
+
+    fn ids_of(rows: &[BatchResultRow]) -> Vec<String> {
+        rows.iter().map(|r| r.custom_id.clone()).collect()
+    }
+
+    /// Attempt one: the three items go out and the second comes back as a credit error. The
+    /// store is reopened (a new attempt) and returned with the fake.
+    async fn after_a_credit_stop() -> (Arc<RunStore>, Arc<Ledger>, tempfile::TempDir) {
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(Ledger::failing(&["i2"]));
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let id = api.submit(three()).await.unwrap();
+        let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+        assert_eq!(rows.iter().filter(|r| r.response.is_some()).count(), 2);
+        drop(api);
+        (reopen(store), fake, repo)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_resume_sends_only_the_rows_without_a_good_reply_and_pays_for_the_rest_once() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            let spent_before = journal::stored_spend(store.dir());
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()]
+                ],
+                "exactly one new batch, with only the item that had no good reply"
+            );
+            assert_eq!(api.poll(&id).await.unwrap().processing_status, "ended");
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows
+                .iter()
+                .all(|r| r.response.is_some() && r.error.is_none()));
+            assert_eq!(
+                fake.fetches.load(Ordering::SeqCst),
+                2,
+                "the stored rows were not fetched again"
+            );
+            // The stored spend is the two good rows of the first batch plus the one new row.
+            let spent = journal::stored_spend(store.dir());
+            assert!((spent_before - 1.0).abs() < 1e-9, "{spent_before}");
+            assert!((spent - 1.5).abs() < 1e-9, "{spent}");
+            // Fetched again, it is answered from the store, and a stage's next resume sends nothing.
+            let again = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&again), ["i1", "i2", "i3"]);
+            drop(api);
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 2, "all rows are good: no inner submit");
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_resent_row_that_fails_again_stops_cleanly_and_a_third_attempt_sends_it_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            // The credit is still out on the second attempt.
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows[0].response.is_some() && rows[2].response.is_some());
+            assert!(
+                rows[1].response.is_none(),
+                "the failed row is still a failure"
+            );
+            assert_eq!(rows[1].error.as_deref(), Some(CREDIT));
+            drop(api);
+
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            assert_eq!(
+                fake.sent().into_iter().skip(1).collect::<Vec<_>>(),
+                vec![vec!["i2".to_string()], vec!["i2".to_string()]],
+                "the third attempt sends the row again, alone"
+            );
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+            assert!(
+                (journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9,
+                "the rows with a good reply are paid once"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_batch_sent_for_failed_rows_and_not_fetched_is_not_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            fake.restore_credit();
+            let first = {
+                let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+                api.submit(three()).await.unwrap()
+                // The process dies here: the new batch was submitted, not fetched.
+            };
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store);
+            let second = api.submit(three()).await.unwrap();
+            assert_eq!(
+                second, first,
+                "the batch that may be running is the one returned"
+            );
+            assert_eq!(fake.sent().len(), 2, "nothing was submitted a third time");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn after_a_restart_the_resent_batch_fetched_by_id_still_returns_the_stored_good_rows() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            fake.restore_credit();
+            let resend = {
+                let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+                api.submit(three()).await.unwrap()
+            };
+            // A new process: the stage polls and fetches by id and never calls submit.
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            assert_eq!(api.poll(&resend).await.unwrap().processing_status, "ended");
+            let rows = api.fetch(&resend, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+            assert_eq!(fake.sent().len(), 2, "nothing was submitted again");
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    fn one(cid: &str) -> Vec<BatchItem> {
+        vec![named(cid)]
+    }
+
+    /// A batch of three in which `i2` had a transient error and `i3` was refused for credit; the
+    /// stage then sent `i2` again as a batch of its own. Returns the id of that retry batch.
+    async fn stage_retry_then_credit_stop(
+        fetch_retry: bool,
+    ) -> (Arc<RunStore>, Arc<Ledger>, String, tempfile::TempDir) {
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(Ledger::failing(&["i3"]));
+        fake.fail_once(&["i2"]);
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let id = api.submit(three()).await.unwrap();
+        api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+        let retry = api.submit(one("i2")).await.unwrap();
+        if fetch_retry {
+            let rows = api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].response.is_some(), "the stage's retry answered");
+        }
+        drop(api);
+        (reopen(store), fake, retry, repo)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_row_the_stage_retried_itself_is_not_sent_again_by_the_resume() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _retry, _repo) = stage_retry_then_credit_stop(true).await;
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()],
+                    vec!["i3".to_string()],
+                ],
+                "only the credit row goes out again; the transient row is the stage's"
+            );
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(
+                rows[1].response.is_none(),
+                "the stored transient row is replayed"
+            );
+            // The stage sends i2 again, as it did before: its own stored batch answers it.
+            let again = api.submit(one("i2")).await.unwrap();
+            let rows = api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].response.is_some());
+            assert_eq!(fake.sent().len(), 3, "nothing was paid for twice");
+            // i1 + i2 (retry) + i3 (resent) once each.
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn an_item_missing_from_the_head_and_retried_by_the_stage_is_not_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&["i3"]));
+            fake.omit_once(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i3"], "the batch left i2 out");
+            // The stage sends the missing item again as a batch of its own, and it answers.
+            let retry = api.submit(one("i2")).await.unwrap();
+            api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            drop(api);
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()],
+                    vec!["i3".to_string()],
+                ],
+                "only the credit row goes out again; the missing item is the stage's to retry"
+            );
+            let again = api.submit(one("i2")).await.unwrap();
+            api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 3, "the stored retry answers it");
+            // i1 + i2 (retry) + i3 (resent) once each.
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_stage_retry_that_was_not_fetched_at_the_stop_returns_the_same_id() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, retry, _repo) = stage_retry_then_credit_stop(false).await;
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            api.submit(three()).await.unwrap();
+            let again = api.submit(one("i2")).await.unwrap();
+            assert_eq!(
+                again, retry,
+                "the batch that may be running is the one returned"
+            );
+            assert_eq!(fake.sent().len(), 3, "the retry was not submitted again");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_stage_retry_that_failed_for_credit_is_sent_again_once_through_its_own_chain() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&[]));
+            fake.fail_once(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            fake.fail_credit(&["i2"]);
+            let retry = api.submit(one("i2")).await.unwrap();
+            let rows = api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].error.is_some());
+            drop(api);
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store);
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            let again = api.submit(one("i2")).await.unwrap();
+            let rows = api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].response.is_some());
+            assert_eq!(
+                fake.sent().iter().filter(|b| **b == ["i2"]).count(),
+                2,
+                "the retry batch and exactly one resend of it"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_refusal_row_is_replayed_and_never_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&[]));
+            fake.refuse(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            drop(api);
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 1, "no inner submit for a refusal");
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows[1].response.is_none() && rows[1].billed.is_some());
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_resend_whose_link_was_never_written_is_adopted_not_submitted_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            fake.restore_credit();
+            let resend = {
+                let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+                api.submit(three()).await.unwrap()
+            };
+            // The process was killed after the new batch's record and before the link: take the
+            // link off the chain's first file.
+            for entry in std::fs::read_dir(store.dir().join("batches")).unwrap() {
+                let path = entry.unwrap().path();
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                if !v["follow"].is_null() {
+                    v["follow"] = serde_json::Value::Null;
+                    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+                }
+            }
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store);
+            let adopted = api.submit(three()).await.unwrap();
+            assert_eq!(adopted, resend, "the batch already submitted is adopted");
+            assert_eq!(fake.sent().len(), 2, "nothing was submitted a third time");
+            let rows = api.fetch(&adopted, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+        })
+        .await;
+    }
 }
 
 #[test]
@@ -1077,6 +1674,7 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         incomplete_reasons: vec!["a part failed".to_string()],
         ..FinishOutcome::default()
@@ -1106,6 +1704,7 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
 /// A cockpit run made for the listing tests: `origin` Cockpit, the repo `repo` as "acme/api".
 fn cockpit_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: models(),
@@ -1161,6 +1760,7 @@ fn the_listing_tells_live_interrupted_incomplete_and_complete_apart() {
             class: "transport".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         ..FinishOutcome::default()
     });
@@ -1207,6 +1807,7 @@ fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
     let other = git_repo();
     drop(cockpit_run(&repo));
     let stranger = RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-2".to_string(),
         repos: vec![("acme/other".to_string(), other.path().to_path_buf())],
         models: models(),
@@ -1245,6 +1846,7 @@ fn the_models_record_stores_the_resolved_ids_not_the_raw_picks() {
 
     // Picks are kept; a blank pick is no pick; an explicit fix model wins.
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         fix_model: Some("claude-opus-5".to_string()),
         ..crate::cost_cap::RunControls::default()
     };
@@ -1298,6 +1900,8 @@ fn a_changed_default_is_noticed_on_resume() {
             ai_scan_key: &key(),
             models: now,
             trees: trees(),
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
         })
     };
     assert_eq!(check(&models()), Ok(()));
@@ -1403,6 +2007,7 @@ fn a_group_review_pass_name_maps_to_the_group_review_part() {
             class: "content".to_string(),
             files: Vec::new(),
             scope_note: false,
+            per_reply_rejections: false,
         }],
         incomplete_reasons: vec!["x".to_string()],
         ..FinishOutcome::default()
@@ -1478,6 +2083,7 @@ async fn one_failed_rule_group_does_not_set_aside_every_stage2_reply_of_the_repo
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
             ..FinishOutcome::default()
         });
@@ -1660,6 +2266,8 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
                 truncated,
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
+                ended_unix_ms: None,
             }),
             error: None,
             class: None,
@@ -1675,6 +2283,7 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
         kind,
         repo,
         files,
+        owner: None,
         entries,
     };
     let dir = store.dir().join("calls");
@@ -1923,6 +2532,7 @@ fn a_cut_temporary_file_is_never_read_as_a_record() {
         kind: PartKind::Other,
         repo: String::new(),
         files: Vec::new(),
+        owner: None,
         entries: Default::default(),
     };
     write_atomic(
@@ -2122,6 +2732,64 @@ async fn the_estimate_and_the_store_name_the_whole_stored_spend() {
     .await;
 }
 
+/// Answers every call with a model refusal that carries what it was billed ($0.60 on Opus 5.5).
+struct BilledRefuser;
+
+#[async_trait::async_trait]
+impl LlmPort for BilledRefuser {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Err(crate::llm::refusal_error_billed(
+            &serde_json::json!({
+                "model": "claude-opus-5-5",
+                "content": [],
+                "stop_reason": "refusal",
+                "usage": { "input_tokens": 100_000, "output_tokens": 10_000 }
+            }),
+            "claude-opus-5-5",
+            "api",
+            crate::llm::PriceBasis {
+                batch: false,
+                cache_ttl: crate::llm::CacheTtl::FiveMinutes,
+            },
+        )
+        .expect("a refusal stop_reason is an error"))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_billed_refusal_is_in_the_stored_spend_a_resume_starts_from() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        {
+            let j = JournalLlm::new(&BilledRefuser, store.clone());
+            assert!(j.complete(ask("calibrate this")).await.is_err());
+            assert!(j.complete(ask("judge this")).await.is_err());
+        }
+        let id = store.run_id();
+        drop(store);
+        let reopened = RunStore::open(&id).unwrap();
+        assert!(
+            (reopened.stored_usd() - 1.20).abs() < 1e-6,
+            "two refusals billed $0.60 each, so the resumed meter starts at $1.20: {}",
+            reopened.stored_usd()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_call_of_a_finished_part_is_not_counted_as_to_send_again() {
@@ -2225,6 +2893,7 @@ async fn the_model_the_backend_reported_is_stored_beside_the_requested_one() {
 
 fn controls_with_group_review(model: &str) -> crate::cost_cap::RunControls {
     crate::cost_cap::RunControls {
+        scope: Default::default(),
         review: camerata_api_types::project::ReviewSettings {
             group_review_model: model.to_string(),
             ..camerata_api_types::project::ReviewSettings::default()
@@ -2257,7 +2926,7 @@ fn the_models_record_stores_the_resolved_group_review_model() {
     );
 }
 
-/// A run started on Fable 5.1 and resumed with no model flag (the default is now Fable 5.2)
+/// A run started on Fable 5.1 and resumed with no model flag (the default is now Opus 5.5)
 /// makes its remaining group review calls on Fable 5.1: no mixed models in one run.
 #[test]
 fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on() {
@@ -2271,7 +2940,7 @@ fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on()
     let mut resumed = crate::cost_cap::RunControls::default();
     assert_eq!(
         resumed.group_review_model_for(),
-        "claude-fable-5-2",
+        "claude-opus-5-5",
         "the default has moved on"
     );
     let notice = started
@@ -2296,7 +2965,7 @@ fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on()
         why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
         "{why}"
     );
-    assert_eq!(other.group_review_model_for(), "claude-fable-5-2");
+    assert_eq!(other.group_review_model_for(), "claude-opus-5-5");
 }
 
 /// A run saved before the group reviewer was recorded has nothing to keep: the current pick stands.
@@ -2423,6 +3092,7 @@ fn controls_with_finder(
     finder: crate::ai_audit::agent_finder::FinderChoice,
 ) -> crate::cost_cap::RunControls {
     crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder,
         ..crate::cost_cap::RunControls::default()
     }
@@ -2470,4 +3140,756 @@ fn the_finder_hold_keeps_the_recorded_finder_and_defaults_to_the_engine() {
     let mut c = controls_with_finder(FinderChoice::Agent);
     assert_eq!(record("agent").hold_finder(&mut c), None);
     assert_eq!(c.finder, FinderChoice::Agent);
+}
+
+// ---- a resumed agent run keeps its finder model ----
+
+/// Outside review round 1: a run started on one finder model finishes on it after the built-in
+/// default moves, and says so; a different explicit pick is refused; an engine run has none.
+#[test]
+fn the_finder_model_hold_keeps_the_recorded_model_and_says_so() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let record = |model: &str| ModelsRecord {
+        finder: "agent".to_string(),
+        finder_model: model.to_string(),
+        ..models()
+    };
+    // Recorded from the picks: the resolved model of an agent run, none for an engine run.
+    let agent = controls_with_finder(FinderChoice::Agent);
+    let rec = ModelsRecord::from_picks(None, None, &agent, "api", "parallel");
+    assert_eq!(rec.finder_model, agent.finder_model_for());
+    let engine = controls_with_finder(FinderChoice::Engine);
+    assert_eq!(
+        ModelsRecord::from_picks(None, None, &engine, "api", "parallel").finder_model,
+        ""
+    );
+    // The default is Opus now; the run started on Fable 5.2: it stays on Fable 5.2.
+    let mut c = controls_with_finder(FinderChoice::Agent);
+    let line = record("claude-fable-5-2")
+        .hold_finder_model(&mut c)
+        .unwrap();
+    assert_eq!(c.finder_model_for(), "claude-fable-5-2");
+    assert_eq!(
+        line.as_deref(),
+        Some("The finder stays on claude-fable-5-2, the model this run started with.")
+    );
+    // The same explicit pick is fine; a different one is refused.
+    let mut same = controls_with_finder(FinderChoice::Agent);
+    same.finder_model = Some("claude-fable-5-2".to_string());
+    assert!(record("claude-fable-5-2")
+        .hold_finder_model(&mut same)
+        .is_ok());
+    let mut other = controls_with_finder(FinderChoice::Agent);
+    other.finder_model = Some("claude-opus-5-5".to_string());
+    let why = record("claude-fable-5-2")
+        .hold_finder_model(&mut other)
+        .unwrap_err();
+    assert!(
+        why.contains("claude-fable-5-2") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    // An older run recorded none and the resume names none: it keeps Fable 5.2, the default
+    // when it started, and the line says so.
+    let mut old = controls_with_finder(FinderChoice::Agent);
+    let line = record("").hold_finder_model(&mut old).unwrap().unwrap();
+    assert!(
+        line.contains("claude-fable-5-2") && line.contains("recorded none"),
+        "{line}"
+    );
+    assert_eq!(old.finder_model_for(), "claude-fable-5-2");
+    // With an explicit pick on such a run, the pick stands.
+    let mut picked = controls_with_finder(FinderChoice::Agent);
+    picked.finder_model = Some("claude-opus-5-5".to_string());
+    let line = record("").hold_finder_model(&mut picked).unwrap().unwrap();
+    assert!(line.contains("did not record a finder model"), "{line}");
+    assert_eq!(picked.finder_model_for(), "claude-opus-5-5");
+    // An engine run has no finder model to hold.
+    let mut e = controls_with_finder(FinderChoice::Engine);
+    assert_eq!(
+        record("claude-fable-5-2").hold_finder_model(&mut e),
+        Ok(None)
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_finished_session_leaves_one_segment_and_a_resume_appends_a_second() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    assert_eq!(
+        read_record(&id).unwrap().segments.len(),
+        1,
+        "the session's segment is on disk from the start"
+    );
+    store.finish(&FinishOutcome::default());
+    let first = read_record(&id).unwrap().segments;
+    assert_eq!(first.len(), 1, "finish closes the session's segment");
+    assert!(first[0].finished_unix_ms >= first[0].started_unix_ms);
+    assert!(first[0].started_unix_ms > 0);
+
+    // The process ends; a resume opens the run again and finishes it.
+    let resumed = reopen(store);
+    let opened = read_record(&id).unwrap().segments;
+    assert_eq!(
+        opened.len(),
+        2,
+        "the resume's own segment is on disk at once"
+    );
+    assert_eq!(
+        opened[0], first[0],
+        "opening a resume changes no earlier segment"
+    );
+    resumed.finish(&FinishOutcome::default());
+    let both = read_record(&id).unwrap().segments;
+    assert_eq!(both.len(), 2, "the resume appended its own segment");
+    assert_eq!(both[0], first[0], "the first segment is never overwritten");
+    assert!(both[1].started_unix_ms >= first[0].finished_unix_ms);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_session_that_never_reaches_finish_still_records_its_segment_end() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    // A failed or cancelled job drops the store without `finish`.
+    drop(store);
+    let segments = read_record(&id).unwrap().segments;
+    assert_eq!(segments.len(), 1, "the drop closed the open segment");
+    assert!(segments[0].finished_unix_ms >= segments[0].started_unix_ms);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_segment_is_closed_once_whichever_comes_first() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.end_segment();
+    store.end_segment();
+    store.finish(&FinishOutcome::default());
+    drop(store);
+    assert_eq!(read_record(&id).unwrap().segments.len(), 1);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_run_saved_before_segments_existed_still_loads() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.finish(&FinishOutcome::default());
+    let path = runs_dir().join(&id).join("run.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(value.as_object_mut().unwrap().remove("segments").is_some());
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(read_record(&id).unwrap().segments.is_empty());
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_killed_session_leaves_a_segment_with_the_end_of_its_last_save() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    let dir = store.dir().to_path_buf();
+    let at_create = read_record(&id).unwrap().segments[0].elapsed_ms;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    store.persist().unwrap();
+    // What a kill leaves behind is run.json as the last save wrote it: no destructor runs.
+    let left_by_the_kill = std::fs::read(dir.join("run.json")).unwrap();
+    let killed = read_record(&id).unwrap().segments;
+    assert_eq!(killed.len(), 1, "{killed:?}");
+    assert!(
+        killed[0].elapsed_ms >= at_create + 30,
+        "the save moved the end: {at_create} then {killed:?}"
+    );
+    assert_eq!(
+        killed[0].finished_unix_ms,
+        killed[0].started_unix_ms + killed[0].elapsed_ms,
+        "the end is the last save's"
+    );
+
+    // In one process the only way to release the lock is to drop the holder (which would close
+    // the segment), so put the killed process's file and its dead lock back, then resume.
+    let dead = {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    drop(store);
+    std::fs::write(dir.join("run.json"), left_by_the_kill).unwrap();
+    let stale = serde_json::json!({"pid": dead, "started_at": now(), "heartbeat_at": now()});
+    std::fs::write(dir.join("lock.json"), stale.to_string()).unwrap();
+    let resumed = RunStore::open(&id).unwrap();
+    let two = read_record(&id).unwrap().segments;
+    assert_eq!(two.len(), 2, "{two:?}");
+    assert_eq!(
+        two[0], killed[0],
+        "the killed session's segment is kept as saved"
+    );
+    drop(resumed);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_session_that_did_no_work_can_take_its_segment_back_and_earlier_ones_stay() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.finish(&FinishOutcome::default());
+    let first = read_record(&id).unwrap().segments;
+    let refused = reopen(store);
+    assert_eq!(read_record(&id).unwrap().segments.len(), 2);
+    refused.discard_segment();
+    drop(refused);
+    assert_eq!(read_record(&id).unwrap().segments, first);
+}
+
+#[test]
+fn the_saved_journal_keeps_a_calls_timing_and_an_older_line_still_loads() {
+    let mut timed = response("answer", 0.1);
+    timed.elapsed_ms = Some(1_234);
+    let stored = journal::StoredResponse::of(&timed);
+    assert_eq!(stored.elapsed_ms, Some(1_234));
+    assert!(stored.ended_unix_ms.is_some_and(|t| t > 0));
+    let back: journal::StoredResponse =
+        serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+    assert_eq!(back.elapsed_ms, Some(1_234), "the timing survives the save");
+    // A replay adds nothing to the live telemetry of the resuming session.
+    assert_eq!(back.replayed().elapsed_ms, None);
+
+    // A journal line written before the fields existed.
+    let mut value = serde_json::to_value(&stored).unwrap();
+    let object = value.as_object_mut().unwrap();
+    assert!(object.remove("elapsed_ms").is_some());
+    assert!(object.remove("ended_unix_ms").is_some());
+    let old: journal::StoredResponse = serde_json::from_value(value).expect("an old line loads");
+    assert_eq!((old.elapsed_ms, old.ended_unix_ms), (None, None));
+}
+
+// ── The engine pin (V1 item 39) ──────────────────────────────────────────────────────────────
+
+fn build_with(commit: Option<&str>, dirty: bool) -> engine_pin::BuildId {
+    engine_pin::BuildId {
+        commit: commit.map(str::to_string),
+        dirty,
+        ..engine_pin::BuildId::clean_test_build()
+    }
+}
+
+/// A saved run on the test build, and the result of resuming it on `now` with `corpus` loaded.
+fn resume_on(
+    record: &RunRecord,
+    now: &engine_pin::BuildId,
+    corpus: Option<&str>,
+) -> Result<(), RunStoreError> {
+    check_resume(&ResumeCheck {
+        record,
+        ai_scan_key: &record.ai_scan_key,
+        models: &record.models,
+        trees: record
+            .repos
+            .iter()
+            .map(|r| (r.name.clone(), tree_state(std::path::Path::new(&r.dir))))
+            .collect(),
+        build: now,
+        corpus_version: corpus,
+    })
+}
+
+fn pinned_record() -> (
+    tempfile::TempDir,
+    camerata_test_env::EnvGuard,
+    tempfile::TempDir,
+    RunRecord,
+) {
+    let (s, g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    drop(store);
+    (s, g, repo, read_record(&id).unwrap())
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn the_run_saves_the_build_it_started_on() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let pin = record.pin.expect("a new run records its pin");
+    assert_eq!(pin.build, engine_pin::BuildId::current());
+    assert!(pin.build.commit.is_some());
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_resume_on_the_same_build_still_resumes() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let pin = record.pin.clone().unwrap();
+    assert_eq!(
+        resume_on(&record, &pin.build, Some(&pin.corpus_version)),
+        Ok(())
+    );
+    assert_eq!(resume_on(&record, &pin.build, None), Ok(()));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_resume_on_another_commit_is_refused_naming_both_builds() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let other = build_with(Some(&"b".repeat(40)), false);
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &other, None) else {
+        panic!("a different commit must refuse");
+    };
+    assert!(m.contains("must finish it"), "{m}");
+    assert!(
+        m.contains(&"a".repeat(12)) && m.contains(&"b".repeat(12)),
+        "{m}"
+    );
+    assert!(
+        !m.contains(&"a".repeat(13)),
+        "twelve characters, not the whole hash: {m}"
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_run_saved_without_a_pin_cannot_be_resumed() {
+    let (_s, _g, _repo, mut record) = pinned_record();
+    record.pin = None;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &engine_pin::BuildId::current(), None)
+    else {
+        panic!("no pin must refuse");
+    };
+    assert!(
+        m.contains("before Camerata recorded which build ran it"),
+        "{m}"
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_build_with_no_commit_cannot_continue_a_saved_inspection() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &build_with(None, false), None) else {
+        panic!("no commit must refuse");
+    };
+    assert!(m.contains("does not know which build it is"), "{m}");
+    assert!(m.contains(&"a".repeat(12)), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_changed_rule_library_or_prompt_schema_refuses_a_resume() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let now = engine_pin::BuildId::current();
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &now, Some("sha256:other")) else {
+        panic!("a different corpus must refuse");
+    };
+    assert!(m.contains("rule library changed"), "{m}");
+
+    let mut newer = now.clone();
+    newer.prompt_schema += 1;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &newer, None) else {
+        panic!("a different prompt schema must refuse");
+    };
+    assert!(
+        m.contains("questions Camerata asks the model changed"),
+        "{m}"
+    );
+    let mut newer = now;
+    newer.clone_prompt_schema += 1;
+    assert!(matches!(
+        resume_on(&record, &newer, None),
+        Err(RunStoreError::Refused(m)) if m.contains("questions Camerata asks")
+    ));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_clean_inspection_is_not_continued_on_a_dirty_build_of_the_same_commit() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let dirty = build_with(Some(&"a".repeat(40)), true);
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &dirty, None) else {
+        panic!("a clean run on a dirty build must refuse");
+    };
+    assert!(m.contains("started on a clean build"), "{m}");
+    assert!(m.contains(&"a".repeat(12)), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_dirty_inspection_resumes_on_a_dirty_build_of_the_same_commit_and_says_so() {
+    let (_s, _g, repo, mut record) = pinned_record();
+    record.pin.as_mut().unwrap().build.dirty = true;
+    let dirty = build_with(Some(&"a".repeat(40)), true);
+    assert_eq!(resume_on(&record, &dirty, None), Ok(()));
+    let note = engine_pin::dirty_note(record.pin.as_ref(), &dirty).expect("a note");
+    assert!(note.contains("uncommitted changes"), "{note}");
+    // A clean saved build gets no note (it is refused on a dirty one instead).
+    let mut clean = record.clone();
+    clean.pin.as_mut().unwrap().build.dirty = false;
+    assert_eq!(engine_pin::dirty_note(clean.pin.as_ref(), &dirty), None);
+    // Through the one implementation of resume: the note lands on the run.
+    let mut saved = read_record(&record.run_id).unwrap();
+    saved.pin.as_mut().unwrap().build.dirty = true;
+    std::fs::write(
+        runs_dir().join(&record.run_id).join("run.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let pin = engine_pin::EnginePin {
+        build: dirty,
+        ..record.pin.clone().unwrap()
+    };
+    let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+    let (store, _) = open_for_resume(&record.run_id, &sources, &key(), &models(), &pin).unwrap();
+    assert!(store
+        .record()
+        .notes
+        .iter()
+        .any(|n| n.contains("uncommitted changes")));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_saved_run_with_no_commit_says_to_start_again_not_to_open_an_unknown_build() {
+    let (_s, _g, _repo, mut record) = pinned_record();
+    record.pin.as_mut().unwrap().build.commit = None;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &engine_pin::BuildId::current(), None)
+    else {
+        panic!("a saved run with no commit must refuse");
+    };
+    assert!(m.contains("did not record its commit"), "{m}");
+    assert!(m.contains("Start it again"), "{m}");
+    assert!(!m.contains("(unknown)"), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn open_for_resume_refuses_another_build_before_opening_the_run() {
+    let (_s, _g, repo, record) = pinned_record();
+    let pin = engine_pin::EnginePin {
+        build: build_with(Some(&"c".repeat(40)), false),
+        ..record.pin.clone().unwrap()
+    };
+    let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+    let result = open_for_resume(&record.run_id, &sources, &key(), &models(), &pin);
+    assert!(
+        matches!(&result, Err(RunStoreError::Refused(m)) if m.contains("must finish it")),
+        "{:?}",
+        result.err()
+    );
+    // The preview runs the build checks too, on the running build.
+    let mut stored = read_record(&record.run_id).unwrap();
+    stored.pin.as_mut().unwrap().build.commit = Some("d".repeat(40));
+    std::fs::write(
+        runs_dir().join(&record.run_id).join("run.json"),
+        serde_json::to_vec(&stored).unwrap(),
+    )
+    .unwrap();
+    let preview = preview_resume(&record.run_id).unwrap();
+    assert!(preview
+        .refusal
+        .is_some_and(|m| m.contains("must finish it")));
+}
+
+#[test]
+fn a_changed_clone_judge_pick_is_put_back_to_the_saved_one_with_a_note() {
+    let pin = engine_pin::EnginePin {
+        build: engine_pin::BuildId::clean_test_build(),
+        corpus_version: String::new(),
+        clone_judge_model: "judge-a".to_string(),
+    };
+    let mut none = crate::cost_cap::RunControls::default();
+    assert!(pin.hold_clone_judge_model(&mut none).is_some());
+    assert_eq!(none.clone_judge_model.as_deref(), Some("judge-a"));
+    let mut same = crate::cost_cap::RunControls {
+        clone_judge_model: Some("judge-a".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(pin.hold_clone_judge_model(&mut same), None);
+    let mut other = crate::cost_cap::RunControls {
+        clone_judge_model: Some("judge-b".to_string()),
+        ..Default::default()
+    };
+    let note = pin.hold_clone_judge_model(&mut other).expect("a note");
+    assert!(
+        note.contains("judge-a") && note.contains("judge-b"),
+        "{note}"
+    );
+    assert_eq!(other.clone_judge_model.as_deref(), Some("judge-a"));
+}
+
+#[test]
+fn a_client_inspection_does_not_start_on_a_dirty_or_commitless_build() {
+    let clean = build_with(Some(&"a".repeat(40)), false);
+    assert_eq!(engine_pin::client_start_refusal(true, &clean), None);
+    let dirty = engine_pin::client_start_refusal(true, &build_with(Some(&"a".repeat(40)), true))
+        .expect("dirty refuses");
+    assert!(dirty.contains("changes that are not committed"), "{dirty}");
+    let none = engine_pin::client_start_refusal(true, &build_with(None, false))
+        .expect("no commit refuses");
+    assert!(none.contains("does not know which build it is"), "{none}");
+    // Internal runs still start on any build.
+    assert_eq!(
+        engine_pin::client_start_refusal(false, &build_with(Some(&"a".repeat(40)), true)),
+        None
+    );
+    assert_eq!(
+        engine_pin::client_start_refusal(false, &build_with(None, false)),
+        None
+    );
+}
+
+// ---- a rerun of the deterministic stages on another build (#588) ----------------------------
+
+/// A saved run on the test build, and the pin of a "newer build" `c...` with the same rules.
+fn rerun_fixture() -> (
+    tempfile::TempDir,
+    camerata_test_env::EnvGuard,
+    tempfile::TempDir,
+    RunRecord,
+    engine_pin::EnginePin,
+    Vec<(String, std::path::PathBuf)>,
+) {
+    let (s, g, repo, record) = pinned_record();
+    let newer = engine_pin::EnginePin {
+        build: build_with(Some(&"c".repeat(40)), false),
+        ..record.pin.clone().unwrap()
+    };
+    let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+    (s, g, repo, record, newer, sources)
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rerun_on_a_newer_build_opens_the_run_and_records_both_builds_while_a_resume_stays_refused() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let (store, text) =
+        open_for_rerun(&record.run_id, &sources, &key(), &models(), &newer, true).unwrap();
+    assert!(text.contains("No model is asked"), "{text}");
+    assert!(store.rerun_misses().is_some(), "the store is a rerun's");
+    assert!(
+        store.record().reruns.is_empty(),
+        "not recorded until the rerun ends"
+    );
+    assert!(store.commit_rerun().is_some());
+    let saved = store.record();
+    assert_eq!(saved.reruns.len(), 1);
+    assert_eq!(saved.reruns[0].model_build.commit, Some("a".repeat(40)));
+    assert_eq!(
+        saved.reruns[0].deterministic_build.commit,
+        Some("c".repeat(40))
+    );
+    assert_eq!(
+        saved.pin.as_ref().unwrap().build.commit,
+        Some("a".repeat(40)),
+        "the model work stays pinned to the build that made it"
+    );
+    drop(store);
+    let on_disk = read_record(&record.run_id).unwrap();
+    assert_eq!(on_disk.reruns.len(), 1, "the rerun is saved with the run");
+    // A normal resume on that newer build is refused, unchanged.
+    let result = open_for_resume(&record.run_id, &sources, &key(), &models(), &newer);
+    assert!(
+        matches!(&result, Err(RunStoreError::Refused(m)) if m.contains("must finish it")),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rerun_is_refused_when_the_rule_library_changed_and_the_cause_is_named() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let changed = engine_pin::EnginePin {
+        corpus_version: "a-different-rule-library-digest".to_string(),
+        ..newer
+    };
+    let result = open_for_rerun(&record.run_id, &sources, &key(), &models(), &changed, false);
+    let Err(RunStoreError::Refused(m)) = result else {
+        panic!("a changed rule library must refuse the rerun");
+    };
+    assert!(m.contains("rule library changed"), "{m}");
+    assert!(
+        m.contains("finder"),
+        "names the prompt it would change: {m}"
+    );
+    assert!(read_record(&record.run_id).unwrap().reruns.is_empty());
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rerun_is_refused_when_the_questions_asked_of_the_model_changed() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let mut changed = newer;
+    changed.build.prompt_schema += 1;
+    let result = open_for_rerun(&record.run_id, &sources, &key(), &models(), &changed, false);
+    let Err(RunStoreError::Refused(m)) = result else {
+        panic!("a changed prompt schema must refuse the rerun");
+    };
+    assert!(
+        m.contains("questions Camerata asks the model changed"),
+        "{m}"
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_client_rerun_is_refused_on_a_build_that_cannot_be_named_exactly() {
+    let (_s, _g, _repo, record, newer, sources) = rerun_fixture();
+    let dirty = engine_pin::EnginePin {
+        build: build_with(Some(&"c".repeat(40)), true),
+        ..newer
+    };
+    let result = open_for_rerun(&record.run_id, &sources, &key(), &models(), &dirty, true);
+    assert!(
+        matches!(&result, Err(RunStoreError::Refused(m)) if m.contains("not committed")),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_rerun_answers_from_the_store_and_a_missing_reply_is_a_named_miss_with_no_call() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let first = new_run(&repo);
+        let model = Scripted::new();
+        {
+            let j = JournalLlm::new(&model, first.clone());
+            j.complete(ask("stored one")).await.unwrap();
+        }
+        assert_eq!(model.calls(), 1);
+        let id = first.run_id();
+        drop(first);
+        let newer = engine_pin::EnginePin {
+            build: build_with(Some(&"c".repeat(40)), false),
+            ..read_record(&id).unwrap().pin.unwrap()
+        };
+        let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+        let (store, _) = open_for_rerun(&id, &sources, &key(), &models(), &newer, false).unwrap();
+        let j = JournalLlm::new(&model, store.clone());
+        let replayed = j.complete(ask("stored one")).await.unwrap();
+        assert!(replayed.text.contains("stored one"));
+        let missing = j.complete(ask("never stored")).await;
+        assert!(missing.is_err(), "a reply the store lacks fails the call");
+        assert_eq!(
+            model.calls(),
+            1,
+            "the model behind the journal was never reached by the rerun"
+        );
+        let misses = store.rerun_misses().unwrap();
+        assert_eq!(misses.list().len(), 1, "{:?}", misses.list());
+        let refusal = misses.refusal().expect("a refusal naming the miss");
+        assert!(refusal.contains("other model calls reply"), "{refusal}");
+        assert!(refusal.contains("Nothing was sent"), "{refusal}");
+        assert!(
+            !runs_dir()
+                .join(&id)
+                .join("calls")
+                .read_dir()
+                .unwrap()
+                .any(|e| {
+                    let text = std::fs::read_to_string(e.unwrap().path()).unwrap();
+                    text.contains("never stored")
+                }),
+            "a miss stores nothing"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_store_only_provider_never_sends_a_completion_or_a_batch_and_names_each_miss() {
+    use crate::ai_audit::BatchApi;
+    let misses = store_only::StoreOnlyMisses::new();
+    assert_eq!(misses.refusal(), None, "no miss, no refusal");
+    let provider = store_only::StoreOnlyLlm::new(misses.clone(), true);
+    assert!(provider.has_api_key(), "keeps the batch path the run took");
+    assert!(provider.complete(ask("one")).await.is_err());
+    assert!(provider.submit(Vec::new()).await.is_err());
+    assert!(provider.poll("msgbatch_1").await.is_err());
+    assert!(provider
+        .fetch("msgbatch_1", crate::llm::CacheTtl::OneHour)
+        .await
+        .is_err());
+    assert!(provider.cancel_batch("msgbatch_1").await.is_ok());
+    let list = misses.list();
+    assert_eq!(list.len(), 4, "{list:?}");
+    let refusal = misses.refusal().unwrap();
+    assert!(refusal.contains("4 model reply(ies)"), "{refusal}");
+    assert!(refusal.contains("msgbatch_1"), "{refusal}");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_rerun_serves_the_good_reply_before_a_bad_one_stored_under_the_same_key() {
+    seeded(async {
+        struct BadThenGood(AtomicUsize);
+        #[async_trait::async_trait]
+        impl LlmPort for BadThenGood {
+            async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(response(
+                    if n == 0 {
+                        "no json at all"
+                    } else {
+                        r#"{"ok":1}"#
+                    },
+                    0.01,
+                ))
+            }
+            async fn complete_streaming(
+                &self,
+                req: LlmRequest,
+                _d: &mut (dyn for<'a> FnMut(&'a str) + Send),
+            ) -> anyhow::Result<LlmResponse> {
+                self.complete(req).await
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let first = new_run(&repo);
+        let model = BadThenGood(AtomicUsize::new(0));
+        {
+            let j = JournalLlm::new(&model, first.clone());
+            assert_eq!(j.complete(ask("k")).await.unwrap().text, "no json at all");
+            assert_eq!(j.complete(ask("k")).await.unwrap().text, r#"{"ok":1}"#);
+        }
+        let id = first.run_id();
+        drop(first);
+        let newer = engine_pin::EnginePin {
+            build: build_with(Some(&"c".repeat(40)), false),
+            ..read_record(&id).unwrap().pin.unwrap()
+        };
+        let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+        let (store, _) = open_for_rerun(&id, &sources, &key(), &models(), &newer, false).unwrap();
+        let j = JournalLlm::new(&model, store);
+        assert_eq!(
+            j.complete(ask("k")).await.unwrap().text,
+            r#"{"ok":1}"#,
+            "the resume's order: the good reply first"
+        );
+        assert_eq!(model.0.load(Ordering::SeqCst), 2, "no call");
+    })
+    .await;
 }

@@ -181,7 +181,8 @@ pub(crate) async fn corpus_rule_infos(ids: &BTreeSet<String>) -> HashMap<String,
     if ids.is_empty() || !path.exists() {
         return HashMap::new();
     }
-    let corpus = camerata_rules::load_corpus_lenient(&path).await.0;
+    let (corpus, errs) = camerata_rules::load_corpus_lenient(&path).await;
+    crate::log_corpus_load_errors("remediation rule info", &errs);
     ids.iter()
         .filter_map(|id| {
             corpus.get_by_id(id).map(|rule| {

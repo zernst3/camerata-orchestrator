@@ -228,6 +228,7 @@ impl LlmPort for Stub {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -546,4 +547,51 @@ fn every_system_prompt_explains_the_redaction_markers() {
             "{name} prompt does not forbid reproducing a value"
         );
     }
+}
+
+// ---- published example keys: client masking must not change severity or model input ------------
+
+/// A documentation key in `.env.example` is a placeholder row: after the client redaction it is
+/// still capped at the placeholder ceiling (the mask's ellipsis is not a redacted REAL value).
+#[test]
+fn a_published_example_key_in_an_example_file_keeps_its_placeholder_cap() {
+    let key = camerata_secrets::fixtures::stripe_docs_test_key();
+    let mut finding = Finding {
+        repo: "acme/portal".to_string(),
+        path: ".env.example".to_string(),
+        line: 2,
+        rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
+        severity: "high".to_string(),
+        snippet: format!("STRIPE_SECRET_KEY={key}"),
+        detail: "A key in a file".to_string(),
+        ..Finding::default()
+    };
+    crate::onboard::redact::redact_finding(&mut finding);
+    assert!(!finding.snippet.contains(&key), "{}", finding.snippet);
+    finding_merge::cap_placeholder_severity(&mut finding);
+    assert_eq!(finding.severity, "low", "the placeholder cap was lost");
+    // A real secret, redacted, in the same file is still NOT capped.
+    let real = secret();
+    let mut leak = Finding {
+        path: ".env.example".to_string(),
+        rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
+        severity: "high".to_string(),
+        snippet: real.text.clone(),
+        ..Finding::default()
+    };
+    crate::onboard::redact::redact_finding(&mut leak);
+    finding_merge::cap_placeholder_severity(&mut leak);
+    assert_eq!(leak.severity, "high");
+}
+
+/// The model reads the documentation key as it is: only the client text is masked.
+#[test]
+fn a_published_example_key_survives_the_model_side_redaction() {
+    let key = camerata_secrets::fixtures::stripe_docs_test_key();
+    let files = vec![(
+        "src/billing.js".to_string(),
+        format!("const k = '{key}';\n"),
+    )];
+    let out = crate::onboard::redact::files_for_model_with(&files, true);
+    assert!(out[0].1.contains(&key), "{}", out[0].1);
 }

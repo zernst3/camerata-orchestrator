@@ -1,10 +1,11 @@
-//! H4 item 3: the optional triage log. Per rule, what the AI pass proposed, what review kept,
-//! what it held or set aside as information only, what it threw out, and why.
+//! The triage log: per rule, what the AI pass proposed, what review kept, what it held or set
+//! aside as information only, what it threw out, and why.
 //!
-//! Off by default ([`ReportOptions::triage_log`]). When asked for it rides in the product
-//! package as a workbook sheet ([`TRIAGE_LOG_SHEET`]) and a CSV ([`TRIAGE_LOG_CSV`]); the
-//! release gate's secrets check scans both like every other member, and its dataset-set check
-//! admits the CSV only as this one optional file.
+//! This is the OPERATOR's file. It is never part of the client package: no workbook sheet, no
+//! `csv/triage-log.csv`, whatever any option or environment variable says, and the release gate
+//! refuses a package that carries either. The operator gets it from the Review screen
+//! (`GET /api/projects/:id/triage-log.csv`) or, for `camerata inspect`, beside the export zip
+//! when `CAMERATA_EXPORT_TRIAGE_LOG` is set ([`operator_csv`], [`INTERNAL_MARK`]).
 //!
 //! # What counts
 //!
@@ -21,32 +22,34 @@
 //! Rows the scan merged into another row at the same location appear on the surviving row's
 //! "Also violates" column, not here: the log is about review outcomes, not de-duplication.
 //!
-//! # The caption
+//! # The first line
 //!
 //! "Proposed by the AI pass" counts rows that REACHED review. Repeats the scan dropped before
 //! review (same path, line and rule) cannot be counted by anything downstream, so the log says
 //! how many there were: [`caption`], with the count from the scan ledger
-//! ([`crate::scan_ledger::ScanLedger::deduped_total`]). The sheet prints it under the title. The
-//! CSV is a plain table with a fixed header and carries no caption row (a text row would break
-//! every consumer that reads it as data), so this module doc and [`triage_log_csv`] are where
-//! the CSV's counting basis is stated.
+//! ([`crate::scan_ledger::ScanLedger::deduped_total`]). The operator file's first line marks it
+//! internal and carries that caption ([`operator_csv`]); the header and the rows follow.
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::CappedSheet;
 use serde::Serialize;
 
 use crate::onboard::Finding;
 use crate::report_export::{
-    classify, effective_bucket, finding_key, is_action_row_missing_a_fix, is_ai_tier,
-    is_held_for_review, is_informational, is_uncited_ai_finding, title_for_finding, ReportOptions,
-    ReviewedReport,
+    classify, finding_key, is_ai_tier, is_held_for_review, is_informational, is_uncited_ai_finding,
+    title_for_finding, ReviewedReport,
 };
 
-/// The workbook sheet's name.
+/// The sheet name the client workbook must never carry. Kept so the release gate and the tests
+/// can name what they refuse.
 pub const TRIAGE_LOG_SHEET: &str = "Triage Log";
-/// The CSV's archive path in the product package.
-pub const TRIAGE_LOG_CSV: &str = "csv/triage-log.csv";
+/// The archive path the client package must never carry. Kept so the release gate and the tests
+/// can name what they refuse.
+pub const TRIAGE_LOG_CSV: &str = camerata_api_types::package_paths::TRIAGE_LOG_CSV;
+/// The file name the operator's download and the command line's file beside the zip end with.
+pub const INTERNAL_FILE_NAME: &str = "camerata-triage-log-INTERNAL.csv";
+/// The words that start the first line of the operator file.
+pub const INTERNAL_MARK: &str = "INTERNAL operator file. Not part of the client package.";
 
 /// The CSV header and the sheet's column titles, in order.
 const COLUMNS: [&str; 8] = [
@@ -125,13 +128,14 @@ pub fn build_triage_log(
             .map(String::as_str);
         let disposition = classify(f, wire);
         let severity = crate::severity_bounds::bounded_severity(f, corpus);
-        let bucket = effective_bucket(
+        let bucket = crate::report_export::effective_bucket_with(
             f,
             disposition,
             &severity,
             corpus,
             report.test_file_count,
             chosen,
+            chosen_options,
         );
         let why = |outcome: &str| {
             format!(
@@ -142,7 +146,8 @@ pub fn build_triage_log(
                     &severity,
                     corpus,
                     report.test_file_count,
-                    chosen
+                    chosen,
+                    chosen_options,
                 )
             )
         };
@@ -192,6 +197,7 @@ fn set_aside_reason(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen: Option<&str>,
+    chosen_options: &HashMap<String, String>,
 ) -> &'static str {
     if is_held_for_review(f, disposition) {
         "calibration flagged it as needs review"
@@ -199,8 +205,15 @@ fn set_aside_reason(
         "no grounded citation for it"
     } else if is_informational(f, disposition, severity, corpus, test_file_count) {
         "a convention to consider, not an action item"
-    } else if is_action_row_missing_a_fix(f, disposition, severity, corpus, test_file_count, chosen)
-    {
+    } else if crate::report_export::is_action_row_missing_a_fix_with(
+        f,
+        disposition,
+        severity,
+        corpus,
+        test_file_count,
+        chosen,
+        chosen_options,
+    ) {
         "no fix to show for it"
     } else {
         "routed out of the action tiers"
@@ -220,12 +233,13 @@ pub fn caption(deduped: usize) -> String {
 }
 
 /// The CSV bytes: the header, then one record per row. An empty log is the header alone. The
-/// counts are rows that reached review; see [`caption`] for the rows merged away before it.
+/// counts are rows that reached review; see [`caption`] for the rows merged away before it
+/// ([`operator_csv`] prints it on the first line).
 pub fn triage_log_csv(rows: &[TriageLogRow]) -> anyhow::Result<Vec<u8>> {
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     wtr.write_record(COLUMNS)?;
     for r in rows {
-        wtr.write_record([
+        wtr.write_record(crate::csv_cell::safe_record([
             r.rule_id.clone(),
             r.rule.clone(),
             r.proposed.to_string(),
@@ -234,65 +248,31 @@ pub fn triage_log_csv(rows: &[TriageLogRow]) -> anyhow::Result<Vec<u8>> {
             r.information_only.to_string(),
             r.thrown_out.to_string(),
             r.why.clone(),
-        ])?;
+        ]))?;
     }
     Ok(wtr.into_inner()?)
 }
 
-/// Write the workbook sheet.
-pub(super) fn write_triage_log_sheet(
-    wb: &mut rust_xlsxwriter::Workbook,
-    rows: &[TriageLogRow],
-    deduped: usize,
-    fmts: &super::Formats,
-) -> Result<(), rust_xlsxwriter::XlsxError> {
-    let mut ws = CappedSheet::new(wb.add_worksheet());
-    ws.set_name(TRIAGE_LOG_SHEET)?;
-    ws.write_text_with_format(0, 0, TRIAGE_LOG_SHEET, &fmts.section_title)?;
-    ws.write_text(
-        1,
-        0,
-        "Per rule: what the AI pass proposed, what review kept, held or set aside, what it \
-         threw out and why.",
-    )?;
-    ws.write_text(2, 0, caption(deduped))?;
-    const HEADER_ROW: u32 = 3;
-    for (c, h) in COLUMNS.iter().enumerate() {
-        ws.write_text_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;
+/// The operator's file: [`INTERNAL_MARK`] and the [`caption`] on the first line, then the CSV
+/// ([`triage_log_csv`]) for `reviewed`. The one place the file is built, for the route and the
+/// command line.
+pub fn operator_csv(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &HashMap<String, String>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut log = build_triage_log(reviewed, corpus, chosen_options);
+    // The file is internal, but a reviewer's reason is free text and can quote a credential from the
+    // client's code; the same redaction every client file passes is applied here too.
+    for row in &mut log {
+        crate::onboard::redact::redact_string(&mut row.rule);
+        crate::onboard::redact::redact_string(&mut row.why);
     }
-    for (c, w) in [28.0, 40.0, 12.0, 8.0, 10.0, 12.0, 10.0, 80.0]
-        .iter()
-        .enumerate()
-    {
-        ws.set_column_width(c as u16, *w)?;
-    }
-    for (i, r) in rows.iter().enumerate() {
-        let row = HEADER_ROW + 1 + i as u32;
-        let text = fmts.cell(None, false, false);
-        let wrap = fmts.cell(None, true, false);
-        ws.write_text_with_format(row, 0, &r.rule_id, &text)?;
-        ws.write_text_with_format(row, 1, &r.rule, &wrap)?;
-        for (c, n) in [
-            r.proposed,
-            r.kept,
-            r.held_for_review,
-            r.information_only,
-            r.thrown_out,
-        ]
-        .iter()
-        .enumerate()
-        {
-            ws.write_number(row, 2 + c as u16, *n as f64)?;
-        }
-        ws.write_text_with_format(row, 7, &r.why, &wrap)?;
-    }
-    let last = HEADER_ROW + rows.len() as u32;
-    ws.autofilter(HEADER_ROW, 0, last, 7)?;
-    ws.set_freeze_panes(HEADER_ROW + 1, 0)?;
-    Ok(())
-}
-
-/// Whether `options` asked for the triage log.
-pub(super) fn wanted(options: &ReportOptions) -> bool {
-    options.triage_log
+    let first = format!(
+        "{INTERNAL_MARK} {}.\n",
+        caption(reviewed.report().ledger.deduped_total())
+    );
+    let mut out = first.into_bytes();
+    out.extend(triage_log_csv(&log)?);
+    Ok(out)
 }

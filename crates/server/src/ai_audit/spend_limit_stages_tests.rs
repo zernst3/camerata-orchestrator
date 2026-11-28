@@ -57,6 +57,7 @@ impl LlmPort for Counting {
 /// a resume whose stored replies cost more than the limit allows.
 fn past_the_limit() -> UsageMeter {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(LIMIT),
         ..RunControls::default()
     };
@@ -150,7 +151,7 @@ export function {func}(order, user) {{
 
 /// Run the real entry of `stage` once on `llm` and `meter`.
 #[allow(clippy::too_many_lines)]
-async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
+async fn run_stage_once(stage: Stage, llm: &dyn LlmPort, meter: &UsageMeter) {
     match stage {
         Stage::ScanPass => {
             let files = vec![("a.rs".to_string(), "fn a() {}".to_string())];
@@ -267,7 +268,9 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
                 rank: crate::review_tree::RankSettings::default(),
                 max_in_flight: 4,
                 cli_backend: false,
+                batch: false,
                 job: None,
+                feedback: None,
             };
             let _ = group_review::review_groups(&mut report, llm, &cfg, Some(meter)).await;
         }
@@ -327,6 +330,8 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
                 "claude-sonnet-5-5",
                 &candidates,
                 false,
+                false,
+                None,
                 None,
             )
             .await;
@@ -385,6 +390,7 @@ async fn the_same_stages_do_send_when_the_limit_is_not_reached() {
     for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Finder) {
         let llm = Counting::new();
         let meter = UsageMeter::with_controls(RunControls {
+            scope: Default::default(),
             max_cost_usd: Some(LIMIT),
             ..RunControls::default()
         });
@@ -416,6 +422,7 @@ async fn a_judge_stopped_by_the_limit_is_recorded_not_run() {
 
 fn resumed_meter(limit: f64, stored: f64) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         stored_spend_usd: stored,
         ..RunControls::default()
@@ -455,6 +462,7 @@ async fn stored_spend_and_new_spend_add_up_against_the_limit() {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -474,6 +482,7 @@ async fn stored_spend_and_new_spend_add_up_against_the_limit() {
 #[test]
 fn the_stage_that_continues_a_run_keeps_the_stored_spend() {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(LIMIT),
         stored_spend_usd: 4.0,
         ..RunControls::default()
@@ -497,6 +506,7 @@ fn the_cap_record_reads_the_whole_run_even_when_the_last_stage_refused_nothing()
     // refused nothing and sent nothing, but the run's spend ($43.51) is past the limit ($25):
     // the record the final report prints must say so and not the scan's $19.61.
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(25.0),
         ..RunControls::default()
     };
@@ -525,5 +535,189 @@ fn the_cap_record_reads_the_whole_run_even_when_the_last_stage_refused_nothing()
     assert!(
         !record.stopped_the_run(),
         "nothing was refused, so the run is complete"
+    );
+}
+
+// ── the limit's total counts every stage, and agrees with the stage table ───────────────────
+
+/// Answers every call with a model refusal that carries what the call was BILLED ($0.60 on Opus
+/// 5.5), so each stage's real entry meters a real cost through its real failure path, and
+/// counts the calls it received.
+struct Billing {
+    calls: AtomicUsize,
+}
+
+impl Billing {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for Billing {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(crate::llm::refusal_error_billed(
+            &serde_json::json!({
+                "model": "claude-opus-5-5",
+                "content": [],
+                "stop_reason": "refusal",
+                "usage": { "input_tokens": 100_000, "output_tokens": 10_000 }
+            }),
+            "claude-opus-5-5",
+            "api",
+            crate::llm::PriceBasis {
+                batch: false,
+                cache_ttl: crate::llm::CacheTtl::FiveMinutes,
+            },
+        )
+        .expect("a refusal stop_reason is an error"))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn cents(usd: f64) -> i64 {
+    (usd * 100.0).round() as i64
+}
+
+/// The limit's running total (`UsageMeter::limit_spend_usd`, the figure admission compares with
+/// the limit) and the `StageMeter` table must agree to the cent.
+fn assert_limit_and_stage_table_agree(meter: &UsageMeter, what: &str) {
+    let limit_total = meter.limit_spend_usd();
+    let table_total = meter.stage_telemetry(1_000).total().cost_usd;
+    assert_eq!(
+        cents(limit_total),
+        cents(table_total),
+        "{what}: the limit counts ${limit_total:.4} and the stage table ${table_total:.4}"
+    );
+}
+
+#[tokio::test]
+async fn every_stage_entry_adds_its_cost_to_the_limit_total_and_the_stage_table() {
+    // A stage whose billed call never reaches the limit's total is a way past the limit: the
+    // run would read as cheaper than it was and keep going. Each real stage entry runs on its
+    // own meter with a limit far above the spend, so nothing is refused.
+    let mut bypassed: Vec<String> = Vec::new();
+    // The finder's entry is the agent runner (covered by the agent finder's own tests and by
+    // the meter-level table below), not a function this table can call.
+    for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Finder) {
+        let llm = Billing::new();
+        let meter = UsageMeter::with_controls(RunControls {
+            scope: Default::default(),
+            max_cost_usd: Some(10_000.0),
+            ..RunControls::default()
+        });
+        run_stage_once(stage, &llm, &meter).await;
+        let sent = llm.calls();
+        let row = meter
+            .stage_telemetry(1_000)
+            .stages
+            .iter()
+            .find(|r| r.stage == stage)
+            .map(|r| r.usage.clone())
+            .unwrap_or_default();
+        let limit_total = meter.limit_spend_usd();
+        assert!(sent > 0, "{}: the fixture sent nothing", stage.label());
+        if cents(row.cost_usd) != cents(0.60 * sent as f64)
+            || cents(limit_total) != cents(0.60 * sent as f64)
+        {
+            bypassed.push(format!(
+                "{}: {sent} billed call(s) = ${:.2}, stage row ${:.2}, limit total ${limit_total:.2}",
+                stage.label(),
+                0.60 * sent as f64,
+                row.cost_usd
+            ));
+        }
+        assert_limit_and_stage_table_agree(&meter, stage.label());
+    }
+    assert!(
+        bypassed.is_empty(),
+        "a stage's billed calls must all reach the limit's total: {bypassed:?}"
+    );
+}
+
+#[test]
+fn the_limit_total_is_the_sum_of_all_ten_stages_to_the_cent() {
+    let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(10_000.0),
+        ..RunControls::default()
+    });
+    let mut expected = 0.0;
+    for (i, stage) in Stage::ALL.into_iter().enumerate() {
+        let cost = 0.13 + 0.07 * i as f64;
+        let r = LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
+            text: String::new(),
+            model: "claude-sonnet-5-5".to_string(),
+            backend: "api".to_string(),
+            cost_usd: Some(cost),
+            input_tokens: Some(1_000),
+            output_tokens: Some(100),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+            elapsed_ms: None,
+        };
+        meter.record_stage(stage, &r);
+        expected += cost;
+        let row = meter
+            .stage_telemetry(1_000)
+            .stages
+            .iter()
+            .find(|r| r.stage == stage)
+            .map(|r| r.usage.cost_usd)
+            .expect("the stage has a row");
+        assert_eq!(cents(row), cents(cost), "{} row", stage.label());
+    }
+    assert_eq!(Stage::ALL.len(), 10, "a new stage must join this table");
+    assert_eq!(cents(meter.snapshot().cost_usd), cents(expected));
+    assert_limit_and_stage_table_agree(&meter, "all ten stages");
+}
+
+#[tokio::test]
+async fn once_earlier_stages_have_spent_the_limit_every_later_stage_sends_nothing() {
+    // One meter, the stages in pipeline order, a limit of $0.60 and every call billed $0.60.
+    // The first stage's spend (and each later one's) is what the limit counts, so as soon as
+    // the total reaches the limit nothing after it may send, whatever its stage.
+    let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(0.60),
+        ..RunControls::default()
+    });
+    let mut crossed_after: Option<&str> = None;
+    let mut sent_after: Vec<String> = Vec::new();
+    for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Finder) {
+        let llm = Billing::new();
+        let was_reached = meter.cap_reached();
+        run_stage_once(stage, &llm, &meter).await;
+        if was_reached && llm.calls() > 0 {
+            sent_after.push(format!("{} sent {}", stage.label(), llm.calls()));
+        }
+        if crossed_after.is_none() && meter.cap_reached() {
+            crossed_after = Some(stage.label());
+        }
+        assert_limit_and_stage_table_agree(&meter, stage.label());
+    }
+    assert!(crossed_after.is_some(), "the fixture must reach the limit");
+    assert!(
+        sent_after.is_empty(),
+        "no stage may start a call once the total reached the limit: {sent_after:?}"
     );
 }

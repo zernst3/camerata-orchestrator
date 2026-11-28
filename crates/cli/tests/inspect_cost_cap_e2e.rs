@@ -33,6 +33,7 @@ impl LlmPort for Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -128,6 +129,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 
@@ -261,7 +263,7 @@ async fn a_capped_run_is_loud_incomplete_and_never_leaks_a_dollar_figure_into_th
     let readme = zip_entry(&export, "README.txt");
     assert!(readme.contains("Spend limit: reached"), "{readme}");
     assert!(readme.contains("INCOMPLETE"), "{readme}");
-    for name in ["manifest.json", "README.txt", "findings.json"] {
+    for name in ["manifest.json", "README.txt", "json/inspection.json"] {
         let text = zip_entry(&export, name);
         assert!(
             !text.contains("1.50") && !text.contains("max_cost") && !text.contains("cost_usd"),

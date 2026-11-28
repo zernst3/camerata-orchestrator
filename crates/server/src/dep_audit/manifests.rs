@@ -12,6 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::onboard::scope::RepoScope;
+
 /// Directories never walked: dependencies, build output and VCS metadata.
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -128,6 +130,11 @@ const RULES: &[Rule] = &[
     },
 ];
 
+/// Whether `file_name` is a manifest this module covers.
+pub(super) fn is_manifest(file_name: &str) -> bool {
+    rule_for(file_name).is_some()
+}
+
 fn rule_for(file_name: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| match r.manifest.strip_prefix('*') {
         Some(ext) => file_name.ends_with(ext),
@@ -183,11 +190,28 @@ fn declares_dependencies(path: &Path, file_name: &str) -> bool {
     }
 }
 
-fn covered(dir: &Path, root: &Path, rule: &Rule) -> bool {
+/// Whether a lockfile covers the manifest in `dir`. A lockfile the project's Excluded by
+/// agreement list names does not: `excluded_cover` is set instead, so the manifest is named.
+fn covered(
+    dir: &Path,
+    root: &Path,
+    rule: &Rule,
+    scope: &RepoScope,
+    excluded_cover: &mut bool,
+) -> bool {
     let mut current = Some(dir);
     while let Some(d) = current {
-        if rule.locks.iter().any(|l| d.join(l).is_file()) {
-            return true;
+        for lock in rule.locks.iter().filter(|l| d.join(l).is_file()) {
+            let rel = d
+                .join(lock)
+                .strip_prefix(root)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if scope.excludes(&rel) {
+                *excluded_cover = true;
+            } else {
+                return true;
+            }
         }
         if !rule.ancestors || d == root {
             return false;
@@ -197,10 +221,68 @@ fn covered(dir: &Path, root: &Path, rule: &Rule) -> bool {
     false
 }
 
+/// File names (beyond the manifests and lockfiles in [`RULES`]) that dependency tools read.
+const EXTRA_DEPENDENCY_FILES: &[&str] = &[
+    "go.mod",
+    "go.sum",
+    "requirements.txt",
+    "pom.xml",
+    "packages.lock.json",
+    "gradle.lockfile",
+    "buildscript-gradle.lockfile",
+    "conan.lock",
+    "Package.resolved",
+    "Podfile.lock",
+    "deno.lock",
+    "flake.lock",
+];
+
+/// Whether `file_name` is a dependency file: a manifest or a lockfile a dependency tool reads.
+/// Broader than [`is_manifest`] on purpose: a name in this set is given to the dependency audit,
+/// and a name missing from it would be a lockfile nothing ever reads.
+pub(crate) fn is_dependency_file(file_name: &str) -> bool {
+    rule_for(file_name).is_some()
+        || EXTRA_DEPENDENCY_FILES.contains(&file_name)
+        || RULES.iter().any(|r| r.locks.contains(&file_name))
+}
+
+/// The file names osv-scanner 1.9.2 (the pinned version) actually parses, reconciled by running
+/// the provisioned binary offline on one neutral fixture per candidate name: it reported scanning
+/// exactly these (`pom.xml` is recognised as a lockfile but needs the network to resolve, so
+/// offline it reports a failed attempt). A manifest such as
+/// `package.json` or `Cargo.toml` is not in this set: osv-scanner reads the lockfile beside it,
+/// so listing the manifest as "checked" would contradict the note on manifests no lockfile covers.
+const OSV_READS: &[&str] = &[
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "go.mod",
+    "gradle.lockfile",
+    "buildscript-gradle.lockfile",
+    "mix.lock",
+    "Pipfile.lock",
+    "poetry.lock",
+    "pdm.lock",
+    "pubspec.lock",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "pom.xml",
+    "packages.lock.json",
+    "conan.lock",
+];
+
+/// Whether osv-scanner parses a file of this name.
+pub(crate) fn is_osv_read_file(file_name: &str) -> bool {
+    OSV_READS.contains(&file_name)
+}
+
 /// The manifests under `repo_dir` that no lockfile covers, as repo-relative paths in sorted
 /// order. Only files the walk can name are reported; a tree walk that hits the entry limit stops
 /// there, so the list can undercount but never invents a path.
-pub fn unaudited_manifests(repo_dir: &Path) -> Vec<String> {
+pub fn unaudited_manifests(repo_dir: &Path, scope: &RepoScope) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     let mut stack: Vec<PathBuf> = vec![repo_dir.to_path_buf()];
     let mut visited = 0usize;
@@ -218,6 +300,10 @@ pub fn unaudited_manifests(repo_dir: &Path) -> Vec<String> {
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
+            // A link is never followed or read, whatever it is named or points to.
+            if kind.is_symlink() {
+                continue;
+            }
             if kind.is_dir() {
                 if !SKIP_DIRS.contains(&name.as_str()) {
                     stack.push(path);
@@ -227,15 +313,27 @@ pub fn unaudited_manifests(repo_dir: &Path) -> Vec<String> {
             let Some(rule) = rule_for(&name) else {
                 continue;
             };
-            if covered(&dir, repo_dir, rule) || !declares_dependencies(&path, &name) {
-                continue;
-            }
             let rel = path
                 .strip_prefix(repo_dir)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            found.push(rel);
+            // A manifest the project's exclusion list names is not read, not even to say it is
+            // unaudited.
+            if scope.excludes(&rel) {
+                continue;
+            }
+            let mut excluded_cover = false;
+            if covered(&dir, repo_dir, rule, scope, &mut excluded_cover)
+                || !declares_dependencies(&path, &name)
+            {
+                continue;
+            }
+            if excluded_cover {
+                found.push(format!("{rel} (its lockfile is excluded by agreement)"));
+            } else {
+                found.push(rel);
+            }
         }
     }
     finish(found)
@@ -343,8 +441,7 @@ fn scrub_token(token: &str) -> String {
     format!("{head}{name}{tail}{ws}")
 }
 
-/// The lines of osv-scanner's stderr that report a problem reading a file, with every local
-/// path removed, as the sentence for [`crate::dep_audit::UNREAD_FILES`]; `None` when stderr
+/// The sentence for [`crate::dep_audit::UNREAD_FILES`]; `None` when stderr
 /// holds no such line. A lockfile osv-scanner failed to parse was not audited, and a clean exit
 /// code does not say so.
 pub fn unread_files_sentence(stderr: &str, repo_dir: &Path) -> Option<String> {
@@ -361,11 +458,15 @@ pub fn unread_files_sentence(stderr: &str, repo_dir: &Path) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
+    // The lines are osv-scanner's own words: the operator log has them, the note does not.
+    tracing::warn!(
+        lines = %lines.join(" | "),
+        "osv-scanner reported problems reading some files"
+    );
     Some(format!(
         "{}: osv-scanner reported problems reading some files, so they may not have been \
-         checked ({}).",
+         checked.",
         crate::dep_audit::UNREAD_FILES,
-        lines.join(" | ")
     ))
 }
 
@@ -385,6 +486,35 @@ pub fn success_gap_message(
 
 #[cfg(test)]
 mod tests {
+    /// The list osv-scanner 1.9.2 reported scanning, no more: a name it ignores is never listed
+    /// as checked.
+    #[test]
+    fn only_the_names_osv_scanner_parses_are_listed_as_checked() {
+        for parsed in [
+            "package-lock.json",
+            "requirements-dev.txt",
+            "pdm.lock",
+            "go.mod",
+            "pom.xml",
+        ] {
+            assert!(is_osv_read_file(parsed), "{parsed}");
+        }
+        for ignored in [
+            "Podfile.lock",
+            "Package.resolved",
+            "uv.lock",
+            "deno.lock",
+            "bun.lock",
+            "go.sum",
+            "npm-shrinkwrap.json",
+            "package.json",
+            "Cargo.toml",
+            "pyproject.toml",
+        ] {
+            assert!(!is_osv_read_file(ignored), "{ignored}");
+        }
+    }
+
     use super::*;
 
     fn write(root: &Path, rel: &str, text: &str) {
@@ -399,9 +529,46 @@ mod tests {
     fn a_package_json_with_no_lockfile_is_reported_and_one_with_a_lockfile_is_not() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "package.json", DEPS);
-        assert_eq!(unaudited_manifests(dir.path()), ["package.json"]);
+        assert_eq!(
+            unaudited_manifests(dir.path(), &RepoScope::none()),
+            ["package.json"]
+        );
         write(dir.path(), "package-lock.json", "{}");
-        assert!(unaudited_manifests(dir.path()).is_empty());
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
+    }
+
+    /// A manifest that is a symbolic link is neither read nor reported: the link can point at
+    /// a file outside the repository.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_manifest_is_not_read_or_reported() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write(outside.path(), "acme-package.json", DEPS);
+        std::os::unix::fs::symlink(
+            outside.path().join("acme-package.json"),
+            dir.path().join("package.json"),
+        )
+        .unwrap();
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
+    }
+
+    /// A link named like a manifest is never read: its target is not opened through it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_named_like_a_manifest_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "real/package.json", DEPS);
+        std::fs::create_dir_all(dir.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("real/package.json"),
+            dir.path().join("linked/package.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            unaudited_manifests(dir.path(), &RepoScope::none()),
+            ["real/package.json"]
+        );
     }
 
     #[test]
@@ -413,14 +580,17 @@ mod tests {
             "crates/a/Cargo.toml",
             "[package]\nname=\"a\"\n[dependencies]\nserde=\"1\"\n",
         );
-        assert!(unaudited_manifests(dir.path()).is_empty());
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
         let lone = tempfile::tempdir().unwrap();
         write(
             lone.path(),
             "crates/a/Cargo.toml",
             "[package]\nname=\"a\"\n[dependencies]\nserde=\"1\"\n",
         );
-        assert_eq!(unaudited_manifests(lone.path()), ["crates/a/Cargo.toml"]);
+        assert_eq!(
+            unaudited_manifests(lone.path(), &RepoScope::none()),
+            ["crates/a/Cargo.toml"]
+        );
     }
 
     #[test]
@@ -430,7 +600,7 @@ mod tests {
         write(dir.path(), "target/y/Cargo.toml", "[dependencies]\n");
         write(dir.path(), "package.json", r#"{"type":"module"}"#);
         write(dir.path(), "tools/Cargo.toml", "[package]\nname=\"t\"\n");
-        assert!(unaudited_manifests(dir.path()).is_empty());
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
     }
 
     #[test]
@@ -442,9 +612,12 @@ mod tests {
             "<Project><ItemGroup><PackageReference Include=\"X\"/></ItemGroup></Project>",
         );
         write(dir.path(), "packages.lock.json", "{}");
-        assert_eq!(unaudited_manifests(dir.path()), ["src/App/App.csproj"]);
+        assert_eq!(
+            unaudited_manifests(dir.path(), &RepoScope::none()),
+            ["src/App/App.csproj"]
+        );
         write(dir.path(), "src/App/packages.lock.json", "{}");
-        assert!(unaudited_manifests(dir.path()).is_empty());
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
     }
 
     #[test]
@@ -458,12 +631,13 @@ mod tests {
     }
 
     #[test]
-    fn stderr_problems_are_quoted_without_the_local_path() {
+    fn stderr_problems_make_a_sentence_that_quotes_none_of_them() {
         let stderr = "Scanned /tmp/clone/package-lock.json file and found 3 packages\n\
                       Error during extraction: could not parse /tmp/clone/yarn.lock\n";
         let s = unread_files_sentence(stderr, Path::new("/tmp/clone")).unwrap();
         assert!(s.starts_with("Dependency files not read:"), "{s}");
-        assert!(s.contains("could not parse ./yarn.lock"), "{s}");
+        assert!(s.contains("problems reading some files"), "{s}");
+        assert!(!s.contains("yarn.lock"), "{s}");
         assert!(!s.contains("/tmp/clone"), "{s}");
         assert!(!s.contains("found 3 packages"), "{s}");
         assert!(unread_files_sentence("Scanned a file\n", Path::new("/x")).is_none());
@@ -479,7 +653,7 @@ mod tests {
         );
         write(dir.path(), "b/Gemfile", "source 'https://rubygems.org'\n");
         write(dir.path(), "c/pubspec.yaml", "name: c\nversion: 1.0.0\n");
-        assert!(unaudited_manifests(dir.path()).is_empty());
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
 
         write(
             dir.path(),
@@ -493,7 +667,7 @@ mod tests {
             "name: c\ndependencies:\n  http: ^1.0.0\n",
         );
         assert_eq!(
-            unaudited_manifests(dir.path()),
+            unaudited_manifests(dir.path(), &RepoScope::none()),
             ["a/A.csproj", "b/Gemfile", "c/pubspec.yaml"]
         );
     }
@@ -520,6 +694,52 @@ mod tests {
         assert!(crate::dep_audit::note_means_scanned(&note));
         assert!(!crate::dep_audit::note_proves_clean(&note));
         assert!(note.message.contains("package.json"));
-        assert!(note.message.contains("error: bad lock"));
+        // The tool's own words go to the operator log, never into the stored note.
+        assert!(!note.message.contains("error: bad lock"));
+    }
+
+    /// Item 31: a manifest the project's exclusion list names is not read, so it is not named as
+    /// unaudited either.
+    #[test]
+    fn an_excluded_manifest_is_not_named_as_unaudited() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("seeds")).unwrap();
+        std::fs::write(
+            dir.path().join("seeds/package.json"),
+            r#"{"dependencies":{"left-pad":"1.3.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unaudited_manifests(dir.path(), &RepoScope::none()),
+            ["seeds/package.json"]
+        );
+        let scope = crate::onboard::scope::ScanScope::from_patterns(&["app/seeds/**".to_string()])
+            .unwrap()
+            .for_repo("acme/app");
+        assert!(unaudited_manifests(dir.path(), &scope).is_empty());
+    }
+
+    /// Round 1 item 4: a manifest whose only lockfile is excluded by agreement is not covered by
+    /// it: it is named, with the reason.
+    #[test]
+    fn a_manifest_whose_only_lockfile_is_excluded_is_not_counted_as_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("web")).unwrap();
+        std::fs::write(
+            dir.path().join("web/package.json"),
+            r#"{"dependencies":{"a":"1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("web/package-lock.json"), "{}").unwrap();
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
+        let scope = crate::onboard::scope::ScanScope::from_patterns(&[
+            "app/web/package-lock.json".to_string()
+        ])
+        .unwrap()
+        .for_repo("acme/app");
+        assert_eq!(
+            unaudited_manifests(dir.path(), &scope),
+            ["web/package.json (its lockfile is excluded by agreement)"]
+        );
     }
 }

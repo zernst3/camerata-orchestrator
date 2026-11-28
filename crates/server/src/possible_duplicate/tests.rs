@@ -123,6 +123,8 @@ fn observations_whole_file_rows_and_rows_in_no_fix_never_pair() {
         camerata_api_types::audit::ConventionObservedKind {
             convention_option_id: "x".to_string(),
             convention_label: "x".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         },
     ));
     let whole_file = row("a.rs", 0, "sub:z/1");

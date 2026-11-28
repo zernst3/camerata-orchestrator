@@ -41,7 +41,13 @@ fn placed_report() -> SealedReport {
 }
 
 fn reviewed() -> ReviewedReport {
-    apply_overlay(&placed_report(), &[], &[], &[])
+    let sealed = placed_report();
+    apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[]),
+        &[],
+        &[],
+    )
 }
 
 fn options() -> ReportOptions {
@@ -53,7 +59,7 @@ fn entries() -> BTreeMap<String, Vec<u8>> {
 }
 
 fn findings_json(entries: &BTreeMap<String, Vec<u8>>) -> serde_json::Value {
-    serde_json::from_slice(&entries["findings.json"]).expect("findings.json")
+    serde_json::from_slice(&entries["json/inspection.json"]).expect("json/inspection.json")
 }
 
 fn text(row: &serde_json::Value, key: &str) -> String {
@@ -76,7 +82,7 @@ fn with_findings(
     edit(&mut findings);
     let mut out = entries.clone();
     out.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     out
@@ -196,7 +202,7 @@ fn the_gate_refuses_a_carried_row_whose_carrier_is_missing_or_elsewhere_and_acce
     });
     let problems = crate::release_gate::place_archive_problems(&missing);
     assert!(
-        problems_text(&problems).contains("is not a row of findings.json"),
+        problems_text(&problems).contains("is not a row of json/inspection.json"),
         "{problems:?}"
     );
     // A carrier at another place.
@@ -281,7 +287,13 @@ fn a_place_is_as_severe_as_its_worst_rule_even_when_a_less_severe_row_carries_it
     held.needs_review = true;
     held.confidence = Some("needs-review".to_string());
     report.findings = vec![held, row("SEC-RULE-SURE-1", "high", "src/held.ts", 9)];
-    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let sealed = report.seal();
+    let reviewed = apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[]),
+        &[],
+        &[],
+    );
     let entries = released_entries(&reviewed, &options());
     let findings = findings_json(&entries);
     let rows = findings["findings"].as_array().unwrap();
@@ -351,10 +363,19 @@ fn a_place_reads_as_a_defect_when_a_departure_carries_one() {
             assessed_sites: Some(4),
             convention_option_id: Some("o".to_string()),
             convention_label: "The usual way".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         },
     ));
     report.findings = vec![defect, departure];
-    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let sealed = report.seal();
+    let reviewed = apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[]),
+        &[],
+        &[],
+    );
     let entries = released_entries(&reviewed, &options());
     let findings = findings_json(&entries);
     let rows = findings["findings"].as_array().unwrap();
@@ -420,7 +441,7 @@ fn the_gate_refuses_an_all_problems_sheet_with_fewer_rows_than_places() {
     });
     let problems = crate::release_gate::place_archive_problems(&moved);
     assert!(
-        problems_text(&problems).contains("has 2 rows and findings.json has 3 places"),
+        problems_text(&problems).contains("has 2 rows and json/inspection.json has 3 places"),
         "{}",
         problems_text(&problems)
     );
@@ -473,7 +494,12 @@ fn a_false_positive_neither_carries_nor_is_carried() {
         camerata_api_types::decisions::DecisionState::FalsePositive,
         "not real",
     );
-    let reviewed = apply_overlay(&sealed, &[fp], &[], &[]);
+    let reviewed = apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[fp]),
+        &[],
+        &[],
+    );
     let entries = released_entries(&reviewed, &options());
     let findings = findings_json(&entries);
     let rows = findings["findings"].as_array().unwrap();

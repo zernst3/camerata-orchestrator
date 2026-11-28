@@ -110,6 +110,7 @@ fn declared_repo() -> tempfile::TempDir {
 async fn audit(dir: &tempfile::TempDir, feeds: &Feeds) -> RuntimeAudit {
     audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &camerata_server::onboard::scope::ScanScope::none(),
         feeds,
         None,
         now(),
@@ -141,6 +142,7 @@ async fn sealed_report(feeds: &Feeds) -> SealedReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/app".to_string()],
@@ -315,7 +317,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
     assert!(text.contains("Node.js 18 has received no security fixes since 2025-04-30."));
     assert!(text.contains("Node.js 18.17.0 has 4 known vulnerabilities"));
 
-    // findings.json.
+    // json/inspection.json.
     let export = camerata_server::xlsx_export::build_findings_export(
         &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         Some(&corpus),
@@ -382,8 +384,24 @@ async fn the_rendered_pdf_and_readme_carry_the_findings_and_the_stamp() {
         return;
     };
     let sealed = sealed_report(&Feeds::new(&[])).await;
+    // The release gate refuses a critical finding with no decision of its own.
+    let decided: HashMap<String, camerata_server::report_export::DispositionWire> = sealed
+        .findings
+        .iter()
+        .filter(|f| camerata_server::release_gate::needs_decision::why(f).is_some())
+        .map(|f| {
+            (
+                camerata_server::report_export::finding_key(f),
+                camerata_server::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "read in person".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
     let package = camerata_server::release_gate::build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         Some(&corpus),
         &options(),
     )

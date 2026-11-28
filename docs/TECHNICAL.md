@@ -22,8 +22,8 @@
 > the other commands and the state folder: 6i. The pre-flight estimate, the spend limit, the cost
 > panel, run to completion and the two backends: 6j. The release gate's 18 checks and the files in
 > the export package: 6c. Saved runs and the resume rules: 14. The current defaults: the finder is
-> **Engine**; the scan model is Sonnet 5.5; calibration is Opus 5.5; the group reviewer and the
-> agent finder are Fable 5.2; the duplicate check is Sonnet 5.5; the fix stage is Haiku 5.5; the
+> **Agent**; the scan model is Sonnet 5.5; calibration is Opus 5.5; the group reviewer and the
+> agent finder are Opus 5.5; the duplicate check is Sonnet 5.5; the fix stage is Haiku 5.5; the
 > clone judge is Haiku 5.5.
 >
 > | Word | Meaning in this file |
@@ -1972,7 +1972,7 @@ into one row) looks exactly like a detection miss. Five guarantees were added on
   field - on a three-site fixture the pipeline detected 3, absorbed 2, and
   exported ONE row with no trace of the other two. Rows now carry
   `also_locations` (verbatim `MergedLocation` entries) and `site_count`
-  (`1 + absorbed`) into `findings.json`, the workbook ("Sites" and "Also found at"
+  (`1 + absorbed`) into `json/inspection.json`, the workbook ("Sites" and "Also found at"
   columns) and the PDF's data. Note that `also_matches` ALONE is not a complete
   record: an absorbed row sharing the primary's rule id leaves no `also_matches`
   entry, so `also_locations` is the field to read.
@@ -2616,7 +2616,7 @@ can disagree with another:
 |---|---|---|---|
 | 1 | `normalize_severity` | Fixes casing. An UNRECOGNISED string becomes `"low"`, which is why a typo'd bound is a build failure rather than a no-op | None |
 | 2 | `raise_to_rule_min_severity` | Raises to the rule's authored `min_severity`, never lowers | Requires an ACCUSING kind, explicitly present (`Defect` / `Deviation` only), and a real location (not empty path AND line 0). An absent kind is excluded under the standing rule that nothing may silently default to `Defect` |
-| 3 | `downgrade_unlocated_above_informational` (C4-R1) | Sends a row with an empty path AND line 0 to `info` | Part of the shared chain (`severity_bounds::bounded_severity`), so the live scan, the PDF/JSON partition and the xlsx/CSV/JSON/`findings.json` partition all apply it (until 2026-10-21 it was PDF-only). The floor declines on an unlocated row at its own precondition, so it cannot inflate one from any position |
+| 3 | `downgrade_unlocated_above_informational` (C4-R1) | Sends a row with an empty path AND line 0 to `info` | Part of the shared chain (`severity_bounds::bounded_severity`), so the live scan, the PDF/JSON partition and the xlsx/CSV/JSON/`json/inspection.json` partition all apply it (until 2026-10-21 it was PDF-only). The floor declines on an unlocated row at its own precondition, so it cannot inflate one from any position |
 | 4 | `clamp_to_rule_max_severity` | Clamps to the rule's authored `max_severity`, never raises | None. It wins over everything upstream, so "no report may exceed it" holds absolutely |
 | 5 | `clamp_deviation_severity` | Caps a `Deviation` row at `DEVIATION_DEFAULT_CEILING` (`medium`) unless its rule authors `deviation_ceiling = "high"` | Kind-gated: a `Defect` under the same rule, and a legacy row with no kind, are untouched. It runs after the `max_severity` clamp but can only lower, and a corpus-load gate forbids a `deviation_ceiling` ranking above the same rule's `max_severity`, so the ceiling still binds |
 
@@ -2669,7 +2669,7 @@ specific shipped defect. `apply_evidence_gate` used to run INSIDE
 `build_report_json`, against a CLONED report which then shadowed that function's
 own parameter. The PDF's JSON saw the synthetic rows; `build_workbook` and
 `build_findings_export` read the original, un-injected report and never did. The
-visible symptom was `findings.json` whose own `summary` described `N+K` rows while
+visible symptom was `json/inspection.json` whose own `summary` described `N+K` rows while
 its `findings` array held `N`.
 
 The fix was a POSITION fix, not a logic fix: the evidence gate is now part of the
@@ -2734,6 +2734,7 @@ one line to the `efficiency_measures!` list and reads
 | `batch_default` | rank 2: on the API backend a scan with no forced mode runs as a Message Batch; failed items are resubmitted once; a cut-off item gets the truncation retry; 15 rules per item; the batch cache TTL by the price arithmetic (see "Scan modes") | batch is opt-in and runs exactly as before rank 2: one submission, all rules per item, the rank-3 TTL, no resubmission and no truncation retry (a failed batch item is still disclosed as a failed pass) |
 | `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to; batch mode is routed like real-time | `applies_to` is ignored, real-time routes by rule-id language prefix only, and batch mode is the old single unrouted batch (every rule with every file) |
 | `candidates_prefilter` | rank 8: a rule that declares `candidates` is sent only the sites its locator finds in a chunk, with 8 lines of context, plus the repo map | `candidates` is ignored entirely; every prompt is the rank-7 prompt |
+| `batch_warm` | #240: a batch submission with two or more cache-marked items, on the 1 hour cache, sends the first one in real time with exactly the batch item's request body and waits for its reply before the rest are submitted, so the rest read the shared prompt prefix from the cache; one warm call per distinct cached prefix per run (follow rounds, later windows and later stage calls do not repeat it); skipped for a stage once a warm reply or the warmed batch's rows show no cache use; a credit or sign-in refusal of the warm call stops the stage without submitting | the whole submission is sent at once |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -3126,7 +3127,7 @@ calibration, `drop_discarded_invented_rows` removes a model-invented (`AI-`) row
 explanation says to discard it or whose headline or rule id is a placeholder, and the removal
 is a disposition of the `ai-calibration` ledger stage (`discarded_placeholder_row`), so the row
 accounting still reconciles; no adopted-rule row is ever removed by its prose. (3) The release
-gate's `finding content` check refuses a package whose `findings.json` still holds one. The rule
+gate's `finding content` check refuses a package whose `json/inspection.json` still holds one. The rule
 id enum in the scan schema was considered and not done: a batch holds over a hundred rules, and
 a genuinely new rule needs a free name (the schema is also one cached prefix for every pass).
 
@@ -3253,7 +3254,7 @@ against a runaway bill, not a saving, so it fails loudly:
   (`COST_CAP_README_LINE`) only when it is true. The release gate checks the two
   agree (`verify_readme_provenance`). No cost number is exported;
   `tests/stage_telemetry_not_exported.rs` pins that the efficiency set and the cap
-  record change nothing in `report.json` or `findings.json`.
+  record change nothing in `report.json` or `json/inspection.json`.
 - **Desktop app.** The scan settings have a "Spend limit (USD)" field (blank = none),
   sent as `max_cost_usd` on the audit request. A value that is not a positive number
   stops the scan from starting and says why. The results screen shows an
@@ -3637,7 +3638,7 @@ thing:
   `client_provenance::export_provenance_with`; the README renders each line and gate 7 parses
   it back.
 - **Release gate check "severity and kind counts"** (22d): before this, the gate checked
-  row IDENTITY (PDF rows vs `findings.json`) and CSV vs JSON cell parity, but no count by
+  row IDENTITY (PDF rows vs `json/inspection.json`) and CSV vs JSON cell parity, but no count by
   severity and kind. `release_gate::consistency::count_reconciliation_problems` (archive pass)
   holds `csv/all-findings.csv`, the workbook's All Findings rows (for the kinds that sheet lists,
   `xlsx_export::ALL_FINDINGS_SHEET_KINDS`), the Index "Statement types" counts
@@ -3647,7 +3648,7 @@ thing:
   rows and its cover severity summary. A difference names the cell and both counts. The gate
   now runs several checks (`finding content` and the rest are described in section 6c).
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
-- **`findings.json`** is the machine-readable data structure. It carries the WHOLE
+- **`json/inspection.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`
   reused verbatim from the PDF's own `AuditReportJson` rather than re-derived.
 - **`README.txt`**, the orientation note.
@@ -3767,7 +3768,7 @@ Three coverage-honesty properties are easy to lose and are each pinned by a test
   said nothing. `tool_coverage_disclosures` emits ONE concise client-facing line
   per affected tool, routed through the existing `failed_passes` channel, which
   the PDF template already renders in both the executive summary and the
-  methodology. `findings.json` inherits it via the embedded executive summary.
+  methodology. `json/inspection.json` inherits it via the embedded executive summary.
 - **The Coverage sheet does not leak internal vocabulary.** "How we checked it"
   replaced a raw `citation_kind` cell that was putting `grounded` / `preview` /
   `advisory` in front of a client, and the Result column reads "Clean - nothing
@@ -3794,7 +3795,7 @@ Such a citation now has its own kind, `related`, and its label starts with
 "Related standard (matched by keyword, not a rule check): ". The kind and label
 are computed once in `citation_for_finding`, so the PDF (which prints that
 heading over the source list), the workbook's Citation column and
-`findings.json`'s `citation_label` all say the same thing, and the workbook's
+`json/inspection.json`'s `citation_label` all say the same thing, and the workbook's
 Provenance column reads "AI-advisory" for these rows. The Methodology section
 carries one plain sentence explaining the term (`MethodologyJson::citation_note`)
 and the Index sheet defines it. A finding whose OWN rule id is a cited corpus
@@ -4031,16 +4032,16 @@ The deterministic floor and checkers still read RAW code (they must find the sec
 **The gate** (`server/src/release_gate.rs`). `build_product_package` is the one assembly of a
 product export and `release` is the ONLY function that returns zip bytes (HTTP `export_product`,
 `camerata inspect --export` and the sample generator all use it; source-grep tests pin
-`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs **18 checks** (`CheckId::ALL` in `crates/server/src/release_gate/report.rs`,
-updated 2026-11-18; the first version had nine) over the archive it built and over the package's own
+`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs **19 checks** (`CheckId::ALL` in `crates/server/src/release_gate/report.rs`,
+updated 2026-11-19; the first version had nine) over the archive it built and over the package's own
 rows. The label is what the operator reads in `[brackets]` and in the "Release checks" line:
 
 | # | Check (label) | What it holds |
 |---|---|---|
-| 1 | secrets | no secret value in any client visible byte: every string of every file (`data.json`, `findings.json`, each dataset in both formats, every workbook cell and shared string, the README, the manifest, member names), zero-width characters stripped, never a field list |
+| 1 | secrets | no secret value in any client visible byte: every string of every file (`data.json`, `json/inspection.json`, each dataset in both formats, every workbook cell and shared string, the README, the manifest, member names), zero-width characters stripped, never a field list |
 | 2 | dataset set | exactly the promised files and datasets are in the package (list below), the PDF starts with `%PDF-`, the workbook parses |
-| 3 | dataset parity | every dataset's CSV agrees with its JSON, and `findings.json` agrees with `all-findings` |
-| 4 | row parity | the PDF's rows and `findings.json`'s rows are the same set (needs the in memory rows, so `release-gate <zip>` cannot run it) |
+| 3 | dataset parity | every dataset's CSV agrees with its JSON, and `json/inspection.json` agrees with `all-findings` |
+| 4 | row parity | the PDF's rows and `json/inspection.json`'s rows are the same set (needs the in memory rows, so `release-gate <zip>` cannot run it) |
 | 5 | severity and kind counts | the PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV agree with `json/all-findings.json` by severity and kind, and every printed number holds to an independent recount of the files in the package (single counts) |
 | 6 | finding content | no model invented row is junk: a placeholder title or rule id, no evidence, an explanation that says to discard it (D1); also the claim about missing preview tools agrees with the ledger |
 | 7 | reviewer decision on unverified evidence | every row whose quoted evidence was not found carries a reviewer decision (M5) |
@@ -4048,13 +4049,14 @@ rows. The label is what the operator reads in `[brackets]` and in the "Release c
 | 9 | reviewer decision on restored findings | a finding the engine threw out and the reviewer put back is decided before it ships (A12 item 2) |
 | 10 | reviewer decision on split-out problems | a problem split out of one the reviewer ruled out has a decision of its own |
 | 11 | reviewer correction on flagged findings | a site the Engine Check said No to carries a correction, a decision or a later edit. An Engine Check file that cannot be read refuses too. (The README's label does not say Engine Check: it never appears in a client output.) |
-| 12 | confidentiality marking | every workbook sheet's footer carries the confidentiality line naming the client, and it is the PDF's line |
-| 13 | manifest | every manifest hash equals the archive member's hash and every member is listed. A client package whose manifest records an incomplete run is refused. |
-| 14 | provenance | an internal package's README provenance lines equal the manifest's. A client package's README carries none of them. |
-| 15 | unsynced reviewer changes | the review screen holds no change the decision store has not accepted (an undo whose revoke has not landed would export the decision the reviewer took back) |
-| 16 | one fix per row | every row has a Fix, the tickets and the Fix plan list the same Fixes once each, the PDF's escalation list has one entry for each escalated place and its top three are three distinct Fixes (item #1); also one row per place |
-| 17 | client text style | no em dash, en dash or multiplication sign in any file a client receives (PDF text, every workbook string, every CSV and JSON file, the README). Skipped for an internal package. |
-| 18 | internal notes kept out | no package, client or internal, carries the operator's rewrite advisory or one of its names |
+| 12 | reviewer decision on critical and unsure findings | every finding shown at critical severity, and every finding the finder was unsure of (marked needs a decision), carries a reviewer's decision of its own, whatever the review budget. A severity edit the reviewer made on that row (in Review or as an Engine Check correction, in either direction) is a decision of its own: the reviewer ruled on the row (2026-11-20). `json/decisions.json` records it as a `severity_set` row. An edit of the wording or the location is not. A high is not forced. The export panel lists the same rows (`release_gate::holds`), and a group decision leaves them out, so each is decided in person (outside review item 2) |
+| 13 | confidentiality marking | every workbook sheet's footer carries the confidentiality line naming the client, and it is the PDF's line |
+| 14 | manifest | every manifest hash equals the archive member's hash and every member is listed. A client package whose manifest records an incomplete run is refused. |
+| 15 | provenance | an internal package's README provenance lines equal the manifest's. A client package's README carries none of them. |
+| 16 | unsynced reviewer changes | the review screen holds no change the decision store has not accepted (an undo whose revoke has not landed would export the decision the reviewer took back) |
+| 17 | one fix per row | every row has a Fix, the tickets and the Fix plan list the same Fixes once each, the PDF's escalation list has one entry for each escalated place and its top three are three distinct Fixes (item #1); also one row per place |
+| 18 | client text style | no em dash, en dash or multiplication sign in any file a client receives (PDF text, every workbook string, every CSV and JSON file, the README). Skipped for an internal package. |
+| 19 | internal notes kept out | no package, client or internal, carries the operator's rewrite advisory or one of its names |
 
 The
 comparison logic is production code the export tests call. A refusal is a `GateFailure`: its
@@ -4073,17 +4075,17 @@ file and an unexpected one). `<stem>` is `camerata-inspection-{repo}-{sha}`.
 |---|---|
 | `<stem>.pdf` | the report to read first: cover, executive summary, scorecard by area, severity by effort matrix, the problems with citations and fixes, what is healthy, the dependency snapshot and how the inspection was done. Ruled out problems are left out and counted once in the methodology section. |
 | `<stem>-findings.xlsx` | the working list for the engineers: Start here, Glossary, Fix plan, All problems, Needs a decision, Your conventions, Departures, Dependencies, Rules checked, Ruled out and Not checked; for reviewers All source rows, Reviewer decisions and How problems were grouped (the names are `xlsx_export/vocabulary.rs`; a several repo project adds the Patterns across services sheet) |
-| `findings.json` | every row that was not ruled out, of every kind, wrapped with the report's summary counts. For scripts and CI. |
-| `decisions.json` | every decision record the report was reviewed with |
+| `json/inspection.json` | every row that was not ruled out, of every kind, wrapped with the report's summary counts. For scripts and CI. |
+| `json/decisions.json` | every decision record the report was reviewed with |
 | `README.txt` | what each file is (`product_export_readme`) |
 | `manifest.json` | the list of files with a checksum for each, written last over the final bytes (it never lists itself), and the provenance |
-| `csv/<dataset>.csv` and `json/<dataset>.json` | one pair for each of eight datasets (`DATASETS`): `all-findings`, `deviations`, `conventions`, `not-assessed`, `dependencies`, `false-positives`, `coverage`, `rules-applied`. `all-findings` holds the same rows as `findings.json`, flat. |
+| `csv/<dataset>.csv` and `json/<dataset>.json` | one pair for each of eight datasets (`DATASETS`): `all-findings`, `deviations`, `conventions`, `not-assessed`, `dependencies`, `false-positives`, `coverage`, `rules-applied`. `all-findings` holds the same rows as `json/inspection.json`, flat. |
 | `csv/tickets.csv` | one ticket for each fix that still has places to change, with columns for a Jira, Linear or GitHub Issues import (title, description, priority, labels, estimate, group id, places, place list). A place ruled out or accepted as a risk is on no ticket. No JSON sibling. |
 | `csv/triage-log.csv` | optional and off by default; admitted when present |
 
 An internal package (`--internal`, `ReportOptions.internal`) is the operator's own review copy. It
 carries what the client package must not: the review flags (Possible false positive, a column in the
-workbook's technical band and a key in `findings.json`), the held rows marked held, and, for a run
+workbook's technical band and a key in `json/inspection.json`), the held rows marked held, and, for a run
 that did not complete, the INTERNAL INCOMPLETE marking (`INTERNAL_INCOMPLETE_README_LINE`). It is
 released only by `release_internal`, and the client text style check does not apply to it.
 
@@ -4097,13 +4099,13 @@ and everything in it. Where they are: section 6i.
 **Merged sites and the CSV (D5).** A merged finding's absorbed sites (`also_locations`) are
 redacted where the merge builds them and again by `sanitize_finding_text` before any dataset,
 workbook or PDF field is built (snippet and headline of every site); a test runs a credential
-through a merged site into `findings.json`, every CSV and JSON dataset, the workbook and the
+through a merged site into `json/inspection.json`, every CSV and JSON dataset, the workbook and the
 PDF's data, with `terse_output` on and off. The export that was refused in the efficiency run
 held no credential: the `also_locations` CSV cell is compact JSON, and scanned as ONE string a
 rule id naming a key beside an environment variable NAME (`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=`)
 read as a named secret literal. The secrets check now scans a CSV cell that holds a JSON list or
 object BOTH ways and reports the union: parsed and walked string by string as it does
-`findings.json` (which also sees an unquoted `.env` line inside a snippet), and as one string
+`json/inspection.json` (which also sees an unquoted `.env` line inside a snippet), and as one string
 (which also sees a value whose name sits in a neighbouring field). The one shape skipped, on the
 one-string pass only, is a named secret literal whose "value" is itself an environment variable
 name (upper case, underscores, fewer than four digits). A real key inside the cell, quoted,
@@ -4244,7 +4246,7 @@ The rule is run to completion: a deliverable never holds a failed or unfinished 
   inspection did not run to completion, so it cannot be exported for a client", and exit code 4
   (spend limit), 5 (outage) or 6 (anything else). An `--internal` run writes the export and marks it
   INTERNAL INCOMPLETE (the README line, `manifest.json` `inspection.run_incomplete` and a marking in
-  `findings.json`). The release gate refuses such a package for a client even when the files are
+  `json/inspection.json`). The release gate refuses such a package for a client even when the files are
   edited by hand (`incomplete_run_problems`).
 * A resume (`camerata inspect --resume`) sends again only what is not stored as good (section 14).
 
@@ -4267,8 +4269,8 @@ review, flags, export) is the same for both.
 | Idea | The engine cuts the code into chunks, asks the model about each chunk against the rules in batches, then a calibration stage rates each site | One model agent reads each part of the code in a review room and writes its problems. The rules are its checklist. |
 | Switch (app) | Settings, Finder row, "Engine (rule by rule)" | Settings, Finder row, "Agent (one model reviews each part)" |
 | Switch (CLI) | `--finder engine` | `--finder agent` |
-| Default today | **Engine.** `ProjectFinder::default()` is `Engine` (`crates/api-types/src/project.rs`) and `--finder` defaults to `engine`. | Opt in |
-| Model setting | scan model and calibration model | finder model (built-in default Fable 5.2) |
+| Default today | Opt in | **Agent.** `ProjectFinder::default()` is `Agent` (`crates/api-types/src/project.rs`) and `--finder` defaults to `agent`. A project saved before the setting existed loads as Engine. |
+| Model setting | scan model and calibration model | finder model (built-in default Opus 5.5) |
 | Stages used | alternatives, scan passes, resolution, detail, calibration | the agent stages of this section (pieces, joints, conventions) |
 | Rating of a row | calibration (stage 1) | the agent's own `sure`, `effort` and `label`, through the same `apply_verdicts` code a calibration verdict goes through (`run/rating.rs`). The stored note says "Rated by the review agent that found it; no second reviewer rated this problem." |
 | Needs a full inspection | no | yes: the CLI refuses it with an earlier baseline unless `--full` is given |
@@ -4321,19 +4323,31 @@ redacted. A path that is not in the room does not exist.
 |---|---|
 | the piece's files | the files the agent owes a full read |
 | context files | files outside the piece that the piece imports, nearest folder first, within 30 percent of the piece's bytes, read only |
-| `_camerata/context/tree.txt` | every path of the whole repository |
+| `_camerata/context/tree.txt` | every file of the whole repository, grouped by folder (below the table) |
 | `_camerata/context/neighbours.md` | an outline of what the piece imports and what imports it (at most 400 lines each side) |
 | `_camerata/context/context-files.txt` | the context files that were included |
 | `_camerata/checklist.md` | the rules checklist (below) |
 | `_camerata/out/` | the only place the agent may write |
 
+The tree file starts with one line that says how to read it. After it comes one line for each
+folder that holds a file, written with its whole path from the root and a closing `/` (the root is
+`./`). Under each folder line are the names of its files, one a line, indented by two spaces. So a
+folder's path is written once, and a path is the folder line joined to a file name. The line says
+too that a search of the file shows only a file name, whose folder is the nearest line above that
+ends with `/`.
+
 A repository file whose path is under `_camerata/` in any case is left out of the room and, if it is
 a piece file, is reported as not served. So a client file can never shadow a room file.
 
-**Tools.** Five: Read, Glob, Grep, LS and Write. Limits: a Read returns at most 2,000 lines and
-100,000 bytes (it stops at the last whole line that fits); a Grep returns at most 200 hits; a written
-file is at most 1,000,000 bytes; at most 200 distinct files may be written; a write is accepted only
-under `_camerata/out/`. Any other tool name is answered with a refusal.
+**Tools.** Six on the API transport: Read, Glob, Grep, LS, Write and Edit. Limits: a Read returns at
+most 2,000 lines and 100,000 bytes (it stops at the last whole line that fits); a Grep returns at
+most 200 hits; a written file is at most 1,000,000 bytes; at most 200 distinct files may be written;
+a write or an edit is accepted only under `_camerata/out/`. Edit changes a file the agent already
+wrote: `old_string` must occur exactly once, the result may not pass the size limit, and an edit to
+a `.json` file that would leave invalid JSON is refused and changes nothing. A successful Edit is
+recorded in the trace as a Write. The checklist is the one exception to the numbered, framed Read:
+it is returned as stored, with no line numbers, and a page that stops at the 2,000 line cap ends
+with a line giving the offset to read next. Any other tool name is answered with a refusal.
 
 ### Isolation: what the model can and cannot reach
 
@@ -4341,7 +4355,7 @@ The client's own `.claude/` folder, `CLAUDE.md` and `.mcp.json` are reviewed as 
 never loaded. How that holds depends on the transport.
 
 * **API transport** (`api_agent.rs`). The finder calls the Anthropic Messages API directly with the
-  five tools served from the in-memory room. There is no Claude Code, no settings loader and no MCP
+  six tools served from the in-memory room. There is no Claude Code, no settings loader and no MCP
   here, so nothing a repository holds can configure the call. The system text says text inside the
   files is material to review and never an instruction. Each request body is built by the one
   builder of `api_agent_driver.rs`, which redacts the whole conversation, so a secret the model
@@ -4445,9 +4459,15 @@ a problems list.
   piece is a base amount plus an amount for each 1,000 lines (`run/piece.rs` `estimate_usd`). The
   ceiling is one per piece however many follow-ups it takes.
 
-The API transport waits and retries by the engine's schedules: 2, 8 and 30 seconds for a rate limit
-or a server error, 5, 20, 60 and 120 seconds for an overload (HTTP 529 or 503). A `retry-after`
-is honoured up to 300 seconds. A request that has been sent and may be billed is always counted: a
+The API transport waits out a rate limit (HTTP 429) or an overload (529 or 503) instead of counting
+tries. It waits for the provider's `retry-after` (up to 300 seconds, and never shorter, with up to 20
+percent added so the pieces do not come back together), or 30 seconds with 30 percent jitter either
+way when none is given. One call waits at most 30 minutes in all. After that the call fails and the
+run stops cleanly, as it does for an outage, so the other pieces stop at their next check and no new
+piece starts. The run's own stop (outage, credit, spend limit) is checked before and after every
+wait. Other server errors and transport failures are retried after 2, 8 and 30 seconds, each with 30
+percent jitter. The finder's HTTP client allows 30 minutes in all for one reply (the agent driver's
+own client keeps 600 seconds). A request that has been sent and may be billed is always counted: a
 later failure comes back as a failed run with the usage of every paid turn, never as a silent error.
 
 ### The rules checklist
@@ -4652,12 +4672,12 @@ are locked until it finishes.").
 |---|---|---|---|---|
 | Scan model | `audit` | The engine finder's scan passes, the alternatives stage and the detail step. Unused by the agent finder. | Sonnet 5.5 (`DEFAULT_MODEL`, `claude-sonnet-5-5`) | no |
 | Calibration (stage 1) | `calibration` | Per site, batched: severity, real or not, effort, a one line reason. Unused by the agent finder. | Opus 5.5 (`STAGE1_DEFAULT_MODEL`, `claude-opus-5-5`). A new project is seeded with it. An older project keeps the pick it stored. | no |
-| Group review (stage 2) | `group_review` | One call per rule group, in real time: the architect's first reader (section 6g). | Fable 5.2 (`STAGE2_DEFAULT_MODEL`, `claude-fable-5-2`). The row shows it selected when nothing is stored. A blank model is refused. | no |
+| Group review (stage 2) | `group_review` | One call per rule group, in real time: the architect's first reader (section 6g). | Opus 5.5 (`STAGE2_DEFAULT_MODEL`, `claude-opus-5-5`). The row shows it selected when nothing is stored. A blank model is refused. | no |
 | Fix model | `fix` | One concrete fix for each row | With `fix_on_haiku` on (the default): Haiku 5.5 (`claude-haiku-5-5`) at effort `low`. With it off: the calibration model, else the scan model. | yes |
-| Finder model | `finder_model` | The agent finder's model. Used only when the finder is Agent. | Fable 5.2 (`FINDER_DEFAULT_MODEL`). Hint: "not set: Claude Fable 5.2; used when the finder is agent". | yes |
+| Finder model | `finder_model` | The agent finder's model. Used only when the finder is Agent. | Opus 5.5 (`FINDER_DEFAULT_MODEL`). Hint: "not set: Claude Opus 5.5; used when the finder is agent". | yes |
 | Duplicate check | `duplicate_check` | The possible-duplicate check (section 6h) | Sonnet 5.5 (`DUP_CHECK_DEFAULT_MODEL`). Hint: "not set: Claude Sonnet 5.5". | yes |
 | Clone judge | `clone_judge` | The duplicate-code checker, which judges clone candidates. Runs only when a clone rule is selected. | The project's fast tier model, whose built-in default is Haiku 5.5. Hint: "not set: the project's fast tier model". | yes |
-| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Engine** (`ProjectFinder::default()`) | no |
+| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Agent** (`ProjectFinder::default()`; a project saved before the setting existed loads as Engine) | no |
 
 "(not set)" means the setting is empty and the run uses the default named in the table. It is
 offered only where a run-time default exists that an explicit pick would override. Choosing it sends
@@ -4960,7 +4980,7 @@ holds, with no model call, so the operator can open those rows first and rule th
 
 **It never hides, drops, merges or lowers anything.** It changes no severity, kind, escalation or
 decision. A flagged row stays a problem until the operator rules it out. The flag reaches the
-operator only: the review UI, the internal workbook's technical band and an internal `findings.json`.
+operator only: the review UI, the internal workbook's technical band and an internal `json/inspection.json`.
 A client package carries neither the flag nor its reasons (pinned by
 `crates/server/src/report_export/wo9/possible_fp_tests.rs`). The UI shows it in three places. On the row
 it is a chip with a dashed violet outline (hover text is the reasons as sentences). In the queue it is
@@ -5174,7 +5194,7 @@ export ZIP the UI's export button makes. No BFF, no UI. A client engagement is t
 | `--full` | off | Ignore the on-disk incremental cache and re-scan every file. |
 | `--verbose` | off | Also print the ledger's per rule detail (rule id, ran, files evaluated, findings). |
 | `--max-cost-usd <USD>` | no limit | The spend limit (section 6j). Must be positive and finite. |
-| `--efficiency <NAME=on\|off>` | all on | Switch a token efficiency measure for this run. Repeatable. Wins over `CAMERATA_EFFICIENCY`. Measures (`crates/server/src/efficiency.rs`): `warm_schedule`, `label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter`, `fix_on_haiku`, `terse_output`, `batch_default`, `applies_to_routing`, `candidates_prefilter`. An unknown name is refused before anything runs. |
+| `--efficiency <NAME=on\|off>` | all on | Switch a token efficiency measure for this run. Repeatable. Wins over `CAMERATA_EFFICIENCY`. Measures (`crates/server/src/efficiency.rs`): `warm_schedule`, `label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter`, `fix_on_haiku`, `terse_output`, `batch_default`, `applies_to_routing`, `candidates_prefilter`, `batch_warm`. An unknown name is refused before anything runs. |
 | `--internal` | off (so a client engagement) | Not a client engagement: the maintainer's own development. Without it, `--backend cli` and OpenRouter models are refused before any file is read; the repository's own code is never executed; an incomplete run exports nothing. With it, an incomplete run is exported and marked INTERNAL INCOMPLETE. |
 | `--run-client-tooling` | off | Opt in to steps that execute the client's own code on a client engagement (today the `cargo clippy` preview, which builds the crate and so runs its build scripts and procedural macros). Recorded in the ledger and stated in the report. |
 | `--consensus` | off | Run the AI audit three times and keep only the findings at least two runs report (`CONSENSUS_PASSES` 3, `CONSENSUS_QUORUM` 2). About three times the AI cost. Not with `--finder agent`. |
@@ -5196,6 +5216,11 @@ backend runs) and `CAMERATA_CLI_TIMEOUT_SECS` (the hard cap on one `claude` call
 * `CAMERATA_LLM_IDLE_SECS` (how long a streaming reply may be silent before it fails, default 120), `llm.rs`;
 * `CAMERATA_LLM_MAX_SECS` (a total time backstop for the deep tier's non streaming calls only, default 600), `ai_audit/scan_passes.rs`;
 * `CAMERATA_SCAN_EXCLUDE_DIRS` (a comma list of extra directory names the file walk skips), `onboard/files.rs`;
+
+What a run reads is what it bills, from one list. A project's Excluded by agreement list (`Project::scan_exclusions`, `onboard/scope.rs`: globs matched against `<repo name>/<path within the repo>`, set on the Inspection settings screen or with `camerata inspect --exclude` and `camerata count --exclude`) is applied in the shared walk (`WalkSink::classify` in `onboard/files.rs`, the one place a walked file is classified) and by every other reader of the checkout: the runtime audit walk, the dependency manifest walk, the osv-scanner results (filtered by path), the preview linter results (filtered by path), the symbol search (hits filtered), the code viewer, the finding context (single and batch) and the evidence check's source read. A file it names is listed under Coverage as "excluded by agreement" (`SkipReason::ExcludedByAgreement`) and is not billed. A file over the 1 MB file size limit (`MAX_FILE_BYTES`) or with a line over the room's read page that the list does not name is a warning, never a refusal, on every start path (`scope::start_checks` returns it with the other warnings: the CLI prints it to stderr, the desktop jobs and the scan route put it in the report notes, and the desktop lists it before Start from `RepoSizeWire::over_limit` with an "Exclude by agreement" action and Start left on); a pattern that matches no file still refuses the run before any model call (`scope::over_limit_refusal`) and the desktop lists it with a "Remove pattern" action and Start held. The list is part of a run's resume identity (`ModelsRecord::scan_exclusions`): a resume with a different list is refused. A pattern that matches only files never read anyway (a `node_modules`, vendored or build folder: `never_read_folder`) is a warning, never a refusal, on the desktop and the CLI (`start_checks`, preflight `warned_patterns`, `count`); Remove pattern is still offered. The package still lists it (`SkipReason::ExcludedNeverRead`, "excluded by agreement; nothing here is read by default") in Coverage, the PDF and the workbook. A pattern that matches nothing at all, or names a repo that was not read, still blocks. The secret-shaped floor rules (`audit::SECRET_SHAPED_RULES`) still search files that are not read for the inspection: a file over the 1 MB file size limit up to `MAX_SECRET_SCAN_BYTES` (20 MB) is opened one at a time by the floor (`ExtractedRepo::secret_searchable` holds its path, never its content; `files::read_for_secret_search`), and a file with a line over the room's read page keeps its decoded text in `ExtractedRepo::long_line_contents` for the same pass (`audit::audit_long_line_secrets`, which then runs the same redaction and context steps as `audit_files`). Neither is read for the inspection, sent to a model, billed, counted or put in the room. The floor's opening of those files has one total byte budget per run, all repos together (`MAX_SECRET_SEARCH_TOTAL_BYTES`, 200 MB; `files::plan_secret_search` takes the candidates in path order and skips a file that does not fit in what is left; `scope::walk_checks` applies the same rule to the pre-start warning), and the skipped files are counted in `SkippedTotals::secret_over_budget`. A file over 20 MB, one past the search budget, past the file limit or not decodable as text gets the file-name checks only (`audit_unread_paths`), and Coverage says "not searched for secrets" for it (`SkippedTotals::secret_*`, `coverage_gaps::secret_search_sentence`). A file excluded by agreement is never opened.
+
+Hand-written files of a type the inspection does not read yet are the one list `NOT_INSPECTED_TYPES` in `onboard/files.rs`: `WalkSink::classify` names them (never opening them) only after the exclusion list, the noise filter and every admission list have declined them, so a type moves out of the list by moving into an admission list. They are not read, billed or searched for secrets, and every surface states them from `ExtractedRepo::not_inspected`: `camerata count` (a `not_read` group, one text line with a per type tally and the paths capped at 10), the start warning and preflight (`not_inspected_paths`), the app's over limit notice and Coverage (`SkipReason::NotInspectedType`, "not billed" in the summary). A listed name that the runtime audit (`runtime_audit::reads_declared_runtime`) or the dependency audit (`dep_audit::reads_package_manifest`) still opens for declared versions is split off by `files::is_versions_only_type`, derived from those readers so it cannot drift, and carries the second reason (`SkipReason::NotInspectedVersionsOnly`, preflight `not_inspected_versions_only_paths`). A listed type excluded by agreement is named as excluded by agreement, and a tracked file missing from disk is not listed. `ExtractedRepo::unclassified_types` counts the files nothing claims by type and is serialized only in `camerata count --json` (`unclassified_types`), for the operator. The method text (`files::inspected_types_sentence`) says a file of such a type is listed under Coverage as not read.
+
 * `CAMERATA_DISABLE_DEP_AUDIT` (turns the dependency audit off; a test seam, never for production), `dep_audit.rs`;
 * `CAMERATA_NO_KEYCHAIN` (do not read the OS keychain; a test seam that adds no credential source), `crates/llm/src/credentials.rs`;
 * `CAMERATA_EXPORT_TRIAGE_LOG` (`1` or `true` adds the optional `csv/triage-log.csv` to an export), `CAMERATA_REPORT_BRAND` and `CAMERATA_REPORT_PREPARED_BY` (standing defaults for the export's brand and prepared by lines when the export dialog posts none), `report_export.rs`.
@@ -5464,6 +5489,60 @@ the cache, so later reads (including on handler threads) never touch the Keychai
 prompts at most once per launch. A change made outside the app (Keychain Access) is seen on the
 next launch.
 
+#### Stable key reader (#574)
+
+macOS ties a Keychain "Always Allow" to the exact hash of the binary that asks, and every
+rebuilt `camerata` has a new hash, so the approval was lost on each build. The Anthropic key is
+therefore read by a tiny separate program, `camerata-key-reader` (`crates/key-reader`, no
+workspace dependencies, only `security-framework`). Its hash changes only when its own code
+changes, so the approval is given once and survives engine rebuilds.
+
+* The reader takes no arguments and reads one item, service `camerata`, account
+  `anthropic_api_key`, through the Security framework (not `/usr/bin/security`). It writes the key
+  to stdout; the engine (`crates/llm/src/key_reader.rs`) reads that pipe. The key is never in an
+  env var, argument, file or log line (tests assert each).
+* The engine looks for the reader at the stable install path
+  `$HOME/.camerata/bin/camerata-key-reader` FIRST, then next to the running binary as a fallback
+  (a copy beside each build's binary can have its own hash and so its own prompt; the stable
+  path is one file for every build and worktree). It runs a reader only by absolute path, only
+  when the file is owned by the current user and has no group or world write bit; otherwise it
+  logs one line and treats it as missing. If none is usable it uses the direct keychain read it
+  always had. Off macOS the reader is never used (Linux keeps its Secret Service read).
+* Exit codes: 0 with the key on stdout; 2 "no such entry", which the engine treats as no key
+  configured (nothing else is tried); 1 for anything else (locked, denied, cancelled). If the
+  reader fails, prints nothing, prints 8192 bytes or more, or runs past `READER_TIMEOUT` (5
+  seconds, then it is killed), the read fails closed: the direct read is NOT tried and the
+  existing "no API key is configured" message results (an `ANTHROPIC_API_KEY` env fallback still
+  applies). A failure is remembered for the life of the process, so later reads do not re-spawn
+  the reader, wait again or raise the dialog again.
+* `CAMERATA_NO_KEYCHAIN=1` disables all keychain access, the reader included (it is never run).
+* Only the Anthropic key goes through the reader; the other credentials use the direct read.
+* Install: `scripts/install-key-reader.sh` builds the reader and copies it to
+  `$HOME/.camerata/bin/` (and any extra folders you name), skipping a copy whose SHA-256 is
+  unchanged.
+* The reader's hash stays put only while its build inputs do. It also changes on a Rust
+  toolchain bump, a `security-framework` or lockfile bump, or a profile or `RUSTFLAGS` change,
+  not only on an edit to `crates/key-reader`. The install script skips the copy when the built
+  bytes equal the installed ones, but it cannot make a different build hash the same: after any
+  of those changes the owner approves once more. Build the reader the same way each time
+  (release, no extra flags).
+
+Owner check by hand (one-time approval survives a rebuild; not run by the tests):
+
+1. `scripts/install-key-reader.sh` (builds and installs the reader to `~/.camerata/bin`).
+2. Approve it once by running the installed reader directly, NOT through the engine (the engine
+   gives up after 5 seconds, and the dialog asks for your login password):
+   `~/.camerata/bin/camerata-key-reader >/dev/null`, enter the password, choose Always Allow.
+   Running it again must print nothing and return at once.
+3. Rebuild the engine (`cargo build --release -p camerata`) and run a command that reads the key,
+   for example the app or `camerata inspect` on a throwaway project. There must be no dialog.
+   Running `scripts/install-key-reader.sh` again must print `unchanged:`.
+4. Only a change to the reader's build (see above) asks again. A reader that is locked out or
+   denied makes the run stop with "no API key is configured" instead of hanging.
+
+The distribution build (#73) replaces this with a Developer ID signature, whose Team ID keeps
+approvals stable for the shipped app.
+
 The GitHub provider carries its token, so `ProviderCell` (the swappable provider slot in
 `AppState`) is re-selected whenever the `github_token` credential is saved or deleted, and the
 tracker poller reads the cell on every tick; a token saved after launch is used immediately.
@@ -5507,7 +5586,7 @@ JSON files in `dirs::data_dir()/camerata/`:
 |---|---|---|
 | `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set, `TierMap` (fleet bands + fallback chains), `DesignerBand` (enabled + model), `StepModels` (per-step helper models), `ModelProfile` (Balanced/MaxEfficiency/MaxQuality/Custom), `L3ReviewConfig` (enabled + model), stall thresholds, loop guard, the soft-context layers (product brief, operating principles, curated memory; see 5b), and the work `HierarchySchema` (work-item `WorkType`s + `TypeRelation` nesting rules, the design-page work-type graph; `GET`/`POST /api/projects/:id/hierarchy`). All of these travel with the project export. |
 | `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export) + `bombe_enabled` (global animation on/off). Credentials (OpenRouter key, GitHub token) are stored in the system keychain, not in this file. |
-| `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
+| `onboarding-draft-<project>.json` (one file per project, each with its own `.bak` and set-aside copies; the old shared `onboarding-draft.json` is split on first start and kept as `onboarding-draft.json.shared-backup`) | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map in each project's file (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
 | `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, `RoutineStatus` (Idle/Running/BlockedNeedsReview/Done/Failed), last_run/last_fired, project_id, and a bounded `runs` history (cap 20). The auto-fire scheduler (`auto_fire.rs`) ticks over these; see 4c. |
 | `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
@@ -5636,7 +5715,7 @@ recorded no commit, `commit_unavailable` (object missing: the working tree rides
 file is there), `source_deleted` (date in `deleted_at`, nothing read), `file_missing`
 (including a symlink or submodule at the commit), `too_large`, `not_utf8`. The UI keys its amber
 banner on `source == "working_tree"`. `source_for_read` also refuses a repo name that is not a
-plain `owner/name` a project owns (both endpoints). Up to 400 KB the file is returned whole; up to
+plain `owner/name` a project owns (both endpoints). Up to 1 MB the file is returned whole; up to
 4 MB as an 800-line `window {from, to, total_lines}` (only the window plus 200 lines is
 highlighted); above that `too_large`. Body: `language`, `block` (enclosing block of `around`),
 `classes` (the ten token classes) and `lines`, each a list of `[class index or null, text]`
@@ -5689,7 +5768,7 @@ function, and the window radius `CONTEXT_RADIUS` lives in the same module). The 
 the line AS DISPLAYED, redacted with its file (batch) or block (finding-context): comparing the raw
 line would make `expect` a substring oracle on a line the display hides, and a blank displayed
 line matches no non-empty snippet, so a blanked line cannot be probed through "contained by". Every other entry is the shared `FindingContextOutcome` vocabulary (`commit_unavailable`,
-`source_deleted`, `file_missing`, `not_utf8`, `too_large` at the 400 KB cap, `line_gone`,
+`source_deleted`, `file_missing`, `not_utf8`, `too_large` at the 1 MB cap, `excluded_by_agreement` (a file Excluded by agreement names), `line_gone`,
 `path_traversal`, `unavailable` for `Busy`).
 
 Nothing is re-implemented. Where code may be read from is `source_for_read` (called once per
@@ -6137,7 +6216,7 @@ view shows (`INTERNAL_ONLY_PHRASES`); the names are distinctive (`review_*`, `re
 `*_active_ms`) so a scan has no false positives. `camerata-ui-core` tests that every key the log
 and the stats JSON write is on that list and every listed key is written, so a field added to the
 internal shapes and not listed fails there. (2) The server's `release_gate::internal_only_tests`
-build a real package (workbook, `findings.json`, `manifest.json`, README, every CSV and JSON
+build a real package (workbook, `json/inspection.json`, `manifest.json`, README, every CSV and JSON
 dataset, the PDF member, the PDF's data and the shipped Typst template) and assert none of those
 names or phrases appears anywhere in it, including every part of the workbook, and
 `the_scan_reaches_every_surface` plants a listed name on each surface to prove the scan finds it
@@ -6525,7 +6604,7 @@ Project **config** (transferable) and project **data** (local) are kept in separ
 | Project config | `projects.json` — repos, ruleset, onboarded state, `tier_map` | YES — the export is config-only |
 | Units of Work | `uow.json` | NO — local to each developer |
 | Story spine | `stories.json` (`InMemoryStoryStore`) | NO |
-| Onboarding draft | `onboarding-draft.json` | NO |
+| Onboarding draft | `onboarding-draft-<project>.json` (one per project) | NO |
 | Local repo paths | `settings.json` (`repo_paths`) | NO |
 
 UoWs carry in-progress dev-lifecycle state (stage, branch, gate provenance, decision records, run
@@ -7834,7 +7913,7 @@ equals the rule's authored text, as the export prints it, is labelled a Standard
 equality. A primary that inherits a merged member's fix inherits the marker with it. Every export labels each fix with
 `report_export::fix_type_label`: "Tailored fix" (a `fix_specific` that is not marked), "Standard fix"
 (the marked one, or a row with only the rule's own `fix`), or empty (no fix text). The label is the
-`fix_type` field of every `findings.json` row and every row of `json/all-findings.json` and its CSV,
+`fix_type` field of every `json/inspection.json` row and every row of `json/all-findings.json` and its CSV,
 of `json/deviations.json` (always "Standard fix", the rule's own guidance) and of each curated site
 in the PDF's data; the workbook has a "Fix type" column on the findings sheets and the Deviations
 sheet, and the PDF prints the label in front of the fix. The release gate's dataset check demands

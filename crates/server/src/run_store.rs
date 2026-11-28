@@ -36,7 +36,10 @@
 //! individual model calls of a stage are recorded as the stage reaches them, because how many
 //! there are (files in a chunk, findings in a batch) depends on the stage before it.
 
+pub mod engine_pin;
 pub mod journal;
+pub mod recheck;
+pub mod store_only;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -246,7 +249,22 @@ pub struct ModelsRecord {
     /// older runs still resume: [`Self::hold_finder`] keeps it.
     #[serde(default)]
     pub finder: String,
+    /// The agent finder's resolved model id when the run's finder is the agent finder, so a resume
+    /// finishes the remaining pieces on the model the run started on even after the built-in
+    /// default moves. Empty for an engine run and for a run saved before it was recorded.
+    /// Not part of [`Self::matches_for_resume`]: [`Self::hold_finder_model`] keeps it.
+    #[serde(default)]
+    pub finder_model: String,
+    /// The project's Excluded by agreement list (normalized) the run started with. Part of the
+    /// run's resume identity: checkpointed pieces may hold findings in files a different list
+    /// excludes (or lack ones it admits), so a resume with another list is refused. Empty for a
+    /// run saved before it was recorded, which read every admitted file.
+    #[serde(default)]
+    pub scan_exclusions: Vec<String>,
 }
+
+/// The agent finder's default model when a run saved without a recorded finder model started.
+const LEGACY_FINDER_MODEL: &str = "claude-fable-5-2";
 
 /// The word a finder is recorded as.
 fn finder_word(finder: crate::ai_audit::agent_finder::FinderChoice) -> &'static str {
@@ -281,7 +299,59 @@ impl ModelsRecord {
             resolved: true,
             group_review: controls.group_review_model_for(),
             finder: finder_word(controls.finder).to_string(),
+            finder_model: if controls.finder == crate::ai_audit::agent_finder::FinderChoice::Agent {
+                controls.finder_model_for()
+            } else {
+                String::new()
+            },
+            scan_exclusions: controls.scope.patterns().to_vec(),
         }
+    }
+
+    /// Hold a resumed agent finder run to the finder model it started with, and return the one
+    /// line the resume pre-flight prints about it. An engine run has no finder model (`None`).
+    /// A model the resume names itself (a flag or a project pick, not the built-in default) that
+    /// differs from the recorded one is refused: the stored pieces came from the recorded model.
+    /// A run saved before the model was recorded keeps the current pick, and the line says so.
+    pub fn hold_finder_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        if controls.finder != crate::ai_audit::agent_finder::FinderChoice::Agent {
+            return Ok(None);
+        }
+        let recorded = self.finder_model.trim();
+        let explicit = controls
+            .finder_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        if recorded.is_empty() {
+            // A run saved before the model was recorded started on the default of that time,
+            // Fable 5.2. With no explicit pick it keeps that model; an explicit pick stands.
+            if explicit.is_some() {
+                return Ok(Some(format!(
+                    "The finder runs on {}: this run did not record a finder model.",
+                    controls.finder_model_for()
+                )));
+            }
+            controls.finder_model = Some(LEGACY_FINDER_MODEL.to_string());
+            return Ok(Some(format!(
+                "The finder stays on {LEGACY_FINDER_MODEL}, the model this run started on (it \
+                 recorded none, and this was the default then)."
+            )));
+        }
+        if let Some(pick) = explicit.filter(|m| *m != recorded) {
+            return Err(format!(
+                "this run's finder is on {recorded}, and this resume asks for {pick}. The stored \
+                 finder pieces came from {recorded}, so resume it with the same model, or start \
+                 a new run"
+            ));
+        }
+        controls.finder_model = Some(recorded.to_string());
+        Ok(Some(format!(
+            "The finder stays on {recorded}, the model this run started with."
+        )))
     }
 
     /// Hold a resumed run to the finder it started with, and return the run note when that
@@ -407,6 +477,15 @@ pub struct RunRecord {
     /// How many times a process has worked on the run: 1 for the first, 2 after one resume.
     pub attempt: u32,
     pub engine_version: String,
+    /// The build, rule library and clone judge model the run started on (see [`engine_pin`]). `None`
+    /// for a run saved before it was recorded, which cannot be resumed.
+    #[serde(default)]
+    pub pin: Option<engine_pin::EnginePin>,
+    /// Each time the run's deterministic stages were rerun on another build with no model calls
+    /// (#588), oldest first: the build that made the model work and the build that ran the
+    /// checks. The pin above never changes, so a normal resume on another build stays refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reruns: Vec<engine_pin::RerunRecord>,
     /// Names the project (the repos together) so the cleanup and `latest` can find its runs.
     pub project_key: String,
     pub repos: Vec<RepoRecord>,
@@ -430,6 +509,52 @@ pub struct RunRecord {
     /// attempts; each note appears once.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Wall-clock segments: one per session that worked on the run (the first scan, then each
+    /// resume), in order. A resume appends; an earlier segment is never changed. Operator-only
+    /// figures, never exported. Empty for a run saved before this existed.
+    #[serde(default)]
+    pub segments: Vec<RunSegment>,
+}
+
+/// One session's wall-clock time on a run: from the moment the process opened the run to the
+/// moment it finished, failed, was cancelled or dropped it. Operator-only; never exported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSegment {
+    /// Unix milliseconds when the session opened the run.
+    pub started_unix_ms: u64,
+    /// Unix milliseconds when the session ended.
+    pub finished_unix_ms: u64,
+    /// Milliseconds on a monotonic clock between the two, so a system clock change during the
+    /// session does not distort it. It can be shorter than the wall-clock gap when the machine
+    /// slept, because the monotonic clock does not count sleep.
+    pub elapsed_ms: u64,
+}
+
+/// When this process opened the run: the start of the segment [`RunStore::end_segment`] closes.
+struct Session {
+    started_unix_ms: u64,
+    started: std::time::Instant,
+}
+
+impl Session {
+    fn begin() -> Self {
+        Self {
+            started_unix_ms: crate::stage_telemetry::now_unix_ms(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// The segment as it stands now: ends at this moment. The open segment is written with
+    /// this at every save, so a session that is killed still leaves a segment whose end is the
+    /// last save.
+    fn segment_now(&self) -> RunSegment {
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        RunSegment {
+            started_unix_ms: self.started_unix_ms,
+            finished_unix_ms: self.started_unix_ms.saturating_add(elapsed_ms),
+            elapsed_ms,
+        }
+    }
 }
 
 /// What a process working on a run looks like from outside.
@@ -511,10 +636,12 @@ pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
 }
 
 /// Write `bytes` to `path` so a reader (or a crash) sees the old file or the new one, whole.
+/// A write or rename that fails removes the temporary file: it holds the same content (model
+/// replies or a report derived from client code) and must not be left behind.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = temp_path_for(path);
-    {
+    let written = (|| {
         let mut file = std::fs::File::create(&tmp)?;
         #[cfg(unix)]
         {
@@ -523,8 +650,24 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    written
+}
+
+/// The file in a run's folder that holds the run's sealed report: the whole report the app's
+/// review screens read, so a command line run can be reviewed. Never part of an export.
+pub const REPORT_FILE: &str = "report.json";
+
+/// Write the sealed `report` as JSON to `path` (a temporary file in the same folder, then a
+/// rename), readable by its owner only. It reads back as a [`crate::onboard::ScanReport`].
+pub fn write_report(path: &Path, report: &crate::onboard::SealedReport) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(report).map_err(std::io::Error::other)?;
+    write_atomic(path, &bytes)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -755,6 +898,9 @@ pub struct TreeState {
     pub clean: bool,
     /// A digest of the status and the diff against HEAD.
     pub digest: String,
+    /// The paths git reports as changed or new, in path order. Named in the refusal of a resume,
+    /// an operator-only message; never stored, never put in a package.
+    pub changed: Vec<String>,
 }
 
 /// Read the commit and the tree state of `dir` with git. A folder that is not a git checkout has
@@ -775,6 +921,7 @@ pub fn tree_state(dir: &Path) -> TreeState {
     let status = git(&["status", "--porcelain", "-z", "--untracked-files=all"]);
     let diff = git(&["diff", "HEAD", "--no-ext-diff"]);
     let clean = status.as_ref().is_some_and(Vec::is_empty);
+    let changed = status.as_deref().map(changed_paths).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(status.unwrap_or_default());
     hasher.update([0u8]);
@@ -783,8 +930,44 @@ pub fn tree_state(dir: &Path) -> TreeState {
         commit,
         clean,
         digest: hex(&hasher.finalize()),
+        changed,
     }
 }
+
+/// The paths in the output of `git status --porcelain -z`, in path order. A rename or copy entry
+/// is followed by its old path, which is not a changed file of its own.
+fn changed_paths(status: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(status);
+    let mut tokens = text.split('\0').filter(|t| !t.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = tokens.next() {
+        let Some(path) = entry.get(3..) else { continue };
+        paths.push(path.to_string());
+        if matches!(entry.as_bytes().first(), Some(b'R' | b'C')) {
+            tokens.next();
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// At most [`CHANGED_PATHS_NAMED`] of `paths`, then how many more.
+fn named_changes(paths: &[String]) -> String {
+    let shown = paths
+        .iter()
+        .take(CHANGED_PATHS_NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match paths.len().saturating_sub(CHANGED_PATHS_NAMED) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+/// How many changed paths a resume refusal names.
+const CHANGED_PATHS_NAMED: usize = 20;
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -792,12 +975,34 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 // ── The store ────────────────────────────────────────────────────────────────────────────────
 
+/// The prompt seed a run record holds (hex), as bytes.
+pub(crate) fn decode_seed(hex: &str) -> [u8; crate::prompt_frame::NONCE_BYTES] {
+    let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
+    }
+    out
+}
+
 /// A run opened for work by this process.
 pub struct RunStore {
     dir: PathBuf,
     state: Mutex<StoreState>,
     /// Held for the life of the store.
     _lock: RunLock,
+    /// The open segment of this process's work on the run; taken when the segment is closed.
+    session: Mutex<Option<Session>>,
+    /// Set when the run is opened for a rerun of its deterministic stages (#588): the list the
+    /// journal and the agent finder's twin record every reply the store did not hold in. `None`
+    /// for every other run.
+    rerun_misses: Option<store_only::StoreOnlyMisses>,
+    /// The rerun this process is making, kept off the run until it reaches its end
+    /// ([`RunStore::commit_rerun`]): a rerun that is refused is not one the run went through.
+    pending_rerun: Mutex<Option<engine_pin::RerunRecord>>,
+    /// The bytes of `run.json` as they were before this process opened the run, put back when the
+    /// store is dropped unless [`RunStore::keep_changes`] was called: a recheck that is refused
+    /// leaves the saved run as it found it.
+    restore_on_drop: Mutex<Option<Vec<u8>>>,
 }
 
 pub(crate) struct StoreState {
@@ -828,6 +1033,8 @@ pub struct NewRun {
     pub origin: RunOrigin,
     /// The cockpit project the run is started in (`None` for the command line).
     pub project_id: Option<String>,
+    /// The build and rule library this run starts on, from [`engine_pin::EnginePin::for_run`].
+    pub pin: engine_pin::EnginePin,
 }
 
 /// A fresh run id: the time, then six random hex digits.
@@ -882,6 +1089,7 @@ impl RunStore {
     /// Begin a new run: the folder, the record with every part pending and the lock, all written
     /// before any work starts.
     pub fn create(new: NewRun) -> Result<Arc<Self>, RunStoreError> {
+        let session = Session::begin();
         let run_id = new_run_id();
         let dir = runs_dir().join(&run_id);
         create_private_dir(&dir).map_err(|e| RunStoreError::Io(e.to_string()))?;
@@ -914,6 +1122,8 @@ impl RunStore {
             project_id: new.project_id,
             attempt: 1,
             engine_version: engine_version(),
+            pin: Some(new.pin),
+            reruns: Vec::new(),
             project_key: new.project_key,
             repos,
             rules_fingerprint: new.ai_scan_key.directives_fingerprint.clone(),
@@ -925,6 +1135,7 @@ impl RunStore {
             plan: plan_for(&new.repos, new.include_alternatives),
             incomplete_reasons: Vec::new(),
             notes: Vec::new(),
+            segments: vec![session.segment_now()],
         };
         let lock = RunLock::acquire(&dir)?;
         let store = Arc::new(Self {
@@ -938,6 +1149,10 @@ impl RunStore {
                 submitted: Default::default(),
             }),
             _lock: lock,
+            session: Mutex::new(Some(session)),
+            rerun_misses: None,
+            pending_rerun: Mutex::new(None),
+            restore_on_drop: Mutex::new(None),
         });
         store.persist()?;
         Ok(store)
@@ -947,12 +1162,31 @@ impl RunStore {
     /// process holds it), starts the next attempt and marks the run running. The caller has
     /// already decided the resume is allowed ([`check_resume`]).
     pub fn open(run_id: &str) -> Result<Arc<Self>, RunStoreError> {
+        Self::open_with(run_id, None)
+    }
+
+    /// [`Self::open`] for a rerun of the run's deterministic stages (#588): the store answers
+    /// every model request from what it holds and records each one it cannot in `misses`.
+    fn open_for_rerun_with(
+        run_id: &str,
+        misses: store_only::StoreOnlyMisses,
+    ) -> Result<Arc<Self>, RunStoreError> {
+        Self::open_with(run_id, Some(misses))
+    }
+
+    fn open_with(
+        run_id: &str,
+        rerun_misses: Option<store_only::StoreOnlyMisses>,
+    ) -> Result<Arc<Self>, RunStoreError> {
         let dir = runs_dir().join(run_id);
         let mut record = load_record(&dir)?;
         let lock = RunLock::acquire(&dir)?;
         record.attempt += 1;
         record.status = RunStatus::Running;
         record.incomplete_reasons.clear();
+        // This session's segment is on disk from the start; an earlier one is never touched.
+        let session = Session::begin();
+        record.segments.push(session.segment_now());
         let store = Arc::new(Self {
             dir,
             state: Mutex::new(StoreState {
@@ -964,6 +1198,10 @@ impl RunStore {
                 submitted: Default::default(),
             }),
             _lock: lock,
+            session: Mutex::new(Some(session)),
+            rerun_misses,
+            pending_rerun: Mutex::new(None),
+            restore_on_drop: Mutex::new(None),
         });
         store.persist()?;
         Ok(store)
@@ -971,6 +1209,67 @@ impl RunStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The list of replies a rerun needed and the store did not hold; `Some` only for a run
+    /// opened by [`open_for_rerun`].
+    pub fn rerun_misses(&self) -> Option<&store_only::StoreOnlyMisses> {
+        self.rerun_misses.as_ref()
+    }
+
+    /// The rerun this process is making has reached its end with every reply served from the
+    /// store: put it on the run (see [`RunRecord::reruns`]) and its note, and return it for the
+    /// ledger. `None` when this process is not making a rerun, or already committed it.
+    pub fn commit_rerun(&self) -> Option<engine_pin::RerunRecord> {
+        let rerun = self
+            .pending_rerun
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        self.add_note(&format!(
+            "Rerun of the deterministic stages: the model work is build {} and the checks ran on \
+             build {}, with no model calls.",
+            rerun.model_build.short_commit().unwrap_or_default(),
+            rerun.deterministic_build.short_commit().unwrap_or_default()
+        ));
+        self.lock_state().record.reruns.push(rerun.clone());
+        let _ = self.persist();
+        Some(rerun)
+    }
+
+    /// Put `bytes` (the run's `run.json` as it was before this process opened it) back when the
+    /// store is dropped, unless [`Self::keep_changes`] is called first.
+    pub fn restore_run_json_on_drop(&self, bytes: Vec<u8>) {
+        *self
+            .restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(bytes);
+    }
+
+    /// The work of this process on the run is to stay: nothing is put back when it is dropped.
+    pub fn keep_changes(&self) {
+        self.restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
+    /// The recheck of this saved run reached its end with the export written: put what ran again
+    /// on the run (see [`RunRecord::reruns`]) and its note. Called once, after the export.
+    pub fn commit_recheck(&self, rerun: engine_pin::RerunRecord) {
+        let redone = rerun.recheck.as_ref().map_or(0, |d| d.clone_parts.len());
+        let asked: usize = rerun
+            .recheck
+            .as_ref()
+            .map_or(0, |d| d.clone_parts.iter().map(|p| p.asked_again).sum());
+        self.add_note(&format!(
+            "Recheck of a saved run: the model work is build {}; the final checks and the export \
+             ran on build {}; {redone} clone check part(s) were redone, {asked} call(s) made.",
+            rerun.model_build.short_commit().unwrap_or_default(),
+            rerun.deterministic_build.short_commit().unwrap_or_default(),
+        ));
+        self.lock_state().record.reruns.push(rerun);
+        let _ = self.persist();
     }
 
     /// Where the run's stage checkpoints live: inside the run's own folder, so they go when the
@@ -1025,6 +1324,25 @@ impl RunStore {
         models.hold_group_review_model(controls, explicit)
     }
 
+    /// [`ModelsRecord::hold_finder_model`] for this run.
+    pub fn hold_finder_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        self.record().models.hold_finder_model(controls)
+    }
+
+    /// [`engine_pin::EnginePin::hold_clone_judge_model`] for this run. A run saved without a pin
+    /// holds nothing (it cannot be resumed at all).
+    pub fn hold_clone_judge_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Option<String> {
+        self.record()
+            .pin
+            .and_then(|pin| pin.hold_clone_judge_model(controls))
+    }
+
     /// [`ModelsRecord::hold_finder`] for this run.
     pub fn hold_finder(&self, controls: &mut crate::cost_cap::RunControls) -> Option<String> {
         self.record().models.hold_finder(controls)
@@ -1032,12 +1350,8 @@ impl RunStore {
 
     /// The secret the prompt tokens of this run are drawn from.
     pub fn nonce_seed(&self) -> [u8; crate::prompt_frame::NONCE_BYTES] {
-        let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
         let hex = self.lock_state().record.nonce_seed.clone();
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
-        }
-        out
+        decode_seed(&hex)
     }
 
     /// Record a note on the run (once: the same text is not added twice) and write the record.
@@ -1058,10 +1372,56 @@ impl RunStore {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Close this process's wall-clock segment of the run, once: its end is now. The segment has
+    /// been on the record since the session opened (and its end refreshed at every save, see
+    /// [`Self::persist`]), so a killed session leaves one too. Called by [`Self::finish`] and,
+    /// for a session that never reaches it (the job failed or was cancelled, the command line
+    /// returned an error), when the store is dropped. A later call does nothing.
+    pub fn end_segment(&self) {
+        let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            return;
+        };
+        if let Some(last) = self.lock_state().record.segments.last_mut() {
+            *last = session.segment_now();
+        }
+        let _ = self.persist();
+    }
+
+    /// Take this session's segment off the record, for a session that did no work (a resume
+    /// refused before its first call). Earlier sessions' segments stay. Does nothing once the
+    /// segment is closed.
+    pub fn discard_segment(&self) {
+        let taken = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if taken.is_some() {
+            self.lock_state().record.segments.pop();
+            let _ = self.persist();
+        }
+    }
+
     /// Write `run.json`.
     pub fn persist(&self) -> Result<(), RunStoreError> {
         let mut state = self.lock_state();
         state.record.updated_at = now();
+        // While the session is open its segment ends at this save.
+        if let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if let Some(last) = state.record.segments.last_mut() {
+                *last = session.segment_now();
+            }
+        }
         let bytes = serde_json::to_vec_pretty(&state.record)
             .map_err(|e| RunStoreError::Io(e.to_string()))?;
         write_atomic(&self.dir.join("run.json"), &bytes)
@@ -1121,6 +1481,7 @@ impl RunStore {
     /// The end of an attempt: sets aside replies a later step rejected, decides which parts are
     /// done, and marks the run complete or incomplete.
     pub fn finish(&self, outcome: &FinishOutcome) {
+        self.end_segment();
         journal::quarantine_rejected(self, &outcome.failures);
         journal::count_calls(self);
         {
@@ -1192,6 +1553,22 @@ impl RunStore {
     }
 }
 
+impl Drop for RunStore {
+    /// A session that ended without [`RunStore::finish`] (a failed or cancelled job, an error
+    /// return) still records the end of its segment.
+    fn drop(&mut self) {
+        self.end_segment();
+        let saved = self
+            .restore_on_drop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(bytes) = saved {
+            let _ = write_atomic(&self.dir.join("run.json"), &bytes);
+        }
+    }
+}
+
 /// What the end of an attempt looked like, from the report.
 #[derive(Debug, Clone, Default)]
 pub struct FinishOutcome {
@@ -1216,6 +1593,10 @@ pub struct FinishFailure {
     pub class: String,
     pub files: Vec<String>,
     pub scope_note: bool,
+    /// The stage records each rejected reply itself, at the point of rejection
+    /// ([`journal::reject_reply`]), so the blanket set-aside of a failed part must not touch its
+    /// other replies: the ones that parsed stay good and replay on a resume.
+    pub per_reply_rejections: bool,
 }
 
 /// One pass that did not run.
@@ -1458,11 +1839,26 @@ pub struct ResumeCheck<'a> {
     pub models: &'a ModelsRecord,
     /// The state of each repo folder as it stands now, by repo name.
     pub trees: Vec<(String, TreeState)>,
+    /// The running binary's build ([`engine_pin::BuildId::current`]).
+    pub build: &'a engine_pin::BuildId,
+    /// The digest of the rule library now loaded; `None` when it is not loaded yet (the preview).
+    pub corpus_version: Option<&'a str>,
 }
 
 /// Decide whether `check.record` may be resumed. The refusal is a plain sentence naming what
 /// differs, never a code. A complete run says so ([`RunStoreError::AlreadyComplete`]).
 pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
+    check_resume_as(check, false)
+}
+
+/// [`check_resume`] for a rerun of the deterministic stages on another build (#588): the build
+/// may differ, everything else a stored reply depends on may not (the repo folders, the models,
+/// the rules the scan asks about, the questions asked, the rule library).
+pub fn check_rerun(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
+    check_resume_as(check, true)
+}
+
+fn check_resume_as(check: &ResumeCheck<'_>, rerun: bool) -> Result<(), RunStoreError> {
     let record = check.record;
     if record.status == RunStatus::Complete {
         return Err(RunStoreError::AlreadyComplete(format!(
@@ -1472,41 +1868,24 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
         )));
     }
     let refuse = |why: String| Err(RunStoreError::Refused(why));
-    if record.engine_version != engine_version() {
-        return refuse(format!(
-            "run {} was made by another version of Camerata ({} instead of {}); its saved \
-             replies answer a different question, so start a new run",
-            record.run_id,
-            record.engine_version,
-            engine_version()
-        ));
+    if rerun {
+        engine_pin::check_pin_for_rerun(
+            record.pin.as_ref(),
+            check.build,
+            check.corpus_version.unwrap_or_default(),
+        )
+        .map_err(RunStoreError::Refused)?;
+    } else {
+        engine_pin::check_pin(record.pin.as_ref(), check.build, check.corpus_version)
+            .map_err(RunStoreError::Refused)?;
     }
-    for saved in &record.repos {
-        let Some((_, now)) = check.trees.iter().find(|(name, _)| *name == saved.name) else {
-            return refuse(format!(
-                "repository {} was part of run {} but is not part of this one",
-                saved.name, record.run_id
-            ));
-        };
-        if now.commit != saved.commit {
-            return refuse(format!(
-                "repository {} is at commit {} now; run {} was made at commit {}. Check out \
-                 that commit to resume it, or start a new run",
-                saved.name,
-                now.commit.as_deref().map_or("(none)".to_string(), short),
-                record.run_id,
-                saved.commit.as_deref().map_or("(none)".to_string(), short),
-            ));
-        }
-        let unchanged = now.digest == saved.tree_at_start
-            || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
-        if !unchanged {
-            return refuse(format!(
-                "repository {} has changes that were not there when run {} was made (an edited \
-                 or new file); put the tree back as it was, or start a new run",
-                saved.name, record.run_id
-            ));
-        }
+    check_repo_trees(record, &check.trees)?;
+    if record.models.scan_exclusions != check.models.scan_exclusions {
+        return refuse(format!(
+            "Excluded by agreement is not the list run {} was made with, and its stored replies \
+             cover the files that list left out; start a new run",
+            record.run_id
+        ));
     }
     if !record.models.matches_for_resume(check.models) {
         return refuse(format!(
@@ -1538,6 +1917,49 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
             "run {} is being worked on right now; wait for it to finish",
             record.run_id
         )));
+    }
+    Ok(())
+}
+
+/// Refuse when a repo folder is not as run `record` left it: another commit, or changes since the
+/// tree the run ended on. The one test of "the tree is unchanged" a resume, a rerun and a recheck
+/// share.
+pub fn check_repo_trees(
+    record: &RunRecord,
+    trees: &[(String, TreeState)],
+) -> Result<(), RunStoreError> {
+    let refuse = |why: String| Err(RunStoreError::Refused(why));
+    for saved in &record.repos {
+        let Some((_, now)) = trees.iter().find(|(name, _)| *name == saved.name) else {
+            return refuse(format!(
+                "repository {} was part of run {} but is not part of this one",
+                saved.name, record.run_id
+            ));
+        };
+        if now.commit != saved.commit {
+            return refuse(format!(
+                "repository {} is at commit {} now; run {} was made at commit {}. Check out \
+                 that commit to resume it, or start a new run",
+                saved.name,
+                now.commit.as_deref().map_or("(none)".to_string(), short),
+                record.run_id,
+                saved.commit.as_deref().map_or("(none)".to_string(), short),
+            ));
+        }
+        let unchanged = now.digest == saved.tree_at_start
+            || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
+        if !unchanged {
+            let which = if now.changed.is_empty() {
+                String::new()
+            } else {
+                format!(" (changed paths now: {})", named_changes(&now.changed))
+            };
+            return refuse(format!(
+                "repository {} has changes that were not there when run {} was made (an edited \
+                 or new file){which}; put the tree back as it was, or start a new run",
+                saved.name, record.run_id
+            ));
+        }
     }
     Ok(())
 }
@@ -1608,6 +2030,7 @@ pub fn open_for_resume(
     sources: &[(String, PathBuf)],
     ai_scan_key: &AiScanKey,
     models: &ModelsRecord,
+    pin: &engine_pin::EnginePin,
 ) -> Result<(Arc<RunStore>, String), RunStoreError> {
     let record = read_record(run_id)?;
     let trees = sources
@@ -1619,10 +2042,73 @@ pub fn open_for_resume(
         ai_scan_key,
         models,
         trees,
+        build: &pin.build,
+        corpus_version: Some(&pin.corpus_version),
     })?;
     let estimate = estimate_resume(run_id)?;
     let store = RunStore::open(run_id)?;
+    if let Some(note) = engine_pin::dirty_note(record.pin.as_ref(), &pin.build) {
+        store.add_note(&note);
+    }
     Ok((store, estimate.render()))
+}
+
+/// Open the saved run `run_id` to rerun its deterministic stages on this build with no model calls
+/// (#588): the tool previews and their merges, the convention accounting, the ledger and integrity
+/// checks, the collapse and the export run again from the run's saved inputs, and every model
+/// reply comes from the run's store. THE one implementation of the rerun's entry: the command
+/// line's `--rerun-deterministic` comes through it (an app route will too).
+///
+/// Refuses, in plain words, anything a stored reply depends on that differs now (see
+/// [`check_rerun`]) and a client inspection on a build that cannot be named exactly. A normal
+/// resume on another build stays refused ([`open_for_resume`]); the run's pin is not changed, only
+/// the rerun is added to its record. Returns the opened store (its [`RunStore::rerun_misses`] is
+/// set) and the text to show before any work starts.
+pub fn open_for_rerun(
+    run_id: &str,
+    sources: &[(String, PathBuf)],
+    ai_scan_key: &AiScanKey,
+    models: &ModelsRecord,
+    pin: &engine_pin::EnginePin,
+    client_engagement: bool,
+) -> Result<(Arc<RunStore>, String), RunStoreError> {
+    let record = read_record(run_id)?;
+    if let Some(why) = engine_pin::client_start_refusal(client_engagement, &pin.build) {
+        return Err(RunStoreError::Refused(why));
+    }
+    let trees = sources
+        .iter()
+        .map(|(name, dir)| (name.clone(), tree_state(dir)))
+        .collect();
+    check_rerun(&ResumeCheck {
+        record: &record,
+        ai_scan_key,
+        models,
+        trees,
+        build: &pin.build,
+        corpus_version: Some(&pin.corpus_version),
+    })?;
+    let Some(saved) = record.pin.as_ref() else {
+        return Err(RunStoreError::Refused(
+            "this run did not record the build it started on".to_string(),
+        ));
+    };
+    let model_build = saved.build.clone();
+    let store = RunStore::open_for_rerun_with(run_id, store_only::StoreOnlyMisses::new())?;
+    let rerun = engine_pin::RerunRecord::new(&model_build, &pin.build);
+    *store
+        .pending_rerun
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(rerun);
+    let text = format!(
+        "Rerun: the deterministic stages run again on build {} from the stored replies of \
+         build {}. No model is asked; a reply the run does not hold refuses the whole rerun.\n  \
+         {} model call(s) stored and not sent again\n",
+        pin.build.short_commit().unwrap_or_default(),
+        model_build.short_commit().unwrap_or_default(),
+        estimate_resume(run_id).map_or(0, |e| e.calls_stored),
+    );
+    Ok((store, text))
 }
 
 /// What the cockpit shows before a resume is confirmed: what remains, what it should cost, and
@@ -1639,8 +2125,8 @@ pub struct ResumePreview {
 }
 
 /// The preview for `run_id`. The checks that need only the run and the folders (complete, in use,
-/// another version of Camerata, a commit or file that changed) are made here; the models and the
-/// rules are compared when the resume starts, and refuse then.
+/// another build of Camerata, a commit or file that changed) are made here; the models and the
+/// rules (the rule library included) are compared when the resume starts, and refuse then.
 pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
     let dir = runs_dir().join(run_id);
     let record = load_record(&dir)?;
@@ -1655,6 +2141,8 @@ pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
         ai_scan_key: &record.ai_scan_key,
         models: &record.models,
         trees,
+        build: &engine_pin::BuildId::current(),
+        corpus_version: None,
     })
     .err()
     .map(|e| e.to_string());
@@ -1689,22 +2177,26 @@ pub fn note_report(store: &RunStore, report: &mut crate::onboard::ScanReport) {
     report.message = Some(parts.join(" · "));
 }
 
+/// The store's view of a failed part. A stage whose replies are each recorded as rejected at the
+/// point of rejection (today the clone judge) says so here, so the set-aside of a failed part
+/// leaves its good replies alone.
+pub(crate) fn finish_failure_of(f: &crate::ai_audit::FailedPass) -> FinishFailure {
+    FinishFailure {
+        repo: f.repo.clone(),
+        pass: f.pass.clone(),
+        class: f.class.as_str().to_string(),
+        files: f.files.clone(),
+        scope_note: f.scope_note,
+        per_reply_rejections: f.pass == crate::onboard::clone_advisory::FAILED_PASS_NAME,
+    }
+}
+
 /// The end of an attempt, from the finished report: tells the store which parts failed and
 /// whether the run is complete. Shared by the command line and the cockpit's scan job.
 pub fn finish_run(store: &RunStore, report: &crate::onboard::ScanReport, export_written: bool) {
     let reasons = report.incomplete_reasons();
     store.finish(&FinishOutcome {
-        failures: report
-            .failed_passes
-            .iter()
-            .map(|f| FinishFailure {
-                repo: f.repo.clone(),
-                pass: f.pass.clone(),
-                class: f.class.as_str().to_string(),
-                files: f.files.clone(),
-                scope_note: f.scope_note,
-            })
-            .collect(),
+        failures: report.failed_passes.iter().map(finish_failure_of).collect(),
         not_run: Vec::new(),
         scan_reached_end: true,
         export_written,
@@ -1737,11 +2229,74 @@ pub fn runs_covering(runs_root: &Path, checkout: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The saved runs that belong to one cockpit project, sorted into what may go with it and what
+/// may not. See [`runs_of_project`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectRuns {
+    /// Run folders that belong to the project alone: deleted with it.
+    pub mine: Vec<PathBuf>,
+    /// Command line runs (no project recorded) that cover one of the project's checkouts AND a
+    /// checkout of another project: they hold the other project's answers too, so they stay.
+    pub shared: Vec<PathBuf>,
+    /// Run ids of the project's runs a live process is working on right now.
+    pub live: Vec<String>,
+}
+
+/// The saved runs under `runs_root` that belong to `project_id`: a cockpit run records its
+/// project and belongs to it and to no other, whatever repos two projects share; a command line
+/// run (no project recorded) belongs to the project when it covers one of `own_dirs`, unless it
+/// also covers one of `other_dirs` (another project's checkout), when it is `shared` and kept.
+pub fn runs_of_project(
+    runs_root: &Path,
+    project_id: &str,
+    own_dirs: &[PathBuf],
+    other_dirs: &[PathBuf],
+) -> ProjectRuns {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let own: Vec<PathBuf> = own_dirs.iter().map(|d| canon(d)).collect();
+    let others: Vec<PathBuf> = other_dirs.iter().map(|d| canon(d)).collect();
+    let mut out = ProjectRuns::default();
+    let Ok(entries) = std::fs::read_dir(runs_root) else {
+        return out;
+    };
+    let mut dirs: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        let Ok(record) = load_record(&dir) else {
+            continue;
+        };
+        let covered: Vec<PathBuf> = record
+            .repos
+            .iter()
+            .map(|r| canon(Path::new(&r.dir)))
+            .collect();
+        match &record.project_id {
+            Some(owner) if owner == project_id => {}
+            Some(_) => continue,
+            None => {
+                if !covered.iter().any(|c| own.contains(c)) {
+                    continue;
+                }
+                if covered.iter().any(|c| others.contains(c)) {
+                    out.shared.push(dir);
+                    continue;
+                }
+            }
+        }
+        if liveness_of(&dir) == Liveness::Live {
+            out.live.push(record.run_id.clone());
+        }
+        out.mine.push(dir);
+    }
+    out
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────────────────────────────────
 
 /// Delete the oldest runs of `project_key` beyond the newest `keep`. A run that is not complete
-/// is deleted only when a newer complete run exists for the same commits, and a run a live
-/// process works on is never deleted. Returns the ids deleted.
+/// is deleted only when a newer complete run exists for the same commits, and neither a run a
+/// live process works on nor a client engagement's run (it holds the sealed report the app
+/// imports) is ever deleted here. Returns the ids deleted.
 pub fn prune_runs(project_key: &str, keep: usize) -> Vec<String> {
     prune_runs_in(&runs_dir(), project_key, keep)
 }
@@ -1760,6 +2315,14 @@ pub fn prune_runs_in(root: &Path, project_key: &str, keep: usize) -> Vec<String>
     for (idx, run) in runs.iter().enumerate().skip(keep) {
         let dir = root.join(&run.run_id);
         if liveness_of(&dir) == Liveness::Live {
+            continue;
+        }
+        // A client engagement's run holds the only copy of its sealed report: never cleaned up.
+        let client_engagement = run
+            .args
+            .get("client_engagement")
+            .and_then(serde_json::Value::as_bool);
+        if client_engagement == Some(true) {
             continue;
         }
         let allowed = run.status == RunStatus::Complete

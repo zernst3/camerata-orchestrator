@@ -59,8 +59,8 @@ use tokio::time::Instant;
 
 use super::batch_mode::{
     batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
-    plan_item_ranges, poll_and_fetch, BatchApi, BatchSeam, JobCancelled, PollProgress,
-    RoundContext,
+    plan_item_ranges, poll_and_fetch, reply_shows_no_caching, should_warm_batch,
+    stop_run_on_billing_row, BatchApi, BatchSeam, JobCancelled, PollProgress, RoundContext,
 };
 use super::repo_map::estimate_tokens;
 use super::request_budget::ensure_request_fits;
@@ -246,6 +246,16 @@ pub struct StageRoute<'a> {
     pub batch: bool,
     /// The job whose progress line and activity the runner keeps, and whose cancel it honors.
     pub job: Option<(&'a JobStore, &'a str)>,
+    /// The transcript store and key Agent activity reads; the stage shows a row there.
+    pub feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
+}
+
+impl<'a> StageRoute<'a> {
+    /// The stage's row in Agent activity under `name`, when the run has a panel.
+    pub fn feedback_for(&self, name: &'a str) -> Option<StageFeedback<'a>> {
+        self.feedback
+            .map(|(store, key)| StageFeedback { store, key, name })
+    }
 }
 
 /// The mode a stage round runs in, and the batch API it can use: [`StageMode::Batch`] when the
@@ -284,6 +294,89 @@ pub struct StageCtx<'a> {
     /// Where to keep resume state; `None` runs without it.
     pub checkpoint: Option<&'a StageCheckpoint>,
     pub settings: StageSettings,
+    /// Where the stage shows in Agent activity; `None` for a stage that records its own calls
+    /// (stage 1, calibration, alternatives) or has no panel.
+    pub feedback: Option<StageFeedback<'a>>,
+}
+
+/// A stage's row in Agent activity: the transcript store, the key the panel reads and the stage's
+/// name in the operator's words (for example "Group review" or "Fix").
+#[derive(Clone, Copy)]
+pub struct StageFeedback<'a> {
+    pub store: &'a crate::transcript::TranscriptStore,
+    pub key: &'a str,
+    pub name: &'a str,
+}
+
+impl StageFeedback<'_> {
+    /// Open the stage's running row and return its session id. A later round of the same stage on
+    /// the same repo gets its own row, never one that replaces the first.
+    fn begin(&self, repo: &str, calls: usize, prompt: &str) -> String {
+        let base = format!("stage:{}:{repo}", self.name);
+        let earlier = self
+            .store
+            .get(self.key)
+            .iter()
+            .filter(|a| a.session_id == base || a.session_id.starts_with(&format!("{base}#")))
+            .count();
+        let (session, label) = if earlier == 0 {
+            (base, self.name.to_string())
+        } else {
+            (
+                format!("{base}#{}", earlier + 1),
+                format!("{}, round {}", self.name, earlier + 1),
+            )
+        };
+        let mut prompt = prompt.to_string();
+        crate::onboard::redact::redact_string(&mut prompt);
+        let shown = if calls > 1 {
+            format!("{calls} calls in this stage; the first call's prompt is shown.\n\n{prompt}")
+        } else {
+            prompt
+        };
+        self.store.register(
+            self.key,
+            crate::transcript::AgentTranscript {
+                session_id: session.clone(),
+                role: format!("{label} ({repo})"),
+                prompt: shown,
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+        session
+    }
+
+    /// Close the row once the stage has run: done when every call was answered (or kept from an
+    /// earlier attempt), blocked with the first reason when any had no answer or the run was
+    /// cancelled.
+    fn end<Id>(&self, session: &str, calls: usize, outcome: &StageOutcome<Id>) {
+        let answered = outcome.absorbed.len() + outcome.resumed.len();
+        let (line, status) = if let Some(first) = outcome.failed.first() {
+            (
+                format!(
+                    "Not finished: {} of {calls} calls had no answer ({}). {answered} answered.",
+                    outcome.failed.len(),
+                    first.reason
+                ),
+                "blocked",
+            )
+        } else if outcome.cancelled.is_some() {
+            (
+                format!("Stopped before the end: {answered} of {calls} calls answered."),
+                "blocked",
+            )
+        } else {
+            (
+                format!("Done: {answered} of {calls} calls answered."),
+                "done",
+            )
+        };
+        let mut line = line;
+        crate::onboard::redact::redact_string(&mut line);
+        self.store.append_output(self.key, session, &line);
+        self.store.set_status(self.key, session, status);
+    }
 }
 
 /// An item that did not come back, with everything the failed-part report needs.
@@ -512,6 +605,20 @@ where
         order = reqs.keys().cloned().collect();
     }
 
+    let activity_row = ctx.feedback.map(|f| {
+        let first = reqs.values().next().map_or_else(
+            || {
+                "(this stage builds its calls as it goes; the prompts are not listed up front)"
+                    .to_string()
+            },
+            |r| match &r.system {
+                Some(sys) => format!("{sys}\n\n{}", r.prompt),
+                None => r.prompt.clone(),
+            },
+        );
+        (f, f.begin(ctx.repo, book.total, &first))
+    });
+
     replay_checkpoint(stage, s, ctx, &mut book, &by_key);
 
     // A7: no request is submitted or sent without passing the size check. An eager stage's
@@ -581,7 +688,12 @@ where
     if let Some((jobs, id)) = ctx.job {
         jobs.clear_stage_progress(id);
     }
-    book.into_outcome()
+    let total_calls = book.total;
+    let outcome = book.into_outcome();
+    if let Some((f, session)) = &activity_row {
+        f.end(session, total_calls, &outcome);
+    }
+    outcome
 }
 
 /// The name the spend limit and the ledger know a stage by when it is refused (the name the stage's
@@ -769,6 +881,7 @@ fn response_from(line: &AbsorbedLine) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: line.text.clone(),
         model: line.model.clone(),
         backend: line.backend.clone(),
@@ -787,6 +900,7 @@ fn usage_only(resp: &LlmResponse) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: resp.model.clone(),
         backend: resp.backend.clone(),
@@ -969,17 +1083,37 @@ fn resend_or_fail<Id: Clone + Ord>(
 }
 
 /// Why a part was not sent: the outage stop or the spend limit.
-fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, &'static str) {
-    if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
-        (
+fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, String) {
+    refusal_class_for(ctx.meter.map(UsageMeter::refusal_cause), ctx.meter)
+}
+
+/// [`refusal_class`] for a cause already known: the one the refused admission itself carried, read
+/// at the moment of refusal and not afterwards, when the state may have moved on.
+fn refusal_class_for(
+    cause: Option<super::usage_meter::RefusalCause>,
+    meter: Option<&UsageMeter>,
+) -> (FailureClass, String) {
+    use super::usage_meter::RefusalCause;
+    match cause {
+        Some(RefusalCause::Outage) => (
             FailureClass::OutageStop,
-            "the run stopped because the model provider could not be reached before this item was sent",
-        )
-    } else {
-        (
+            format!(
+                "the run stopped because {} before this item was sent",
+                meter.map_or(crate::run_health::STOP_PHRASE_UNREACHABLE, |m| m.stop_phrase())
+            ),
+        ),
+        Some(RefusalCause::CostUnknown) => (
             FailureClass::SpendLimit,
-            "the spend limit stopped the run before this item was sent",
-        )
+            "a call's cost was unknown, so the limit set for this run could not be enforced and this item was not sent".to_string(),
+        ),
+        Some(RefusalCause::CheckpointStop) => (
+            FailureClass::SpendLimit,
+            "the run was paused at a cost checkpoint, so this item was not sent".to_string(),
+        ),
+        _ => (
+            FailureClass::SpendLimit,
+            "the spend limit stopped the run before this item was sent".to_string(),
+        ),
     }
 }
 
@@ -1097,9 +1231,10 @@ impl Aimd {
 // ── the parallel fallback ───────────────────────────────────────────────────────────────────────
 
 enum Called {
-    /// Not admitted: the spend cap or the outage stop refused the call.
-    Refused,
-    Done(Result<LlmResponse, anyhow::Error>),
+    /// Not admitted, for the reason the refusal itself carried.
+    Refused(super::usage_meter::RefusalCause),
+    /// Boxed: `LlmResponse` is large enough that the unboxed variant trips the size lint.
+    Done(Result<Box<LlmResponse>, anyhow::Error>),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1155,7 +1290,7 @@ async fn run_parallel<S>(
             }
             if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
                 let (class, why) = refusal_class(ctx);
-                book.fail(&work.id, class, why, None);
+                book.fail(&work.id, class, &why, None);
                 if let Some(m) = ctx.meter {
                     m.record_stage_not_run(ctx.repo, admission_name(stage), true);
                 }
@@ -1180,9 +1315,9 @@ async fn run_parallel<S>(
                     // limit has nothing to refuse, and refusing it would drop paid work.
                     let permit = match meter {
                         Some(m) if !realtime.replays(&req) => {
-                            match m.admit_for_stage(repo, label).await {
+                            match m.admit_for_stage_request(repo, label, stage, &req).await {
                                 Ok(permit) => Some(permit),
-                                Err(_) => return (work, Called::Refused),
+                                Err(cause) => return (work, Called::Refused(cause)),
                             }
                         }
                         _ => None,
@@ -1203,7 +1338,7 @@ async fn run_parallel<S>(
                         }
                     }
                     drop(permit);
-                    (work, Called::Done(result))
+                    (work, Called::Done(result.map(Box::new)))
                 }
                 .boxed(),
             );
@@ -1242,14 +1377,14 @@ async fn run_parallel<S>(
         };
 
         match called {
-            Called::Refused => {
-                let (class, why) = refusal_class(ctx);
-                book.fail(&work.id, class, why, None);
+            Called::Refused(cause) => {
+                let (class, why) = refusal_class_for(Some(cause), ctx.meter);
+                book.fail(&work.id, class, &why, None);
                 report_progress(ctx, stage, book);
             }
             Called::Done(Ok(resp)) => {
                 aimd.on_success();
-                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, resp, None)
+                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, *resp, None)
                 {
                     queue.push_front(again);
                 }
@@ -1393,6 +1528,12 @@ fn settle_rows<S: StageItems>(
                 }
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
+                    report_progress(ctx, stage, book);
+                } else if stop_run_on_billing_row(ctx.meter, &error) {
+                    // The account or the credential was refused: waiting or sending again fixes
+                    // neither. The run stopped now (run health), not a round later, and the item
+                    // is failed with its real class, never resent and never labeled transport.
+                    book.fail(&work.id, FailureClass::AuthOrBilling, &error, None);
                     report_progress(ctx, stage, book);
                 } else if let Some(again) = resend_or_fail(
                     ctx,
@@ -2019,6 +2160,7 @@ async fn run_batch<S>(
     S: StageItems + Send,
 {
     let mut clock = RateClock::new(ctx.settings.rate_limit_deadline);
+    let mut warm = WarmProbe::default();
     let mut work = pending;
     // A lazy stage builds and submits a window of items at a time; an eager one is one window.
     let window = s.batch_window().max(1);
@@ -2031,13 +2173,277 @@ async fn run_batch<S>(
             if ready.is_empty() {
                 continue;
             }
-            follow.extend(batch_round(stage, s, ctx, api, book, ready, &mut clock).await);
+            follow
+                .extend(batch_round(stage, s, ctx, api, book, ready, &mut clock, &mut warm).await);
         }
         work = follow;
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// The submission is not sent because the warm call was refused for billing: every item of it
+/// that is not settled becomes a failed part with the billing class, and the stage is recorded
+/// as stopped. The warm item, if any, is among them (its reply never came).
+fn fail_for_billing<Id: Clone + Ord>(
+    stage: Stage,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<Id>,
+    sub: &[Work<Id>],
+    why: &str,
+) {
+    let reason = format!(
+        "the batch was not submitted: its warm call was refused for billing or sign-in ({why}). \
+         Waiting or sending again fixes neither the account nor the credit; a resume sends the \
+         item"
+    );
+    eprintln!("[camerata-server] stage {}: {reason}", stage.label());
+    if let Some(m) = ctx.meter {
+        m.record_note(reason.clone());
+        m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+    }
+    for w in sub {
+        if !book.done.contains(&w.id) {
+            book.fail(&w.id, FailureClass::AuthOrBilling, &reason, None);
+        }
+    }
+}
+
+/// What the warm calls of one run have shown, and where the run keeps it.
+#[derive(Default)]
+struct WarmProbe {
+    /// What this run knows when the meter is absent (the meter holds it otherwise, so it outlives
+    /// one `run_batch` and one `run_stage`).
+    book: WarmBook,
+    /// Set when a warm call failed because the account or the credit was refused: why. Nothing
+    /// more is submitted in the run, as for a credit stop on a batch row.
+    billing_stop: Option<String>,
+}
+
+/// How long a warm call's cache write is trusted: a little under the 1 hour cache it asks for.
+const WARM_VALID: Duration = Duration::from_secs(55 * 60);
+
+/// One warm call per distinct cached prefix per run (#240), and none once a cache is shown dead.
+/// Held by the run's meter, so it outlives a follow round, a later window or sub-batch and a
+/// second `run_stage` of the same run; the stage runner holds one of its own when there is no
+/// meter.
+#[derive(Default)]
+pub(crate) struct WarmBook {
+    /// Prefix key to when it was warmed.
+    warmed: std::sync::Mutex<BTreeMap<String, Instant>>,
+    /// Stages whose cache was shown to do nothing (a warm reply with no write and no read, or a
+    /// warmed batch whose rows read nothing).
+    dead: std::sync::Mutex<BTreeSet<String>>,
+}
+
+impl WarmBook {
+    fn warmed_recently(&self, key: &str) -> bool {
+        self.warmed
+            .lock()
+            .ok()
+            .and_then(|w| w.get(key).copied())
+            .is_some_and(|at| at.elapsed() < WARM_VALID)
+    }
+
+    fn mark_warmed(&self, key: &str) {
+        if let Ok(mut w) = self.warmed.lock() {
+            w.insert(key.to_string(), Instant::now());
+        }
+    }
+
+    fn is_dead(&self, stage: &str) -> bool {
+        self.dead.lock().is_ok_and(|d| d.contains(stage))
+    }
+
+    fn mark_dead(&self, stage: &str) {
+        if let Ok(mut d) = self.dead.lock() {
+            d.insert(stage.to_string());
+        }
+    }
+}
+
+fn warm_book<'a>(ctx: &'a StageCtx<'a>, probe: &'a WarmProbe) -> &'a WarmBook {
+    ctx.meter.map_or(&probe.book, UsageMeter::warm_book)
+}
+
+/// The key of the cached prefix a request carries: everything the provider keys the cache on
+/// that the stage controls (model, system text, the text up to the last cache mark, schema,
+/// effort), under the stage and the repository.
+fn warm_key(stage: Stage, ctx: &StageCtx<'_>, req: &LlmRequest) -> String {
+    let end = req.cache_breakpoints.last().copied().unwrap_or(0);
+    let cached = req.prompt.get(..end).unwrap_or("");
+    let identity = format!(
+        "{}\0{}\0{}\0{}\0{}",
+        req.model,
+        req.system.as_deref().unwrap_or(""),
+        cached,
+        req.response_schema
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string),
+        req.effort.as_deref().unwrap_or("")
+    );
+    format!(
+        "{}:{}:{}",
+        stage.label(),
+        ctx.repo,
+        custom_id_for(&identity)
+    )
+}
+
+/// What [`warm_prefix`] did.
+enum Warmed {
+    /// No warm call was made, or it failed in a way sending the batch can get past.
+    Not,
+    /// The item at this position of the submission is settled; the rest is submitted.
+    Item(usize),
+    /// The call failed on billing: the submission must not be sent.
+    BillingStop(String),
+}
+
+/// #240, the warm call. When a submission has two or more items with a cache mark, the first
+/// marked item is sent in real time with the submission's own cache time-to-live and its reply
+/// is settled like any other (same key, same checkpoint line, `batch_id` empty); the caller then
+/// submits the rest. Returns the position in `sub` of the item that is now settled (absorbed,
+/// failed, or handed back through `follow` as a retry), or `None` when nothing was warmed.
+///
+/// RUN TO COMPLETION: the warm call can only ever save money, so no failure of it may fail the
+/// stage or lose an item. A refused admission, a failed call or a cancel returns `None` and the
+/// whole submission goes out as it would without this function. The request is the item's own,
+/// the same bytes the batch item would carry (the model is the batch's, the cache marks are
+/// unchanged); only the transport and the order of the first item change.
+///
+/// RESUME: nothing is written here beyond what [`settle_reply`] writes. The warm item's absorbed
+/// line is in the checkpoint before the rest is submitted, so a resume replays it
+/// ([`replay_checkpoint`]) and never sends it again. A resume that already replayed an absorbed
+/// item does not warm again: that run's own warm call, or its batch, has been through the cache.
+#[allow(clippy::too_many_arguments)]
+async fn warm_prefix<S>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    sub: &[Work<S::Id>],
+    ttl: CacheTtl,
+    probe: &WarmProbe,
+    follow: &mut Vec<Work<S::Id>>,
+) -> Warmed
+where
+    S: StageItems + Send,
+{
+    let marked: Vec<usize> = sub
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| {
+            w.req
+                .as_deref()
+                .is_some_and(|r| !r.cache_breakpoints.is_empty())
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let eff = efficiency_of(ctx.meter);
+    let warms = warm_book(ctx, probe);
+    let cache_unproven = warms.is_dead(stage.label()) || !book.resumed.is_empty();
+    if !should_warm_batch(eff, marked.len(), cache_unproven, ttl) {
+        return Warmed::Not;
+    }
+    let Some(&at) = marked.first() else {
+        return Warmed::Not;
+    };
+    let work = &sub[at];
+    let Some(first) = work.req.as_deref() else {
+        return Warmed::Not;
+    };
+    let mut req = first.clone();
+    req.model = ctx.model.to_string();
+    let req = req.with_cache_ttl(ttl);
+    // One warm call per cached prefix per run: a follow round, a later window or sub-batch and a
+    // second stage call of the same run read what the first wrote.
+    let key = warm_key(stage, ctx, &req);
+    if warms.warmed_recently(&key) {
+        return Warmed::Not;
+    }
+
+    // The spend limit and the outage stop are checked the way a real-time call checks them, but
+    // a refusal here records nothing as "not run": the batch path has its own gate and decides.
+    let permit = match ctx.meter {
+        Some(m) if !ctx.realtime.replays(&req) => match m.admit_for_request(&req, stage).await {
+            Ok(permit) => Some(permit),
+            Err(_) => return Warmed::Not,
+        },
+        // A request the run store already answers is not admitted (admission notes the request).
+        _ => {
+            if let Some(m) = ctx.meter {
+                m.note_request(&req);
+            }
+            None
+        }
+    };
+    let mut on_delta = |_: &str| {};
+    let result = ctx.realtime.complete_streaming(req, &mut on_delta).await;
+    if let Some(m) = ctx.meter {
+        match &result {
+            Ok(resp) => m.record_stage(stage, resp),
+            Err(e) => m.record_failed(stage, e),
+        }
+    }
+    drop(permit);
+    let resp = match result {
+        Ok(resp) => resp,
+        Err(e) => {
+            if crate::llm::is_refusal(&e) {
+                // The model answered, and declined: that is this item's final answer, as a
+                // refused batch row is. It was billed once (the failed call recorded it), so it
+                // is not sent again in the batch.
+                book.fail(
+                    &work.id,
+                    FailureClass::Content,
+                    &disclosable_error(&format!("{e:#}")),
+                    None,
+                );
+                report_progress(ctx, stage, book);
+                return Warmed::Item(at);
+            }
+            if classify_pass_error(&e) == FailureClass::AuthOrBilling {
+                // Waiting or submitting the batch fixes neither a refused account nor a spent
+                // credit, and the batch would be billed for nothing it can finish. The run stops
+                // here (the failed call already told the run health), the items are failed with
+                // their real class, and a resume sends them.
+                return Warmed::BillingStop(disclosable_error(&format!("{e:#}")));
+            }
+            let note = format!(
+                "stage {}: the warm call for a batch of {} item(s) failed ({}); the whole batch \
+                 was submitted without it.",
+                stage.label(),
+                sub.len(),
+                disclosable_error(&format!("{e:#}"))
+            );
+            eprintln!("[camerata-server] {note}");
+            if let Some(m) = ctx.meter {
+                m.record_note(note);
+            }
+            return Warmed::Not;
+        }
+    };
+    // Marked only now: a refused or failed warm call leaves the prefix unwarmed, so the next
+    // submission tries again.
+    warms.mark_warmed(&key);
+    if reply_shows_no_caching(&resp) {
+        warms.mark_dead(stage.label());
+        let note = format!(
+            "stage {}: the warm call wrote and read no cache, so the shared prefix is under the \
+             model's minimum cacheable size; later batches of this run are not warmed.",
+            stage.label()
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
+    if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, work, resp, None) {
+        follow.push(again);
+    }
+    Warmed::Item(at)
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn batch_round<S>(
     stage: Stage,
     s: &mut S,
@@ -2046,6 +2452,7 @@ async fn batch_round<S>(
     book: &mut Book<S::Id>,
     work: Vec<Work<S::Id>>,
     clock: &mut RateClock,
+    warm: &mut WarmProbe,
 ) -> Vec<Work<S::Id>>
 where
     S: StageItems + Send,
@@ -2085,7 +2492,7 @@ where
         if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
             let (class, why) = refusal_class(ctx);
             for w in sub {
-                book.fail(&w.id, class, why, None);
+                book.fail(&w.id, class, &why, None);
             }
             if let Some(m) = ctx.meter {
                 m.record_stage_not_run(ctx.repo, admission_name(stage), true);
@@ -2105,6 +2512,52 @@ where
         }
 
         let ttl = batch_cache_ttl(eff, sub.len());
+        // #240: the first cache-marked item runs in real time and is absorbed before the rest are
+        // submitted, so the rest read the prefix it wrote. A failure that is not about billing
+        // leaves `sub` whole; one about billing stops the stage here, nothing submitted.
+        if let Some(why) = warm.billing_stop.clone() {
+            fail_for_billing(stage, ctx, book, sub, &why);
+            continue;
+        }
+        let warmed = warm_prefix(stage, s, ctx, book, sub, ttl, warm, &mut follow).await;
+        if book.cancelled || cancel_requested(ctx) {
+            book.cancelled = true;
+            break;
+        }
+        let warmed = match warmed {
+            Warmed::BillingStop(why) => {
+                warm.billing_stop = Some(why.clone());
+                fail_for_billing(stage, ctx, book, sub, &why);
+                continue;
+            }
+            Warmed::Item(done) => Some(done),
+            Warmed::Not => None,
+        };
+        let (kept_work, kept_cids): (Vec<Work<S::Id>>, Vec<String>) = match warmed {
+            Some(done) => sub
+                .iter()
+                .zip(sub_cids)
+                .enumerate()
+                .filter(|(i, _)| *i != done)
+                .map(|(_, (w, cid))| (w.clone(), cid.clone()))
+                .unzip(),
+            None => (sub.to_vec(), sub_cids.to_vec()),
+        };
+        let (sub, sub_cids) = (&kept_work[..], &kept_cids[..]);
+        // The warm call spent money after the gate above passed (and may have been refused by the
+        // same limit): the submission is admitted again, on what is left to send, so a batch the
+        // limit would refuse is never submitted because a warm call came first.
+        if let Some(m) = ctx.meter {
+            if let Some(why) = m.batch_refusal_reason(projected_input_usd(ctx, sub)) {
+                eprintln!("[camerata-server] {why}");
+                m.record_note(why.clone());
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+                for w in sub {
+                    book.fail(&w.id, FailureClass::SpendLimit, &why, None);
+                }
+                continue;
+            }
+        }
         // The intent goes to the checkpoint BEFORE the submit: a kill after the provider accepts
         // the batch and before its id is saved leaves this behind, and the resume says so.
         let nonce = crate::checkpoint::new_submit_nonce();
@@ -2252,6 +2705,25 @@ where
         .await
         {
             Ok(rows) => {
+                // A warmed submission whose rows read none of the prefix means the warm write
+                // did not reach them (or caching does nothing here): stop warming this stage.
+                if warmed.is_some() {
+                    let replies: Vec<&LlmResponse> =
+                        rows.iter().filter_map(|r| r.response.as_ref()).collect();
+                    if !replies.is_empty() && replies.iter().all(|r| r.cache_read_input_tokens == 0)
+                    {
+                        warm_book(ctx, warm).mark_dead(stage.label());
+                        let note = format!(
+                            "stage {}: no row of the warmed batch read the cached prefix; later \
+                             batches of this run are not warmed.",
+                            stage.label()
+                        );
+                        eprintln!("[camerata-server] {note}");
+                        if let Some(m) = ctx.meter {
+                            m.record_note(note);
+                        }
+                    }
+                }
                 let members: Vec<(String, Work<S::Id>)> =
                     sub_cids.iter().cloned().zip(sub.iter().cloned()).collect();
                 let origin = BatchOrigin {

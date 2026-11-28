@@ -53,7 +53,9 @@
       "restored_without_decision",
       "split_out_without_decision",
       "merged_without_decision",
-      "engine_check_no_without_correction"
+      "engine_check_no_without_correction",
+      "critical_without_decision",
+      "unsure_without_decision"
     ],
     "markers": [
       "held",
@@ -383,6 +385,9 @@
     ],
     "node_decisions_missing_members": [
       "empty"
+    ],
+    "split_rules": [
+      "empty"
     ]
   },
   "queue": {
@@ -532,17 +537,7 @@
             "empty"
           ],
           "category": "null",
-          "decision": {
-            "confirmed_by_client": "null",
-            "decided_at": "string",
-            "decided_by": "string",
-            "id": "string",
-            "inherited_from": "string",
-            "needed_me": "null",
-            "reason": "string",
-            "scope": "string",
-            "state": "string"
-          },
+          "decision": "null",
           "detail": "string",
           "edits": [
             "empty"
@@ -561,7 +556,7 @@
           ],
           "group_primary": "bool",
           "headline": "string",
-          "held": "null",
+          "held": "string",
           "kind": {
             "kind": "string"
           },
@@ -710,6 +705,9 @@
         }
       ],
       "node_decisions_missing_members": [
+        "empty"
+      ],
+      "split_rules": [
         "empty"
       ]
     },

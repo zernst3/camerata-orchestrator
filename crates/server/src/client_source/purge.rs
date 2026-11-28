@@ -118,7 +118,7 @@ fn worktrees_inside(checkout: &Path, worktrees: &[PathBuf]) -> Vec<PathBuf> {
 
 /// Session files recorded for deletion: for each id, every `<claude dir>/*/<id>.jsonl` file and
 /// `<claude dir>/*/<id>/` directory that exists. Blocking.
-fn find_session_paths(claude_dir: &Path, id: &str) -> Vec<(PathBuf, bool)> {
+pub(super) fn find_session_paths(claude_dir: &Path, id: &str) -> Vec<(PathBuf, bool)> {
     let mut out = Vec::new();
     let Ok(read) = std::fs::read_dir(claude_dir) else {
         return out;
@@ -204,10 +204,11 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
     // The CLI's cache and ledger, keyed by the canonical checkout path (computed now, while the
     // checkout still exists).
     if let Some(cli_dir) = &state.storage_roots.cli_state_dir {
-        let [cache, ledger] = repo_state_files_in(cli_dir, &checkout);
+        let [cache, ledger, report] = repo_state_files_in(cli_dir, &checkout);
         for (kind, path) in [
             (PurgedKind::CliScanCache, cache),
             (PurgedKind::CliLedger, ledger),
+            (PurgedKind::CliSavedReport, report),
         ] {
             let totals = walk_totals(&path, &[]);
             steps.push(PurgeStep {
@@ -231,6 +232,8 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
             let name = path.to_string_lossy().into_owned();
             let kind = if name.ends_with(".cache.json") {
                 PurgedKind::CliScanCache
+            } else if name.ends_with(".report.json") {
+                PurgedKind::CliSavedReport
             } else {
                 PurgedKind::CliLedger
             };
@@ -348,7 +351,7 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
 }
 
 /// Remove one file or directory tree, mapping "was not there" to `AlreadyAbsent`.
-fn remove_path(path: &Path) -> PurgeOutcome {
+pub(super) fn remove_path(path: &Path) -> PurgeOutcome {
     if let Err(blocked) = ensure_not_real_location_in_test(path) {
         return PurgeOutcome::Failed {
             error: blocked.to_string(),

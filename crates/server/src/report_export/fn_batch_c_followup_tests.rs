@@ -155,14 +155,15 @@ use crate::dep_audit::scrub_local_paths;
 use crate::dep_audit::unread_files_sentence;
 
 #[test]
-fn only_real_osv_error_prefixes_are_quoted() {
+fn only_real_osv_error_prefixes_make_the_sentence_and_none_is_quoted() {
     let stderr = "Scanned /w/error-handling/package-lock.json file and found 3 packages\n\
                   Error during extraction: could not parse yarn.lock\n\
                   Failed to parse go.mod\n\
                   the word error appears mid-line here\n";
     let s = unread_files_sentence(stderr, Path::new("/w")).unwrap();
-    assert!(s.contains("Error during extraction"), "{s}");
-    assert!(s.contains("Failed to parse go.mod"), "{s}");
+    assert!(s.contains("problems reading some files"), "{s}");
+    assert!(!s.contains("Error during extraction"), "{s}");
+    assert!(!s.contains("Failed to parse go.mod"), "{s}");
     assert!(!s.contains("mid-line"), "{s}");
     assert!(!s.contains("error-handling"), "{s}");
 }

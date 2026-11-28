@@ -404,6 +404,21 @@ fn review_level_label(wire: &str) -> &'static str {
     }
 }
 
+/// Whether a row has a decision: any disposition but none yet, or a severity the reviewer set
+/// themselves. The counts and the Decision so far cell both read it, so they cannot disagree.
+pub(super) fn row_is_decided(row: &FindingRow) -> bool {
+    row.disposition_kind
+        .is_some_and(|d| d != Disposition::Unresolved)
+        || severity_set_by_reviewer(row)
+}
+
+fn severity_set_by_reviewer(row: &FindingRow) -> bool {
+    row.disposition_kind == Some(Disposition::Unresolved)
+        && row
+            .disposition_label
+            .starts_with(v::SEVERITY_SET_BY_REVIEWER)
+}
+
 /// What a reviewer has already decided about a problem, in plain words. An open problem has no
 /// decision yet.
 pub(super) fn decision_so_far(row: &FindingRow) -> String {
@@ -411,6 +426,11 @@ pub(super) fn decision_so_far(row: &FindingRow) -> String {
         return row.disposition_label.clone();
     }
     match row.disposition_kind {
+        // A severity the reviewer set is their decision, though the row carries no record (the
+        // label is [`crate::report_export::row_disposition_label`]'s).
+        Some(Disposition::Unresolved) if severity_set_by_reviewer(row) => {
+            v::SEVERITY_SET_BY_REVIEWER.to_string()
+        }
         None | Some(Disposition::Unresolved) => String::new(),
         Some(Disposition::Confirmed) => v::CONFIRMED_BY_REVIEWER.to_string(),
         Some(_) => row.disposition_label.clone(),
@@ -1074,6 +1094,7 @@ pub(super) fn departures_table(groups: &[DeviationGroupRow], lay: &Layout) -> Ta
     let mut cols = vec![
         Col::plain(v::H_AREA, 18.0),
         Col::plain(v::H_CONVENTION, 44.0),
+        Col::plain(v::H_CONVENTION_SOURCE, 44.0),
         Col::plain(v::H_PLACES_DEPARTING, 14.0),
         Col::plain(v::H_PLACES_CHECKED, 14.0),
         Col::plain(v::H_WORST_SEVERITY, 16.0),
@@ -1092,6 +1113,7 @@ pub(super) fn departures_table(groups: &[DeviationGroupRow], lay: &Layout) -> Ta
         let mut c = RowCells::default();
         c.put(v::H_AREA, Cell::text(&g.category))
             .put(v::H_CONVENTION, Cell::wrap(&g.convention_label))
+            .put(v::H_CONVENTION_SOURCE, Cell::wrap(&g.standard_note))
             .put(v::H_PLACES_DEPARTING, Cell::Num(g.deviating_sites as f64))
             .put(
                 v::H_PLACES_CHECKED,
@@ -1141,7 +1163,7 @@ fn dep_action(row: &DepRow) -> String {
     }
 }
 
-pub(super) fn dependencies_table(sorted: &[DepRow]) -> Table {
+pub(super) fn dependencies_table(sorted: &[DepRow], audited_note: Option<String>) -> Table {
     let mut table = Table::new(
         v::DEPENDENCIES,
         vec![
@@ -1184,6 +1206,7 @@ pub(super) fn dependencies_table(sorted: &[DepRow]) -> Table {
         table.rows.push(c.assemble(&table.cols));
     }
     table.empty_note = Some("No known vulnerable dependencies were found.".into());
+    table.header_note = audited_note;
     table
 }
 
@@ -1971,6 +1994,15 @@ pub(super) fn write_start_here(
         ),
     )?;
     r += 1;
+    ws.write_text(r, 0, v::P_FILE_TYPES)?;
+    let types = crate::onboard::files::inspected_types();
+    let mut chars = types.chars();
+    let sentence_case: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    ws.write_text(r, 1, sentence_case)?;
+    r += 1;
     if let Some(volume) = code_volume_label(report) {
         ws.write_text(r, 0, v::P_CODE_VOLUME)?;
         ws.write_text(r, 1, volume)?;
@@ -1986,6 +2018,19 @@ pub(super) fn write_start_here(
     r += 1;
     ws.write_text(r, 0, v::P_WHAT_WE_CHECKED)?;
     ws.write_text(r, 1, &facts.coverage_summary)?;
+    r += 1;
+    // An inspection finished by a rerun or recheck on another build names both builds and what
+    // ran again: the same sentence "How this was done" carries in the PDF.
+    if let Some(rerun) = report.ledger.rerun() {
+        ws.write_text(r, 0, v::P_HOW_THIS_WAS_DONE)?;
+        ws.write_text_with_format(r, 1, rerun.report_sentence(), &wrap)?;
+        ws.set_row_height(r, 80)?;
+        r += 1;
+    }
+    // What a person read and the review budget: the PDF's words, so a blank Reviewed in person
+    // cell is explained.
+    ws.write_text(r, 0, v::H_REVIEWED_IN_PERSON)?;
+    ws.write_text(r, 1, v::review_line(&facts.totals.review))?;
     if let Some((flagged, decided)) = facts.possible_false_positives {
         r += 1;
         ws.write_text(r, 0, v::P_POSSIBLE_FALSE_POSITIVES)?;

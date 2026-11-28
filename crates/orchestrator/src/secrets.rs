@@ -352,14 +352,25 @@ mod tests {
 
     #[test]
     fn detects_azure_storage_connection_string() {
-        let sample = "DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;EndpointSuffix=core.windows.net";
+        // A planted key, not the published Azurite emulator key: that one is a public
+        // documentation example (camerata_secrets published list), so it is not a secret.
+        let planted = camerata_secrets::fixtures::planted(
+            camerata_secrets::SecretShape::AzureStorageConnectionString,
+        );
+        let sample = planted.text.as_str();
         let matches = detect_secrets(sample);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::AzureStorageConnectionString);
         // Only the account KEY is replaced; the protocol and account name stay readable.
         let matched = &sample[matches[0].start..matches[0].end];
-        assert!(matched.starts_with("Eby8vdM02xNO"));
+        assert_eq!(matched, planted.value);
         assert!(sample[..matches[0].start].ends_with("AccountKey="));
+    }
+
+    #[test]
+    fn the_published_azurite_emulator_key_is_not_scrubbed_as_a_secret() {
+        let sample = "DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;EndpointSuffix=core.windows.net";
+        assert!(detect_secrets(sample).is_empty());
     }
 
     #[test]

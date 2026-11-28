@@ -1,5 +1,5 @@
 id = "CICD-SEMGREP-SECURITY-SCAN-1"
-version = 3
+version = 4
 title = "Run the Semgrep security suite in CI"
 domain = "ci-cd"
 layer = "universal"
@@ -17,7 +17,7 @@ opt_in_only = true
 layer3_only = false
 verification = "grounded"
 qualifies = """
-How the engine tracks this: register Semgrep in the project's `.camerata/checks.toml` manifest as a deterministic check source so the engine composes its findings at the gate and in the agent loop rather than re-implementing the analysis. Because Community Edition is single-file and fast, it is the preferred tool for the in-loop / scan-preview path — it runs at scan time and at Camerata's Layer 2 as well as in CI, and its SARIF output folds into Camerata triage with stable rule ids. The paid Pro tier's cross-file engine and managed platform are a CI / platform-tier capability and are not run at the scan preview or in the agent loop.
+How the engine tracks this: register Semgrep in the project's `.camerata/checks.toml` manifest as a deterministic check source so the engine composes its findings at the gate and in the agent loop rather than re-implementing the analysis. Because Community Edition is single-file and fast, it is the preferred tool for the in-loop / scan-preview path. It runs at scan time and at Camerata's Layer 2 as well as in CI, and its SARIF output folds into Camerata triage with stable rule ids. The paid Pro tier's cross-file engine and managed platform are a CI / platform-tier capability and are not run at the scan preview or in the agent loop.
 """
 
 [[sources]]

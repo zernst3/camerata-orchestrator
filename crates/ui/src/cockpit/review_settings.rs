@@ -1,4 +1,7 @@
-//! The review settings lane (review UI spec section 9; work order WO11b).
+//! The review settings lane (review UI spec section 9; work order WO11b). The stage models and the
+//! finder moved to the shared Inspection settings component (`inspection_settings`), which the
+//! Settings lane mounts above this one; this lane keeps the escalation formula and the Engine
+//! Check sample size.
 //!
 //! A props-only screen, [`ReviewSettingsView`], and one host, [`ReviewSettingsHost`], that owns
 //! the signals and reads and writes through [`ReviewSource`]. The screen never fetches. Every
@@ -16,21 +19,16 @@
 use camerata_api_types::review_view::{
     EscalationBudgetOutcome, ReviewSettingsView as SettingsData,
 };
-use camerata_ui_core::models::ModelsResp;
 use camerata_ui_core::review_settings::{
-    budget_line, effect_sentence, field_action, field_hint, formula_apply_state, model_groups,
+    budget_line, effect_sentence, field_action, field_hint, formula_apply_state,
     preview_is_current, preview_request, reason_choices, reason_label, reason_locked, reasons_note,
     revert_field, sample_apply_state, sample_hint, sample_size, toggle_reason, ApplyState, Field,
-    FieldAction, SettingsDraft, SettingsEvent, Stage, FINDER_CHOICES,
+    FieldAction, SettingsDraft, SettingsEvent,
 };
 use dioxus::prelude::*;
 
 use camerata_ui::review_io::{ReviewApi, ReviewWrites};
 use camerata_ui::review_source::ReviewSource;
-
-/// The sentence under the stage models: where a model may come from. It says where models do
-/// NOT come from; the settings lane never suggests any other source.
-pub(crate) const MODELS_NOTE: &str = "Models come from this project or a CLI flag, never the environment. The model per stage is recorded in the ledger and disclosed in the methodology section.";
 
 /// The line beside Apply: what applying does.
 pub(crate) const APPLY_NOTE: &str =
@@ -60,15 +58,11 @@ pub struct ReviewSettingsViewProps {
     /// A run is in flight: the controls are disabled.
     #[props(default)]
     pub run_in_flight: bool,
-    /// The model registry, for the stage selects. `None` while it loads or when it failed: each
-    /// select then offers its current model alone.
-    #[props(default)]
-    pub models: Option<ModelsResp>,
     pub on_event: EventHandler<SettingsEvent>,
 }
 
-/// The settings lane: stage models, the escalation formula with its live budget, the Engine
-/// Check sample size.
+/// The settings lane: the escalation formula with its live budget and the Engine Check sample
+/// size. The stage models are the Inspection settings component's.
 #[component]
 pub fn ReviewSettingsView(props: ReviewSettingsViewProps) -> Element {
     let locked = props.run_in_flight;
@@ -96,75 +90,6 @@ pub fn ReviewSettingsView(props: ReviewSettingsViewProps) -> Element {
             }
             if let Some(message) = props.save_error.as_ref() {
                 div { class: "review-settings-banner", role: "alert", "{message}" }
-            }
-
-            // ── Stage models ──
-            h3 { class: "scan-section-h", "Stage models" }
-            for stage in Stage::ALL {
-                {
-                    let current = stage.current(&props.view.stage_models).to_string();
-                    let groups = model_groups(&props.models, &current);
-                    let id = format!("rs-model-{}", stage.step_key());
-                    rsx! {
-                        div { class: "audit-model-row", key: "{id}",
-                            label { class: "audit-model-label", r#for: "{id}", "{stage.label()}" }
-                            select {
-                                id: "{id}",
-                                class: "audit-model-select",
-                                disabled: locked || busy,
-                                onchange: move |e: Event<FormData>| {
-                                    on_event.call(SettingsEvent::Model(stage, e.value()));
-                                },
-                                if stage.can_be_unset() {
-                                    option { value: "", selected: current.is_empty(), "(not set)" }
-                                }
-                                for (group_label , options) in groups.into_iter() {
-                                    optgroup { label: "{group_label}",
-                                        for opt in options.into_iter() {
-                                            option {
-                                                key: "{opt.id}",
-                                                value: "{opt.id}",
-                                                selected: current == opt.id,
-                                                "{opt.label}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            {
-                                let hint = stage.hint();
-                                rsx! {
-                                    if !hint.is_empty() {
-                                        span { class: "audit-model-hint", "{hint}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            p { class: "audit-model-hint review-settings-note", "{MODELS_NOTE}" }
-
-            // ── Finder (agent or engine) ──
-            {
-                let current = Stage::Finder.current(&props.view.stage_models).to_string();
-                rsx! {
-                    div { class: "audit-model-row",
-                        label { class: "audit-model-label", r#for: "rs-finder", "Finder" }
-                        select {
-                            id: "rs-finder",
-                            class: "audit-model-select",
-                            disabled: locked || busy,
-                            onchange: move |e: Event<FormData>| {
-                                on_event.call(SettingsEvent::Model(Stage::Finder, e.value()));
-                            },
-                            for (word , text) in FINDER_CHOICES {
-                                option { key: "{word}", value: "{word}", selected: current == word, "{text}" }
-                            }
-                        }
-                        span { class: "audit-model-hint", "{Stage::Finder.hint()}" }
-                    }
-                }
             }
 
             // ── Escalation formula ──
@@ -332,24 +257,6 @@ pub(crate) async fn save_sample(
     load(reads).await
 }
 
-/// Set one stage's model, then reload.
-pub(crate) async fn change_stage_model(
-    reads: &dyn ReviewSource,
-    writes: &dyn ReviewWrites,
-    stage: Stage,
-    model: &str,
-    run_in_flight: bool,
-) -> Result<SettingsData, String> {
-    if run_in_flight {
-        return Err(RUN_IN_FLIGHT_NOTE.to_string());
-    }
-    writes
-        .set_stage_model(stage.step_key(), model)
-        .await
-        .map_err(|e| e.message)?;
-    load(reads).await
-}
-
 #[derive(Clone, PartialEq, Props)]
 pub struct ReviewSettingsHostProps {
     /// Reads and writes of the project's review settings.
@@ -357,9 +264,6 @@ pub struct ReviewSettingsHostProps {
     /// A run is in flight (the scan panel's flag): the lane's controls lock.
     #[props(default)]
     pub run_in_flight: bool,
-    /// The model registry for the stage selects.
-    #[props(default)]
-    pub models: Option<ModelsResp>,
     /// Called once the line has been re-marked, with the outcome, so the shell can reload the
     /// queue and show "No model call was made".
     pub on_applied: EventHandler<EscalationBudgetOutcome>,
@@ -479,29 +383,6 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
                     on_applied,
                 );
             }
-            SettingsEvent::Model(stage, model) => {
-                let source = source.clone();
-                spawn(async move {
-                    saving.set(true);
-                    save_error.set(None);
-                    match change_stage_model(
-                        source.reads.as_ref(),
-                        source.writes.as_ref(),
-                        stage,
-                        &model,
-                        run_in_flight,
-                    )
-                    .await
-                    {
-                        Ok(reloaded) => {
-                            // Only the saved side changes; typed fields stay as typed.
-                            view.set(Some(reloaded));
-                        }
-                        Err(message) => save_error.set(Some(message)),
-                    }
-                    saving.set(false);
-                });
-            }
         }
     });
 
@@ -527,7 +408,6 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
             saving: saving(),
             save_error: save_error(),
             run_in_flight,
-            models: props.models.clone(),
             on_event: handler,
         }
     }

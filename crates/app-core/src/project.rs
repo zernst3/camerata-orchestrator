@@ -485,10 +485,17 @@ pub struct Project {
     /// Absent from a project saved before the field existed.
     #[serde(default)]
     pub dev_run_spend_limit_cents: Option<u64>,
+    /// Files the client and the operator agreed are NOT part of the inspection (seed data, a
+    /// vendored export): glob patterns matched against `<repo name>/<path within the repo>`,
+    /// one pattern each, e.g. `acme-field-data/seeds/**`. One list decides what a run
+    /// reads and bills: an excluded file is not read, not counted, and named in the report as
+    /// "excluded by agreement". Absent from a project saved before the field existed (empty).
+    #[serde(default)]
+    pub scan_exclusions: Vec<String>,
     /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
     /// the budget, and the group reviewer's model (design D3, D5, A3). Defaults to the design
-    /// values for a project written before the settings existed.
-    #[serde(default)]
+    /// values for a project written before the settings existed (on the engine finder, as it ran).
+    #[serde(default = "ReviewSettings::legacy")]
     pub review: ReviewSettings,
 }
 
@@ -1023,6 +1030,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
@@ -1068,6 +1076,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections,
@@ -1168,6 +1177,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![],
@@ -1278,6 +1288,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
@@ -1325,6 +1336,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
@@ -1365,6 +1377,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
@@ -1537,6 +1550,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
@@ -1609,6 +1623,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
@@ -1703,6 +1718,7 @@ mod tests {
             client_engagement: true,
             client_tooling_opt_in: false,
             dev_run_spend_limit_cents: None,
+            scan_exclusions: Vec::new(),
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };

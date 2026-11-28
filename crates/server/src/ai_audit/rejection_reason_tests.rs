@@ -15,6 +15,7 @@ fn response(text: &str, truncated: bool) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -28,14 +29,15 @@ fn response(text: &str, truncated: bool) -> LlmResponse {
     }
 }
 
-fn state_dir() -> (tempfile::TempDir, camerata_test_env::EnvGuard) {
+pub(crate) fn state_dir() -> (tempfile::TempDir, camerata_test_env::EnvGuard) {
     let dir = tempfile::tempdir().unwrap();
     let guard = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", dir.path());
     (dir, guard)
 }
 
-fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
+pub(crate) fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("o/r".to_string(), repo_dir.to_path_buf())],
         models: ModelsRecord {
@@ -47,6 +49,8 @@ fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),
@@ -65,12 +69,12 @@ fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
     .unwrap()
 }
 
-async fn seeded<F: std::future::Future>(fut: F) -> F::Output {
+pub(crate) async fn seeded<F: std::future::Future>(fut: F) -> F::Output {
     crate::prompt_frame::with_seed(Some([7u8; crate::prompt_frame::NONCE_BYTES]), fut).await
 }
 
 /// Every stored call file of the run.
-fn call_files(store: &RunStore) -> Vec<CallFile> {
+pub(crate) fn call_files(store: &RunStore) -> Vec<CallFile> {
     std::fs::read_dir(store.dir().join("calls"))
         .unwrap()
         .filter_map(Result::ok)
@@ -283,6 +287,7 @@ async fn a_failed_fix_stage_does_not_set_aside_the_replies_that_were_accepted() 
                 class: "content".to_string(),
                 files: Vec::new(),
                 scope_note: false,
+                per_reply_rejections: false,
             }],
         );
         let files = call_files(&store);

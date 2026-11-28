@@ -49,6 +49,7 @@ impl LlmPort for ScriptedLlm {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: super::reply_schemas::check::address_by_id(&req.prompt, &text),
             model: "stub".to_string(),
             backend: "api".to_string(),

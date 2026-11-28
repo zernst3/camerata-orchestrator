@@ -55,6 +55,16 @@ pub fn jwt(role: Option<&str>) -> String {
     format!("{header}.{payload}.{}", body(43, URL_SAFE, 7))
 }
 
+/// A JWT whose payload carries `role` AND a `sub` claim (a user's session token).
+pub fn jwt_with_subject(role: &str) -> String {
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+    let claims = format!(
+        r#"{{"iss":"supabase","sub":"00000000-0000-4000-8000-000000000000","role":"{role}"}}"#
+    );
+    let payload = URL_SAFE_NO_PAD.encode(claims);
+    format!("{header}.{payload}.{}", body(43, URL_SAFE, 11))
+}
+
 /// Stripe's documented test key, assembled from fragments (it is published, and allowlisted by
 /// digest in [`crate::published`]).
 pub fn stripe_docs_test_key() -> String {

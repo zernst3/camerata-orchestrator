@@ -42,8 +42,9 @@ mod types_tests;
 
 pub use room::{BuiltRoom, NotServed, Room};
 
-/// Which finder a run uses. `Engine` is the existing scan-pass finder (the default until the
-/// graded comparison decides); `Agent` is this module.
+/// Which finder a run uses. `Agent` is this module (the default for a new project and a bare
+/// `camerata inspect`); `Engine` is the existing scan-pass finder (this type's own default, kept
+/// for saved runs that recorded no finder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FinderChoice {
     #[default]
@@ -172,6 +173,19 @@ pub struct AgentRun {
     pub conversation: ConversationHandle,
 }
 
+impl TurnUsage {
+    /// Whether this turn missed the prompt cache, given the turn before it in the same
+    /// conversation: it did not read back all that the previous request had read or written. The
+    /// system block has its own breakpoint, so a turn that misses the conversation still reads
+    /// the system prefix and `cache_read` alone cannot tell; and new tool results only add
+    /// writes, so a turn that reads back the whole previous prefix is a hit however much it
+    /// writes.
+    pub fn is_cache_miss_after(&self, previous: &TurnUsage) -> bool {
+        self.cache_read_input_tokens
+            < previous.cache_read_input_tokens + previous.cache_creation_input_tokens
+    }
+}
+
 impl AgentRun {
     /// A run that ended with `stop` and recorded nothing.
     pub fn empty(stop: AgentStop) -> Self {
@@ -219,6 +233,25 @@ impl FollowUp {
     /// so is never reported as shown. Every transport builds its message with this, so what
     /// "shown in full" means is one rule.
     pub fn render(&self, room: &Room) -> (String, Vec<String>) {
+        self.render_with(room, None)
+    }
+
+    /// [`Self::render`] with each file framed as untrusted client content under `nonce`: the
+    /// form the API transport sends, where the files are client text. The command line transport
+    /// (internal runs only) sends the plain form.
+    pub fn render_framed(
+        &self,
+        room: &Room,
+        nonce: &crate::prompt_frame::FrameNonce,
+    ) -> (String, Vec<String>) {
+        self.render_with(room, Some(nonce))
+    }
+
+    fn render_with(
+        &self,
+        room: &Room,
+        nonce: Option<&crate::prompt_frame::FrameNonce>,
+    ) -> (String, Vec<String>) {
         let mut text = self.message.clone();
         let mut shown = Vec::new();
         for path in &self.send_files {
@@ -228,7 +261,15 @@ impl FollowUp {
             if shown.contains(path) {
                 continue;
             }
-            text.push_str(&format!("\n\n--- {path} ---\n{body}"));
+            match nonce {
+                Some(nonce) => {
+                    // A token in a body can only have been put there after it was drawn.
+                    let body = body.replace(nonce.as_str(), "[frame token removed]");
+                    text.push_str("\n\n");
+                    text.push_str(&crate::prompt_frame::frame_untrusted(nonce, path, &body));
+                }
+                None => text.push_str(&format!("\n\n--- {path} ---\n{body}")),
+            }
             shown.push(path.clone());
         }
         (text, shown)
@@ -252,6 +293,13 @@ impl PieceLimits {
         (2 * files + 30).clamp(60, 400)
     }
 
+    /// [`Self::turns_for`] plus the Read calls the piece's files need beyond one each: a file
+    /// is read in pages (see [`room::read_pages`]), and the two turns given to each file cover
+    /// only its first page. `read_pages` is the sum of every file's pages.
+    pub fn turns_for_reading(files: usize, read_pages: usize) -> usize {
+        (2 * files + 30 + read_pages.saturating_sub(files)).clamp(60, 400)
+    }
+
     /// The longest one call may run on the clock: 60 seconds for each turn, at least 15 minutes
     /// and at most 4 hours. A call that passes it is stopped and the piece fails.
     pub fn wall_clock(&self) -> std::time::Duration {
@@ -261,8 +309,14 @@ impl PieceLimits {
     /// The limits for a piece of `files` files whose estimated cost is `estimate_usd`: the
     /// turn limit above, 32,000 tokens a turn and four times the estimate (at least $3).
     pub fn for_piece(files: usize, estimate_usd: f64) -> Self {
+        Self::for_piece_reading(files, files, estimate_usd)
+    }
+
+    /// [`Self::for_piece`] with the number of Read calls the piece's files need
+    /// ([`Self::turns_for_reading`]).
+    pub fn for_piece_reading(files: usize, read_pages: usize, estimate_usd: f64) -> Self {
         Self {
-            max_turns: Self::turns_for(files),
+            max_turns: Self::turns_for_reading(files, read_pages),
             max_turn_tokens: 32_000,
             ceiling_usd: (4.0 * estimate_usd).max(3.0),
         }

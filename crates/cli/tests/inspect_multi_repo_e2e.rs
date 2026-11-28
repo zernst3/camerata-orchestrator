@@ -23,6 +23,7 @@ impl LlmPort for Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -100,6 +101,7 @@ fn args(a: &Path, b: &Path, export: &Path) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 
@@ -154,7 +156,7 @@ async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
     // One export, one report: both repos are in it, under the names they were given.
     assert!(export.is_file());
     let readme = zip_entry(&export, "README.txt");
-    let findings = zip_entry(&export, "findings.json");
+    let findings = zip_entry(&export, "json/inspection.json");
     for name in ["acme/api", "acme/web"] {
         assert!(
             readme.contains(name) || findings.contains(name),
@@ -201,13 +203,15 @@ async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
         listed.contains(&canon(&a)) && listed.contains(&canon(&b)),
         "{listed:?}"
     );
+    // The cache, the ledger, the report an internal run with no run folder would save beside the
+    // ledger, and the list.
     assert_eq!(
         camerata_server::scan_cache::state_dir::project_files_covering(
             &state.path().join("camerata"),
             &a
         )
         .len(),
-        3
+        4
     );
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&caches[0]).unwrap()).unwrap();

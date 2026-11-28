@@ -18,15 +18,20 @@ use super::*;
 pub(in crate::cockpit) fn ScanJobFailedBanner(message: Option<String>) -> Element {
     rsx! {
         if let Some(msg) = message {
-            div {
-                class: "onboard-gate scan-job-failed-banner",
-                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
-                span { class: "onboard-gate-dot" }
-                div {
-                    p { class: "onboard-gate-h", "Scan failed" }
-                    p { class: "onboard-gate-b", "{msg}" }
-                    p { class: "onboard-gate-hint",
-                        "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan."
+            {
+                let kind = job_failure_kind(&msg);
+                rsx! {
+                    div {
+                        class: "onboard-gate scan-job-failed-banner",
+                        "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
+                        span { class: "onboard-gate-dot" }
+                        div {
+                            p { class: "onboard-gate-h", "{kind.heading()}" }
+                            p { class: "onboard-gate-b", "{msg}" }
+                            if let Some(hint) = kind.hint() {
+                                p { class: "onboard-gate-hint", "{hint}" }
+                            }
+                        }
                     }
                 }
             }
@@ -34,16 +39,128 @@ pub(in crate::cockpit) fn ScanJobFailedBanner(message: Option<String>) -> Elemen
     }
 }
 
-/// The progress line under the bar. Passes the spend limit refused are named on their own and
-/// are NOT in `done`, so a stopped scan never reads as complete.
+/// What kind of stop a job failure message is, which decides the heading and the hint under it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::cockpit) enum JobFailureKind {
+    /// The server refused the scan for a client engagement (its own text says why).
+    ClientLock,
+    /// The scan's status could not be read; it may still be running.
+    LostContact,
+    /// The server answered that it no longer knows the job (it restarted): the scan is dead and
+    /// saved.
+    Gone,
+    /// The job failed on the backend setup (no API key, no Claude CLI, a CLI too old).
+    Failed,
+    /// Any other refusal or failure: the server's own text, with no guess at the cause.
+    Other,
+}
+
+impl JobFailureKind {
+    pub(in crate::cockpit) fn heading(self) -> &'static str {
+        match self {
+            Self::ClientLock => "Refused for a client engagement",
+            Self::LostContact => "Lost contact with the scan",
+            Self::Gone => "Scan no longer running",
+            Self::Failed | Self::Other => "Scan failed",
+        }
+    }
+
+    pub(in crate::cockpit) fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::ClientLock => Some(
+                "Set this project to the Anthropic API with Anthropic models in its settings, then run the scan again.",
+            ),
+            Self::LostContact | Self::Gone | Self::Other => None,
+            Self::Failed => Some(
+                "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan.",
+            ),
+        }
+    }
+}
+
+/// How every client-lock refusal of a scan begins (`camerata_server::client_lock::refusal`; a
+/// server test pins it). The screen matches it to show the server's text under its own heading.
+const CLIENT_LOCK_PREFIX: &str = "This is a client engagement";
+
+/// True when a failure is about the backend setup, the only case the setup hint is true for.
+fn mentions_backend_setup(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    ["api key", "claude cli", "claude code", "on path"]
+        .iter()
+        .any(|needle| m.contains(needle))
+}
+
+pub(in crate::cockpit) fn job_failure_kind(message: &str) -> JobFailureKind {
+    if message == super::LOST_CONTACT_MESSAGE {
+        JobFailureKind::LostContact
+    } else if message == super::JOB_GONE_MESSAGE {
+        JobFailureKind::Gone
+    } else if message.starts_with(CLIENT_LOCK_PREFIX) {
+        JobFailureKind::ClientLock
+    } else if mentions_backend_setup(message) {
+        JobFailureKind::Failed
+    } else {
+        JobFailureKind::Other
+    }
+}
+
+/// The sentence under the incomplete banner's heading, from what really stopped the run (the
+/// words of the server's own cause), or `None` for failures that are not a stop. A pause at a cost
+/// checkpoint and a limit that could not be enforced are not "the spend limit".
+pub(in crate::cockpit) fn stop_line_for(failed: &[FailedPassView]) -> Option<&'static str> {
+    let any = |needle: &str| failed.iter().any(|f| f.reason.contains(needle));
+    if any("could not be enforced") {
+        Some("The spend limit could not be enforced, so the run stopped. The findings below cover only the part of the code and the rules that did run.")
+    } else if any("paused because its projected cost") {
+        Some("Paused at a cost checkpoint. The findings below cover only the part of the code and the rules that did run.")
+    } else if any("spend limit") {
+        Some("Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run.")
+    } else {
+        None
+    }
+}
+
+/// The progress line under the bar. Passes that did not run are named on their own and are NOT in
+/// `done`, so a stopped scan never reads as complete. `paused` is true when the run stopped at a
+/// cost checkpoint; with passes not run and no known cause the line says "NOT RUN" alone, never a
+/// cause it cannot know.
+#[cfg(test)]
 pub(in crate::cockpit) fn job_progress_label(
     done: usize,
     total: usize,
     findings: usize,
     not_run: usize,
 ) -> String {
+    job_progress_label_for(done, total, findings, not_run, NotRunCause::SpendLimit)
+}
+
+/// What is known about why passes did not run, for the live progress line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::cockpit) enum NotRunCause {
+    /// The spend limit was reached (known to the caller; the live screen cannot tell it from an
+    /// unknown cost, so only the pinned wording uses it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    SpendLimit,
+    /// The run paused at a cost checkpoint.
+    Checkpoint,
+    /// The poll does not say (the limit, an unknown cost, an outage): no cause is claimed.
+    Unknown,
+}
+
+pub(in crate::cockpit) fn job_progress_label_for(
+    done: usize,
+    total: usize,
+    findings: usize,
+    not_run: usize,
+    cause: NotRunCause,
+) -> String {
     if not_run > 0 {
-        format!("{done}/{total} passes \u{b7} {not_run} NOT RUN (spend limit) \u{b7} {findings} finding(s) so far")
+        let why = match cause {
+            NotRunCause::SpendLimit => " (spend limit)",
+            NotRunCause::Checkpoint => " (paused at a cost checkpoint)",
+            NotRunCause::Unknown => "",
+        };
+        format!("{done}/{total} passes \u{b7} {not_run} NOT RUN{why} \u{b7} {findings} finding(s) so far")
     } else {
         format!("{done}/{total} passes \u{b7} {findings} finding(s) so far")
     }
@@ -74,9 +191,7 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
         return rsx! {};
     }
     let n = failed_passes.len();
-    let stopped_by_limit = failed_passes
-        .iter()
-        .any(|f| f.reason.contains("spend limit"));
+    let stop_line = stop_line_for(&failed_passes);
     if compact {
         return rsx! {
             div { class: "onboard-gate scan-incomplete-banner scan-incomplete-compact",
@@ -92,10 +207,8 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
             span { class: "onboard-gate-dot" }
             div {
                 p { class: "onboard-gate-h", "Incomplete: {n} pass(es) or stage(s) did not run" }
-                if stopped_by_limit {
-                    p { class: "onboard-gate-b",
-                        "Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run."
-                    }
+                if let Some(line) = stop_line {
+                    p { class: "onboard-gate-b", "{line}" }
                 }
                 ul { class: "scan-incomplete-list",
                     for (i , f) in failed_passes.iter().enumerate() {
@@ -416,15 +529,15 @@ pub(in crate::cockpit) fn ConventionsPanel(
                                 for c in shown.iter() {
                                     {
                                         let key = c.key();
-                                        let adopted = model.is_adopted(&key);
-                                        let opened = model.was_opened(&key);
+                                        let adopted = model.is_adopted_for(c);
                                         let adoptable = c.is_adoptable();
                                         let req = RuleHubRequest {
                                             repo: c.repo.clone(),
                                             rule_id: c.rule_id.clone(),
                                         };
-                                        let toggle_key = key.clone();
+                                        let opened = model.was_opened(&key);
                                         let open_key = key.clone();
+                                        let toggle_key = key.clone();
                                         rsx! {
                                             li {
                                                 key: "{key}",
@@ -447,6 +560,9 @@ pub(in crate::cockpit) fn ConventionsPanel(
                                                 }
                                                 span { class: "kind-panel-label", "{c.label}" }
                                                 span { class: "adopt-status", "{c.status_line()}" }
+                                                if let Some(line) = c.default_line() {
+                                                    span { class: "adopt-differs", "{line}" }
+                                                }
                                                 if !opened {
                                                     span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
                                                 }
@@ -688,6 +804,13 @@ pub(in crate::cockpit) struct RecommendationPick {
     pub option_id: Option<String>,
 }
 
+/// What a row says when the server could not be asked what stands.
+const RULINGS_UNREAD: &str = "Rulings could not be read. Reload to try again.";
+
+/// What a split row with no convention record says: it cannot be ruled on from here.
+const NO_RECORD_NOTE: &str =
+    "This scan holds no record of this rule's options, so it cannot be ruled on here.";
+
 /// NO CONVENTION panel — `NoConvention` rows: the codebase is inconsistent with no clear
 /// majority. Exactly one row per rule (A5.3), listing the options actually observed with their
 /// site counts where the producer could count them.
@@ -729,6 +852,16 @@ pub(in crate::cockpit) fn NoConventionPanel(
     /// A commit is in flight.
     #[props(default)]
     busy: bool,
+    /// The scan's convention records (with the reviewer's rulings applied). A rule with a record
+    /// is ruled on through the standards routes, not by a local pick that records nothing.
+    #[props(default)]
+    conventions: Vec<camerata_api_types::audit::RuleConvention>,
+    /// The server could not be asked for the rulings, so no row can say what stands.
+    #[props(default)]
+    rulings_unread: bool,
+    /// The reviewer ruled on a rule: (repo, rule id, what they asked).
+    #[props(default)]
+    on_ruling: Callback<(String, String, super::queue_table::RulingAction)>,
 ) -> Element {
     let all = split_rules(&findings);
     if all.is_empty() {
@@ -755,7 +888,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
     rsx! {
         div { class: "kind-panel",
             p { class: "kind-panel-sub",
-                "Rules where the codebase is split with no clear majority. Recommending an option is a CLIENT-FACING governance act, not a note to yourself: it is written into that repository's AGENTS.md and governs how future AI agents work on the code. The default is to leave the split as reported and write nothing."
+                "Rules where the codebase is split with no clear majority. Accept an option, or leave the rule to the client: either is a ruling the report carries, and a client package cannot be exported while a split has neither."
             }
             for (repo , rows) in by_repo.iter() {
                 {
@@ -767,14 +900,10 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                 for r in rows.iter() {
                                     {
                                         let key = r.key();
-                                        let picked = model.recommendation(&key).map(str::to_string);
-                                        let opened = model.was_opened(&key);
                                         let req = RuleHubRequest {
                                             repo: r.repo.clone(),
                                             rule_id: r.rule_id.clone(),
                                         };
-                                        let open_key = key.clone();
-                                        let pick_key = key.clone();
                                         let options = r.options.clone();
                                         let summary: Vec<String> = r
                                             .options
@@ -782,68 +911,111 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                             .filter_map(|(id, _, _)| r.option_line(id))
                                             .collect();
                                         let detail = detail_of.get(&key).cloned().unwrap_or_default();
+                                        // A rule with a record is ruled on, so its state is the record's.
+                                        let record = conventions
+                                            .iter()
+                                            .find(|c| c.repo == r.repo && c.rule_id.eq_ignore_ascii_case(&r.rule_id))
+                                            .cloned();
+                                        let ruling = record.as_ref().map(|c| {
+                                            (
+                                                camerata_ui_core::convention_view::split_state(c),
+                                                c.standard.ruling_id.clone(),
+                                                c.standard.option_id.clone(),
+                                            )
+                                        });
+                                        let (repo_for_ruling, rule_for_ruling) = (r.repo.clone(), r.rule_id.clone());
                                         rsx! {
-                                            li {
-                                                key: "{key}",
-                                                class: if picked.is_some() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
-                                                span {
-                                                    class: if picked.is_some() { "adopt-state on" } else { "adopt-state off" },
-                                                    if picked.is_some() { "Recommend" } else { "Leave as reported" }
-                                                }
-                                                button {
-                                                    class: "rule-hub-link kind-panel-rule",
-                                                    title: "Everything this scan knows about {r.rule_id}.",
-                                                    onclick: move |_| on_open_hub.call(req.clone()),
-                                                    "{r.rule_id}"
-                                                }
-                                                if summary.is_empty() {
-                                                    span { class: "kind-panel-label", "{detail}" }
-                                                } else {
-                                                    span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
-                                                }
-                                                if picked.is_some() && !opened {
-                                                    span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
-                                                }
-                                                span { class: "kind-panel-repo", "{r.repo}" }
-                                                button {
-                                                    class: "btn-ghost adopt-open",
-                                                    onclick: move |_| on_open.call(open_key.clone()),
-                                                    if opened { "Opened" } else { "Open" }
-                                                }
-                                                select {
-                                                    class: "adopt-pick",
-                                                    // "Leave as reported" is the first entry AND the
-                                                    // default, so the keyboard-first gesture on an
-                                                    // untouched row changes nothing.
-                                                    value: picked.clone().unwrap_or_default(),
-                                                    onchange: move |e| {
-                                                        let v = e.value();
-                                                        on_recommend
-                                                            .call(RecommendationPick {
-                                                                key: pick_key.clone(),
-                                                                option_id: if v.is_empty() { None } else { Some(v) },
-                                                            });
-                                                    },
-                                                    option { value: "", "Leave as reported" }
-                                                    for (id , label , sites) in options.iter() {
-                                                        option { key: "{id}", value: "{id}",
-                                                            if let Some(n) = sites {
-                                                                "Recommend: {label} ({n} sites)"
-                                                            } else {
-                                                                "Recommend: {label}"
+                                            if let Some((state, ruling_id, chosen)) = ruling {
+                                                li {
+                                                    key: "{key}",
+                                                    class: if state.is_decided() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
+                                                    "data-rule": "{r.rule_id}",
+                                                    span {
+                                                        class: if state.is_decided() { "adopt-state on" } else { "adopt-state off" },
+                                                        "data-control": "state",
+                                                        if rulings_unread { "{RULINGS_UNREAD}" } else { "{state.text()}" }
+                                                    }
+                                                    button {
+                                                        class: "rule-hub-link kind-panel-rule",
+                                                        title: "Everything this scan knows about {r.rule_id}.",
+                                                        onclick: move |_| on_open_hub.call(req.clone()),
+                                                        "{r.rule_id}"
+                                                    }
+                                                    if summary.is_empty() {
+                                                        span { class: "kind-panel-label", "{detail}" }
+                                                    } else {
+                                                        span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
+                                                    }
+                                                    span { class: "kind-panel-repo", "{r.repo}" }
+                                                    select {
+                                                        class: "adopt-pick",
+                                                        "data-control": super::queue_table::CTRL_ACCEPT,
+                                                        value: chosen.clone().unwrap_or_default(),
+                                                        onchange: {
+                                                            let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                            move |e| {
+                                                                let v = e.value();
+                                                                if !v.is_empty() {
+                                                                    on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Accept(v)));
+                                                                }
+                                                            }
+                                                        },
+                                                        option { value: "", "Choose an option to accept" }
+                                                        for (id , label , sites) in options.iter() {
+                                                            option { key: "{id}", value: "{id}",
+                                                                if let Some(n) = sites {
+                                                                    "Accept: {label} ({n} sites)"
+                                                                } else {
+                                                                    "Accept: {label}"
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
-                                                if opened {
-                                                    div { class: "adopt-detail",
-                                                        p { class: "adopt-detail-line",
-                                                            "Nothing is written for this rule unless you recommend an option. A recommendation becomes {r.repo}'s stated position on {r.rule_id} in its AGENTS.md."
-                                                        }
-                                                        if !detail.is_empty() {
-                                                            p { class: "adopt-detail-line", "{detail}" }
+                                                    p { class: "adopt-effect", "{camerata_ui_core::convention_view::ACCEPT_EFFECT}" }
+                                                    button {
+                                                        class: "btn-ghost rule-hub-leave",
+                                                        "data-control": super::queue_table::CTRL_LEAVE,
+                                                        onclick: {
+                                                            let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                            move |_| on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Leave))
+                                                        },
+                                                        "{camerata_ui_core::convention_view::LEAVE_LABEL}"
+                                                    }
+                                                    p { class: "adopt-effect", "{camerata_ui_core::convention_view::LEAVE_EFFECT}" }
+                                                    if let Some(id) = ruling_id {
+                                                        button {
+                                                            class: "btn-ghost rule-hub-withdraw",
+                                                            "data-control": super::queue_table::CTRL_WITHDRAW,
+                                                            onclick: {
+                                                                let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                                move |_| on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Withdraw(id.clone())))
+                                                            },
+                                                            "Withdraw"
                                                         }
                                                     }
+                                                    if !state.is_decided() && !rulings_unread {
+                                                        p { class: "adopt-effect", "{camerata_ui_core::convention_view::NEEDS_DECISION}" }
+                                                    }
+                                                }
+                                            } else {
+                                                // No record of this rule's options: nothing can be ruled on, and
+                                                // nothing here claims a choice. Read-only.
+                                                li {
+                                                    key: "{key}",
+                                                    class: "kind-panel-row adopt-row skipped",
+                                                    button {
+                                                        class: "rule-hub-link kind-panel-rule",
+                                                        title: "Everything this scan knows about {r.rule_id}.",
+                                                        onclick: move |_| on_open_hub.call(req.clone()),
+                                                        "{r.rule_id}"
+                                                    }
+                                                    if summary.is_empty() {
+                                                        span { class: "kind-panel-label", "{detail}" }
+                                                    } else {
+                                                        span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
+                                                    }
+                                                    span { class: "kind-panel-repo", "{r.repo}" }
+                                                    p { class: "adopt-effect", "{NO_RECORD_NOTE}" }
                                                 }
                                             }
                                         }
@@ -890,7 +1062,7 @@ pub(in crate::cockpit) fn NotAssessedPanel(
         Default::default();
     for f in &findings {
         let reason = match &f.kind {
-            Some(FindingKind::NotAssessed(na)) => na.reason.as_str(),
+            Some(FindingKind::NotAssessed(na)) => na.reason.heading(),
             _ => "unknown",
         };
         by_reason.entry(reason).or_default().push(f.clone());

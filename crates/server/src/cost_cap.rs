@@ -64,6 +64,10 @@
 //! The first pass of a run is always admitted (nothing has been spent), so a cap smaller than
 //! one pass still lets that one pass finish.
 //!
+//! An agent finder piece is admitted once for all its turns, so it checks the run's limit
+//! ([`crate::ai_audit::UsageMeter::retry_blocked`]) before every turn after the first and stops
+//! with a spend-limit stop, recorded as a failed part like any other stage the limit stopped.
+//!
 //! # What the cap needs from every call
 //!
 //! A cost. With a cap set, every model the run will call is checked for a list price before
@@ -115,8 +119,9 @@ pub struct RunControls {
     /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
     /// A blank `group_review_model` means the built-in default. Never the environment.
     pub review: camerata_api_types::project::ReviewSettings,
-    /// `--finder agent|engine`: which finder the run uses. `Engine` (the existing scan passes) is
-    /// the default until the graded comparison decides.
+    /// `--finder agent|engine`: which finder the run uses. A new project and a bare `camerata inspect`
+    /// run `Agent`; this struct's own default stays `Engine` (the existing scan passes), the value
+    /// a saved run record without a finder resumes with.
     pub finder: crate::ai_audit::agent_finder::FinderChoice,
     /// `--finder-model`: the agent finder's model. `None` or blank = the built-in default
     /// ([`crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL`]). Never the environment.
@@ -126,6 +131,10 @@ pub struct RunControls {
     /// The cost checkpoint's settings: the pre-flight figures it projects from, the run folder
     /// it records into and the sink that prints it. The approved amount is `max_cost_usd`.
     pub checkpoint: crate::cost_checkpoint::CheckpointSettings,
+    /// The project's exclusion list: files excluded by agreement are not read by this run, so
+    /// they are not billed either ([`crate::onboard::scope`]). The caller builds it from the
+    /// open project; the default excludes nothing.
+    pub scope: crate::onboard::scope::ScanScope,
 }
 
 impl RunControls {
@@ -599,7 +608,13 @@ impl CostCapRecord {
 /// The mutable half of the cap, owned by the [`crate::ai_audit::UsageMeter`].
 #[derive(Debug, Default)]
 pub(crate) struct BudgetState {
+    /// Every admitted pass in flight, request-scoped or not.
     pub in_flight: u64,
+    /// The part of `in_flight` admitted for one request ([`crate::ai_audit::UsageMeter::admit_for_request`]).
+    pub scoped_in_flight: u64,
+    /// What those request-scoped passes reserve in total, in micro-dollars: each one its OWN
+    /// request's ceiling, not the run's worst call.
+    pub scoped_reserved_micro: u64,
     pub not_run_passes: Vec<NotRunPass>,
     pub not_run_stages: Vec<NotRunStage>,
     pub notes: Vec<String>,
@@ -634,6 +649,7 @@ mod tests {
 
     fn controls_with_cap(cap: Option<f64>) -> RunControls {
         RunControls {
+            scope: Default::default(),
             max_cost_usd: cap,
             ..RunControls::default()
         }
@@ -691,19 +707,19 @@ mod tests {
     fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
         let off = fix_follows_calibration();
         let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"], &off);
-        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.2), so
-        // the scan and the fix pass share a model and the two reviewers each have theirs.
+        // Stage 1 and stage 2 have defaults of their own (both Opus 5.5), so the scan and the
+        // fix pass share a model and the two reviewers share Opus 5.5.
         let by_model: std::collections::BTreeMap<&str, &str> = all
             .iter()
             .map(|(roles, model)| (model.as_str(), roles.as_str()))
             .collect();
-        // The duplicate check's own default, Sonnet 5.5, is a fourth.
-        assert_eq!(all.len(), 4, "four models fill the roles: {all:?}");
+        // The duplicate check's own default, Sonnet 5.5, is a third.
+        assert_eq!(all.len(), 3, "three models fill the roles: {all:?}");
         assert_eq!(by_model["claude-sonnet-5-5"], "the duplicate check");
         assert!(by_model["claude-sonnet-5"].contains("the scan"));
         assert!(by_model["claude-sonnet-5"].contains("fix generation"));
-        assert_eq!(by_model["claude-opus-5-5"], "calibration");
-        assert_eq!(by_model["claude-fable-5-2"], "group review");
+        assert!(by_model["claude-opus-5-5"].contains("calibration"));
+        assert!(by_model["claude-opus-5-5"].contains("group review"));
         assert!(!all
             .iter()
             .any(|(roles, _)| roles.contains("clone judge") || roles.contains("deep")));
@@ -768,11 +784,12 @@ mod tests {
         // A blank project: the built-in defaults.
         let mut blank = RunControls::default();
         blank.fill_models_from_project(&ReviewSettings::default());
-        assert_eq!(blank.finder_model_for(), "claude-fable-5-2");
+        assert_eq!(blank.finder_model_for(), "claude-opus-5-5");
         assert_eq!(blank.dup_check_model_for(), "claude-sonnet-5-5");
         assert_eq!(blank.clone_judge_model_for(), "claude-haiku-5-5");
         // A flag wins over the project, for every role.
         let mut flagged = RunControls {
+            scope: Default::default(),
             finder_model: Some("flag-finder".to_string()),
             clone_judge_model: Some("flag-judge".to_string()),
             review: ReviewSettings {
@@ -795,6 +812,7 @@ mod tests {
             &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
             &{
                 let mut c = RunControls {
+                    scope: Default::default(),
                     finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
                     ..RunControls::default()
                 };
@@ -833,12 +851,14 @@ mod tests {
         };
         assert_eq!(judge_of(&RunControls::default()), "claude-haiku-5-5");
         let picked = RunControls {
+            scope: Default::default(),
             clone_judge_model: Some("claude-haiku-4-5-20251001".to_string()),
             ..RunControls::default()
         };
         assert_eq!(judge_of(&picked), "claude-haiku-4-5-20251001");
         assert!(crate::llm::is_priced("claude-haiku-4-5-20251001"));
         let blank = RunControls {
+            scope: Default::default(),
             clone_judge_model: Some("  ".to_string()),
             ..RunControls::default()
         };
@@ -861,6 +881,7 @@ mod tests {
             crate::ai_audit::FIX_STAGE_HAIKU_MODEL
         );
         let explicit = RunControls {
+            scope: Default::default(),
             fix_model: Some("claude-opus-5".to_string()),
             ..RunControls::default()
         };

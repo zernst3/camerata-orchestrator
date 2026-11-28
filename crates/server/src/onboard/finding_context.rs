@@ -54,8 +54,11 @@ pub enum FindingContextOutcome {
     TooLarge,
     /// The code viewer refuses the file: over its cap, or too slow to prepare. Same `too_large`
     /// status as [`TooLarge`](FindingContextOutcome::TooLarge), with a reason that does not name
-    /// the 400 KB modal cap.
+    /// the read limit.
     TooLargeToView,
+    /// The file is named by the project's exclusion list (`onboard::scope`): the inspection did
+    /// not read it, so nothing of it is shown.
+    ExcludedByAgreement,
     /// The file is readable, but `line` is past its current end (the file shrank).
     LineGone,
     /// The requested `path` resolves outside the repo directory — refused before any read.
@@ -68,6 +71,11 @@ pub enum FindingContextOutcome {
         deleted_at: String,
         record_id: String,
     },
+    /// The repo is not linked to the project, or has no local folder: nothing was looked for in
+    /// any file. Distinct from [`FileMissing`](FindingContextOutcome::FileMissing), which is a
+    /// file really absent at a resolved folder. `reason` is in plain words (it names the folder
+    /// that was looked for when there is one).
+    RepoUnlinked { reason: String },
     /// A search could not run at all (git missing, not a repository, an error exit). Nothing was
     /// searched, so no answer, empty or otherwise, may be drawn from it.
     SearchFailed,
@@ -104,13 +112,17 @@ impl FindingContextOutcome {
                 "status": "file_missing",
                 "reason": "file not found — changed since scan?",
             }),
+            FindingContextOutcome::RepoUnlinked { reason } => serde_json::json!({
+                "status": "repo_unlinked",
+                "reason": reason,
+            }),
             FindingContextOutcome::NotUtf8 => serde_json::json!({
                 "status": "not_utf8",
                 "reason": "file is not valid UTF-8 (binary?)",
             }),
             FindingContextOutcome::TooLarge => serde_json::json!({
                 "status": "too_large",
-                "reason": format!("file exceeds the {} KB cap", MAX_FILE_BYTES / 1000),
+                "reason": format!("file exceeds the {} cap", super::files::max_file_label()),
             }),
             FindingContextOutcome::TooLargeToView => serde_json::json!({
                 "status": "too_large",
@@ -118,6 +130,10 @@ impl FindingContextOutcome {
                     "file is too large to view here (over {} MB, or too slow to prepare)",
                     super::source_file::MAX_VIEWER_BYTES / (1024 * 1024)
                 ),
+            }),
+            FindingContextOutcome::ExcludedByAgreement => serde_json::json!({
+                "status": "excluded_by_agreement",
+                "reason": "this file is excluded from the inspection by agreement, so it is not shown",
             }),
             FindingContextOutcome::LineGone => serde_json::json!({
                 "status": "line_gone",
@@ -192,7 +208,7 @@ pub async fn lookup_at(
 }
 
 /// A refusal in the shared vocabulary at THIS endpoint's cap: `finding-context` and the batch
-/// answer an oversized file with the 400 KB `too_large` reason, not the viewer's.
+/// answer an oversized file with the read-limit `too_large` reason, not the viewer's.
 pub(crate) fn outcome_of(refused: Refused) -> FindingContextOutcome {
     match refused {
         Refused::TooLarge => FindingContextOutcome::TooLarge,

@@ -1329,3 +1329,111 @@ fn a_second_look_no_reads_corrected_only_when_the_row_is_no_longer_ruled_out() {
         );
     }
 }
+
+// ── The word a click-through waits on to know a correction landed ─────────────────────────
+
+/// Every state a card can read.
+fn every_state() -> Vec<CardState> {
+    let error = Some(EngineCheckError::WrongSeverity);
+    vec![
+        CardState::Pending,
+        CardState::Yes,
+        CardState::Held {
+            error,
+            carried_from: None,
+        },
+        CardState::Held {
+            error,
+            carried_from: Some("insp-1".to_string()),
+        },
+        CardState::HeldThrownOut { carried_from: None },
+        CardState::HeldThrownOut {
+            carried_from: Some("insp-1".to_string()),
+        },
+        CardState::ThrownOut,
+        CardState::Restored,
+        CardState::ThrownOutConfirmed { error },
+        CardState::Corrected { error },
+        CardState::CorrectedHeld {
+            error,
+            hold: camerata_api_types::review_view::HoldReason::CriticalWithoutDecision,
+        },
+        CardState::CorrectedHeld {
+            error,
+            hold: camerata_api_types::review_view::HoldReason::JunkContent,
+        },
+    ]
+}
+
+#[test]
+fn the_word_corrected_alone_does_not_tell_a_corrected_card_from_a_held_one() {
+    // The held states say "held from export until corrected", so a screen test that waits for
+    // the bare word "corrected" is satisfied by a card that is still held. This pins why it must
+    // wait on the corrected state's own opening words instead.
+    let held = card_state_text(&CardState::Held {
+        error: Some(EngineCheckError::WrongSeverity),
+        carried_from: None,
+    });
+    assert!(held.contains("corrected"), "{held}");
+}
+
+#[test]
+fn only_the_corrected_state_opens_with_no_corrected() {
+    const MARK: &str = "No, corrected";
+    for state in every_state() {
+        let text = card_state_text(&state);
+        assert_eq!(
+            text.contains(MARK),
+            matches!(state, CardState::Corrected { .. }),
+            "{state:?}: {text}"
+        );
+    }
+}
+
+/// "The corrected version is what ships" is true only when nothing else holds the row. A No that
+/// was corrected with an edit that is not a severity edit leaves a critical or unsure row held for
+/// a decision of its own: the card says so instead.
+#[test]
+fn a_corrected_no_on_a_row_still_held_for_a_decision_does_not_say_it_ships() {
+    use camerata_api_types::review_view::HoldReason;
+    for hold in [
+        HoldReason::CriticalWithoutDecision,
+        HoldReason::UnsureWithoutDecision,
+        HoldReason::EvidenceUnverified,
+        HoldReason::JunkContent,
+        HoldReason::SplitOutWithoutDecision,
+        HoldReason::MergedWithoutDecision,
+    ] {
+        let mut card = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
+        card.site.held = Some(hold);
+        let state = card_state(&card);
+        assert!(
+            matches!(state, CardState::CorrectedHeld { .. }),
+            "{hold:?}: {state:?}"
+        );
+        let text = card_state_text(&state);
+        assert!(!text.contains("what ships"), "{text}");
+        let severity_way =
+            text.contains("set its severity, confirm it or mark it a false positive");
+        assert_eq!(
+            severity_way,
+            matches!(
+                hold,
+                HoldReason::CriticalWithoutDecision | HoldReason::UnsureWithoutDecision
+            ),
+            "{hold:?}: {text}"
+        );
+        assert!(text.contains("held from export until you"), "{text}");
+    }
+    // A put-back thrown-out row that was corrected and is still held reads held too.
+    let mut put_back = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
+    put_back.stratum = SampleStratum::ThrownOut;
+    put_back.site.held = Some(HoldReason::CriticalWithoutDecision);
+    assert!(matches!(
+        card_state(&put_back),
+        CardState::CorrectedHeld { .. }
+    ));
+    // With nothing holding the row, the corrected version is what ships.
+    let card = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
+    assert!(matches!(card_state(&card), CardState::Corrected { .. }));
+}

@@ -218,6 +218,18 @@ pub struct DeviationKind {
     /// The observed majority convention's human label, verbatim from the AUTHORED corpus
     /// option (never model prose) whenever `convention_option_id` resolves.
     pub convention_label: String,
+    /// Where the standard these rows depart from came from (design section 4). `None` reads
+    /// as observed, which is what every report saved before the convention model means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_source: Option<StandardSource>,
+    /// The rule's default option label when the standard is a different option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub differs_from_default: Option<String>,
+    /// How many places follow the standard's own option (not "assessed minus departing": places of
+    /// a third option, and places of the rule's default while the standard is only observed, are
+    /// neither). `None` when the producer did not count, and for a report saved before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following_sites: Option<usize>,
 }
 
 /// Payload of [`FindingKind::ConventionObserved`] — the convention the codebase was judged
@@ -229,6 +241,12 @@ pub struct ConventionObservedKind {
     pub convention_option_id: String,
     /// The authored option's human label (corpus text, never model prose).
     pub convention_label: String,
+    /// Where the standard came from. `None` reads as observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_source: Option<StandardSource>,
+    /// The rule's default option label when the standard is a different option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub differs_from_default: Option<String>,
 }
 
 /// One authored option's observed usage inside a [`NoConventionKind`] row — which options
@@ -253,6 +271,9 @@ pub struct NoConventionKind {
     /// The authored options the codebase was observed using, with per-option site counts
     /// when available.
     pub observed_options: Vec<ObservedOptionUsage>,
+    /// The reviewer chose "No recommendation, leave it to the client" for this rule.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_to_client: bool,
 }
 
 /// Why a [`FindingKind::NotAssessed`] rule could not be evaluated. A closed, structured
@@ -283,6 +304,17 @@ impl NotAssessedReason {
     }
 }
 
+impl NotAssessedReason {
+    /// The heading a reviewer reads over a group of these rows. The model's honest "unsure" is
+    /// not a refusal, so it reads "Not settled"; the other classes keep their wire string.
+    pub fn heading(self) -> &'static str {
+        match self {
+            NotAssessedReason::ModelDeclined => "Not settled",
+            other => other.as_str(),
+        }
+    }
+}
+
 /// Payload of [`FindingKind::NotAssessed`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotAssessedKind {
@@ -293,6 +325,202 @@ pub struct NotAssessedKind {
     /// this payload flattens into a row that already has its own `detail` field.
     pub reason_detail: String,
 }
+
+/// Where the standard of a rule with options came from (convention model, section 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandardSource {
+    /// The reviewer's ruling for this inspection.
+    Reviewer,
+    /// The convention two thirds of the assessed places follow.
+    Observed,
+    /// A rule with a default and no ruling and no observed convention: the rule's own default
+    /// (also the project's chosen option when that is the default).
+    RuleDefault,
+    /// A rule with no ruling and no observed convention whose project chose an option earlier
+    /// that is not the rule's default.
+    EarlierChoice,
+    /// A rule with no ruling, no observed convention, no default and no earlier choice: the
+    /// option most of the places follow.
+    MostCommon,
+    /// No standard.
+    #[default]
+    None,
+}
+
+/// Whether a place (or finder row) conforms to the standard of its rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceStatus {
+    /// Follows the standard.
+    Conforms,
+    /// Departs from the standard.
+    Departs,
+    /// Follows the rule's default while the standard is only observed and differs from it.
+    FollowsRuleDefault,
+    /// There is no standard, so nothing departs.
+    #[default]
+    NoStandard,
+}
+
+/// How the option of a finder row's place was worked out (never stored as a guess).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionBasis {
+    /// A recorded place of an option is inside the row's line range.
+    Listed,
+    /// No recorded place matched and exactly one option other than the judged one is in use.
+    OnlyOther,
+    /// Neither.
+    #[default]
+    Unknown,
+}
+
+/// Where a proposal came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalBasis {
+    /// The rule's default.
+    #[default]
+    RuleDefault,
+    /// The option the project chose earlier, when it is not the rule's default.
+    EarlierChoice,
+}
+
+/// One place that follows an option, as recorded by the scan.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CensusPlace {
+    pub path: String,
+    pub line: usize,
+    /// The trimmed line, redacted, at most 200 characters.
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub checked: bool,
+    #[serde(default)]
+    pub status: PlaceStatus,
+}
+
+/// One option of a rule with its honest total and up to ten recorded places.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OptionCensus {
+    pub option_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub violates: bool,
+    /// The honest total, which may exceed the places listed.
+    #[serde(default)]
+    pub count: Option<usize>,
+    /// At most ten.
+    #[serde(default)]
+    pub places: Vec<CensusPlace>,
+}
+
+/// A finder row that cites a rule with options, and what the resolver worked out for it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FinderRowRef {
+    pub site_key: String,
+    pub path: String,
+    pub line: usize,
+    #[serde(default)]
+    pub note: String,
+    /// The rule id the row is keyed to now (it may have moved to another rule at scan time).
+    #[serde(default)]
+    pub keyed_rule_id: String,
+    #[serde(default)]
+    pub option_id: Option<String>,
+    #[serde(default)]
+    pub option_basis: OptionBasis,
+    #[serde(default)]
+    pub status: PlaceStatus,
+}
+
+/// A proposal for the standard, shown when there is none.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Proposal {
+    pub option_id: String,
+    #[serde(default)]
+    pub basis: ProposalBasis,
+}
+
+/// The resolved standard of one rule, written by the resolver.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StandardState {
+    #[serde(default)]
+    pub option_id: Option<String>,
+    #[serde(default)]
+    pub source: StandardSource,
+    /// The reviewer chose no recommendation.
+    #[serde(default)]
+    pub left_to_client: bool,
+    #[serde(default)]
+    pub ruling_id: Option<String>,
+    /// The default's label, when the standard is not the default.
+    #[serde(default)]
+    pub differs_from_default: Option<String>,
+    /// Only when `option_id` is None and the rule was not left to the client.
+    #[serde(default)]
+    pub proposal: Option<Proposal>,
+    #[serde(default)]
+    pub departing_places: usize,
+    #[serde(default)]
+    pub conforming_places: usize,
+}
+
+/// One record per (repo, rule with options): the facts the resolver turns into rows.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RuleConvention {
+    pub repo: String,
+    pub rule_id: String,
+    /// The rule file's default option.
+    #[serde(default)]
+    pub default_option_id: Option<String>,
+    /// What the finder's directive was.
+    #[serde(default)]
+    pub judged_option_id: Option<String>,
+    /// The option two thirds of the places follow, if any.
+    #[serde(default)]
+    pub observed_option_id: Option<String>,
+    /// None on an upgraded old report.
+    #[serde(default)]
+    pub assessed_places: Option<usize>,
+    /// False on an old report: the overlay says the places were not recorded.
+    #[serde(default)]
+    pub places_recorded: bool,
+    #[serde(default)]
+    pub options: Vec<OptionCensus>,
+    #[serde(default)]
+    pub standard: StandardState,
+    #[serde(default)]
+    pub finder_rows: Vec<FinderRowRef>,
+}
+
+/// The reason a file that declares itself generated is not read for the inspection, as every
+/// surface states it (Coverage, `camerata count`, the pre-start check). One phrase in one place,
+/// so no surface words it differently.
+///
+/// This is the one place the wording lives ("searched", Zach 2026-11-23): flip a word here and
+/// every surface follows. The second phrase is for a generated file the secret checks did NOT
+/// search (floor off, over the search ceiling, not text), so Coverage never claims a search that
+/// did not happen.
+pub const GENERATED_FILES_LABEL: &str = "generated: searched for secrets only, not billed";
+/// The reason for a generated file that was not searched for secrets either.
+pub const GENERATED_UNSEARCHED_LABEL: &str =
+    "generated: not read, not billed, not searched for secrets";
+
+/// The reason a hand-written file of a type the inspection does not read yet is not read (GitHub
+/// #338, "list now, inspect later"), as every surface states it: Coverage, `camerata count` and
+/// the pre-start check. The types are listed in `camerata-server`'s `onboard::files`.
+pub const NOT_INSPECTED_TYPE_LABEL: &str = "this file type is not inspected yet";
+/// [`NOT_INSPECTED_TYPE_LABEL`] after a count in a list ("2 of a file type not inspected yet").
+pub const NOT_INSPECTED_TYPE_IN_A_LIST: &str = "of a file type not inspected yet";
+/// The reason for a file of a type not inspected yet that the engine still opens to read its
+/// declared runtime or package versions (a project file, a `Gemfile`): never plainly "not read".
+pub const NOT_INSPECTED_VERSIONS_LABEL: &str = "this file type is not inspected yet; only its \
+     declared runtime and package versions are checked";
+/// [`NOT_INSPECTED_VERSIONS_LABEL`] after a count in a list.
+pub const NOT_INSPECTED_VERSIONS_IN_A_LIST: &str =
+    "of a file type not inspected yet, only its declared runtime and package versions checked";
 
 #[cfg(test)]
 mod tests {
@@ -308,6 +536,9 @@ mod tests {
             assessed_sites: Some(47),
             convention_option_id: Some("versioned".to_string()),
             convention_label: "URI-versioned endpoints".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         });
         let v = serde_json::to_value(&k).unwrap();
         assert_eq!(v["kind"], "deviation");
@@ -338,6 +569,9 @@ mod tests {
             assessed_sites: Some(47),
             convention_option_id: Some("versioned".to_string()),
             convention_label: "URI-versioned endpoints".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         });
         let json = serde_json::to_string(&k).unwrap();
         let back: FindingKind = serde_json::from_str(&json).unwrap();
@@ -348,6 +582,9 @@ mod tests {
             assessed_sites: None,
             convention_option_id: None,
             convention_label: "observed majority".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         });
         let back2: FindingKind =
             serde_json::from_str(&serde_json::to_string(&unknown).unwrap()).unwrap();
@@ -376,15 +613,21 @@ mod tests {
             assessed_sites: None,
             convention_option_id: None,
             convention_label: String::new(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         })
         .is_informational());
         assert!(FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: "a".to_string(),
             convention_label: "A".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         })
         .is_informational());
         assert!(FindingKind::NoConvention(NoConventionKind {
             observed_options: vec![],
+            left_to_client: false,
         })
         .is_informational());
         assert!(FindingKind::NotAssessed(NotAssessedKind {
@@ -424,6 +667,9 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: Some("versioned".to_string()),
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             })),
         };
         let v = serde_json::to_value(&row).unwrap();
@@ -481,6 +727,9 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: Some("versioned".to_string()),
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }))),
         })
         .unwrap();
@@ -509,10 +758,15 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
             FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "x".to_string(),
                 convention_label: "X".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
             FindingKind::NoConvention(NoConventionKind {
                 observed_options: vec![ObservedOptionUsage {
@@ -520,6 +774,7 @@ mod tests {
                     label: "X".to_string(),
                     sites: Some(3),
                 }],
+                left_to_client: false,
             }),
             FindingKind::NotAssessed(NotAssessedKind {
                 reason: NotAssessedReason::ToolFailed,
@@ -531,5 +786,94 @@ mod tests {
             let back: FindingKind = serde_json::from_value(v).unwrap();
             assert_eq!(back, k);
         }
+    }
+
+    /// Convention model design section 4 (step 1): a report saved before the model existed has
+    /// no standard fields on its kinds, and every new field reads as its default.
+    #[test]
+    fn convention_model_old_kind_json_reads_with_defaults() {
+        let dev: FindingKind = serde_json::from_str(
+            r#"{"kind":"deviation","deviating_sites":2,"assessed_sites":5,
+                "convention_option_id":"a","convention_label":"A"}"#,
+        )
+        .unwrap();
+        match dev {
+            FindingKind::Deviation(d) => {
+                assert_eq!(d.standard_source, None);
+                assert_eq!(d.differs_from_default, None);
+            }
+            other => panic!("expected deviation, got {other:?}"),
+        }
+        let none: FindingKind =
+            serde_json::from_str(r#"{"kind":"no_convention","observed_options":[]}"#).unwrap();
+        match none {
+            FindingKind::NoConvention(n) => assert!(!n.left_to_client),
+            other => panic!("expected no_convention, got {other:?}"),
+        }
+    }
+
+    /// Convention model design section 4: a `RuleConvention` round-trips with places,
+    /// finder rows and the resolved standard, and a record with only its identity reads
+    /// with every other field defaulted (an upgraded old report).
+    #[test]
+    fn convention_model_rule_convention_round_trips_and_defaults() {
+        let rc = RuleConvention {
+            repo: "r".into(),
+            rule_id: "ARCH-X-1".into(),
+            default_option_id: Some("par".into()),
+            judged_option_id: Some("par".into()),
+            observed_option_id: Some("seq".into()),
+            assessed_places: Some(5),
+            places_recorded: true,
+            options: vec![OptionCensus {
+                option_id: "seq".into(),
+                label: "Sequential".into(),
+                violates: false,
+                count: Some(4),
+                places: vec![CensusPlace {
+                    path: "a.ts".into(),
+                    line: 3,
+                    text: "await x".into(),
+                    checked: true,
+                    status: PlaceStatus::Conforms,
+                }],
+            }],
+            standard: StandardState {
+                option_id: Some("seq".into()),
+                source: StandardSource::Observed,
+                left_to_client: false,
+                ruling_id: None,
+                differs_from_default: Some("Parallel".into()),
+                proposal: None,
+                departing_places: 0,
+                conforming_places: 4,
+            },
+            finder_rows: vec![FinderRowRef {
+                site_key: "k".into(),
+                path: "b.ts".into(),
+                line: 9,
+                note: "n".into(),
+                keyed_rule_id: "ARCH-X-1".into(),
+                option_id: Some("seq".into()),
+                option_basis: OptionBasis::OnlyOther,
+                status: PlaceStatus::Conforms,
+            }],
+        };
+        let v = serde_json::to_value(&rc).unwrap();
+        assert_eq!(v["standard"]["source"], "observed");
+        assert_eq!(v["finder_rows"][0]["option_basis"], "only_other");
+        assert_eq!(v["options"][0]["places"][0]["status"], "conforms");
+        let back: RuleConvention = serde_json::from_value(v).unwrap();
+        assert_eq!(back, rc);
+        let bare: RuleConvention = serde_json::from_str(r#"{"repo":"r","rule_id":"R"}"#).unwrap();
+        assert!(!bare.places_recorded);
+        assert_eq!(bare.assessed_places, None);
+        assert_eq!(bare.standard.source, StandardSource::None);
+        assert!(bare.options.is_empty());
+        let p = Proposal {
+            option_id: "git-ref".into(),
+            basis: ProposalBasis::EarlierChoice,
+        };
+        assert_eq!(serde_json::to_value(&p).unwrap()["basis"], "earlier_choice");
     }
 }

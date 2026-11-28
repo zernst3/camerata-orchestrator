@@ -76,6 +76,8 @@ fs2 = { workspace = true }
 # Respects .gitignore / .git/info/exclude / global gitignore so committed secrets are
 # still found while truly gitignored build artifacts are skipped.
 ignore = { workspace = true }
+# The project's exclusion list (files excluded by agreement) is a set of glob patterns.
+globset = { workspace = true }
 # Structured logging (Phase H1: governance-event-trail foundation). `tracing-subscriber`
 # is initialized once in `main.rs`; `tracing` is the facade handlers/services emit through.
 tracing = { workspace = true }

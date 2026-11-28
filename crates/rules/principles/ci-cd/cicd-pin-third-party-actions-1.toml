@@ -1,5 +1,5 @@
 id = "CICD-PIN-THIRD-PARTY-ACTIONS-1"
-version = 4
+version = 5
 title = "Third-party CI actions are pinned to a full commit SHA, never a mutable tag or branch"
 domain = "ci-cd"
 layer = "universal"
@@ -12,7 +12,7 @@ inspectable = true
 applies_to = { paths = [".github/**", "**/action.yml", "**/action.yaml", ".gitea/**", ".forgejo/**", "**/.gitlab-ci.yml", ".gitlab/**", "**/azure-pipelines*.yml", "**/azure-pipelines*.yaml", ".circleci/**", "**/bitbucket-pipelines.yml", ".buildkite/**", "**/.drone.yml", ".woodpecker/**", "**/Jenkinsfile"] }
 default = true
 verification = "grounded"
-qualifies = "Deterministically checkable by a regex scan over workflow `uses:` lines: any `owner/repo@ref` reference where `ref` is NOT a full 40-character hexadecimal commit SHA (i.e. it is a tag like `@v4`, a branch like `@main`, or a shorthand) is a match, scoped to third-party actions (first-party platform actions like `actions/checkout` are lower but non-zero risk; the same check applies to them too for defense in depth). Camerata ships no detector for this; a project wiring a CI gate for it uses an existing tool (zizmor, or GitHub's own Dependabot version-update support for Actions, or the OpenSSF Scorecard Pinned-Dependencies check) rather than a bespoke regex, since those tools also handle the auto-update workflow a bare SHA pin otherwise loses. Conformance holds when every third-party `uses:` reference is a full commit SHA, ideally with a trailing comment noting the human-readable version it corresponds to; it fails when any such reference is a tag or branch name."
+qualifies = "Deterministically checkable by a regex scan over workflow `uses:` lines: any `owner/repo@ref` reference where `ref` is NOT a full 40-character hexadecimal commit SHA (i.e. it is a tag like `@v4`, a branch like `@main` or a shorthand) is a match, scoped to third-party actions (first-party platform actions like `actions/checkout` are lower but non-zero risk; the same check applies to them too for defense in depth). Camerata ships no detector for this; a project wiring a CI gate for it uses an existing tool (zizmor, or GitHub's own Dependabot version-update support for Actions, or the OpenSSF Scorecard Pinned-Dependencies check) rather than a bespoke regex, since those tools also handle the auto-update workflow a bare SHA pin otherwise loses. Conformance holds when every third-party `uses:` reference is a full commit SHA, ideally with a trailing comment noting the human-readable version it corresponds to; it fails when any such reference is a tag or branch name."
 
 [[sources]]
 url = "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions"
@@ -40,18 +40,17 @@ WORKFLOW RUNS, not at the time the workflow was last reviewed or merged. A tag (
 mutable by design: the action's own maintainer can re-point it, and if that maintainer's account or their publishing
 pipeline is ever compromised, the attacker can re-point the SAME tag every consumer's workflow already trusts to a
 malicious commit, and every workflow referencing that tag starts executing the attacker's code on its NEXT run, with
-no change to the consuming repository's own files at all — nothing for a PR review or a diff to catch, because the
+no change to the consuming repository's own files at all. Nothing for a PR review or a diff to catch, because the
 consuming workflow's YAML never changed.
 
 This is not a hypothetical: supply-chain compromises of popular third-party GitHub Actions (a maintainer account
 takeover re-pointing a widely-used tag to a credential-exfiltrating commit) have happened in production and run with
 whatever permissions and secrets the consuming workflow granted the action, which is often substantial (repository
 contents, package registry credentials, cloud deployment identities). Pinning to a full 40-character commit SHA
-closes this specific attack entirely: a SHA, unlike a tag, is a reference to one immutable commit's content — there
-is no re-pointing a SHA, so a consuming workflow that pins to one is unaffected by anything that happens to the
+closes this specific attack entirely: a SHA, unlike a tag, is a reference to one immutable commit's content. There is no re-pointing a SHA, so a consuming workflow that pins to one is unaffected by anything that happens to the
 action's tags or branches AFTER that SHA was chosen. The documented trade-off is losing automatic updates (a SHA pin
 does not follow new releases the way a tag does), which tools like Dependabot's GitHub Actions ecosystem support and
-Renovate are built specifically to manage — they open a PR bumping the pinned SHA (with the new version visible in
+Renovate are built specifically to manage. They open a PR bumping the pinned SHA (with the new version visible in
 the diff and the commit comment), restoring a reviewable update path without reintroducing the mutable-reference
 risk.
 """

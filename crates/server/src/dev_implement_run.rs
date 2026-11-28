@@ -2891,7 +2891,7 @@ mod tests {
             None,
         )
         .expect("session prepares");
-        let args = spawn.driver.build_args(&role, "implement");
+        let args = spawn.driver.build_args(&role);
 
         // cwd + --add-dir bound to the worktree → on-demand read of the whole repo.
         let add_idx = args
@@ -3562,6 +3562,7 @@ mod tests {
             Ok(crate::llm::LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: "PASS".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -3600,6 +3601,7 @@ mod tests {
             Ok(crate::llm::LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: "MISMATCH\n- backend omits email field required by contract".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -3923,6 +3925,7 @@ mod tests {
                 Ok(text) => Ok(crate::llm::LlmResponse {
                     reported_model: None,
                     cli_cost_usd: None,
+                    elapsed_ms: None,
                     text,
                     model: "stub".to_string(),
                     backend: "stub".to_string(),

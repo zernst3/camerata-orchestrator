@@ -79,11 +79,24 @@ pub(crate) async fn active_project(
 }
 
 /// Delete a project.
+///
+/// This only removes the project from the list. It is refused while the project still holds data
+/// on this machine (the checkouts, inspections and every other store would be orphaned): the
+/// operator first uses "Delete source code from this machine" or "Delete project and all its
+/// data" (`client_source::delete_project`).
 pub(crate) async fn delete_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": state.projects.delete(&id) }))
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if state.projects.get(&id).is_some() {
+        if let Some(refusal) =
+            crate::client_source::delete_project::project_holds_data(&state, &id).await
+        {
+            return refusal.into_response();
+        }
+    }
+    Json(serde_json::json!({ "ok": state.projects.delete(&id) })).into_response()
 }
 
 /// A project export: the full project (name, repos, ruleset, onboarded) PLUS its
@@ -767,8 +780,8 @@ pub fn fix_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
-/// The clone judge's model for the active project: its own setting when set, else its fast
-/// (Haiku) band primary, or `None` when there is no active project (the built-in default then
+/// The clone judge's model for the active project: its own setting when set, else the built-in
+/// clone judge default (Haiku 5.5), or `None` when there is no active project (the built-in default then
 /// applies). The judge is classification
 /// over bounded input, the fast band's job; the project's tier map is where that band is set.
 pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
@@ -779,12 +792,12 @@ pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
-/// The clone judge's model for `project`: the review setting when set, else the fast band's
-/// primary.
+/// The clone judge's model for `project`: the review setting when set, else
+/// [`CLONE_JUDGE_DEFAULT_MODEL`], whatever the project's fast band says.
 pub(crate) fn clone_judge_model_of(project: &crate::project::Project) -> String {
     let own = project.review.clone_judge_model.trim();
     if own.is_empty() {
-        project.tier_map.fast_primary().trim().to_string()
+        camerata_api_types::project::CLONE_JUDGE_DEFAULT_MODEL.to_string()
     } else {
         own.to_string()
     }
@@ -801,7 +814,8 @@ pub(crate) struct SetStepModelReq {
     pub(crate) step: String,
     /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix`, `duplicate_check`,
     /// `finder_model` and `clone_judge`, where it clears the setting back to the default (see
-    /// [`fix_step_model`]); every other step refuses a blank model.
+    /// [`fix_step_model`]); `group_review` clears the same way; every other step refuses a blank
+    /// model.
     pub(crate) model: String,
 }
 
@@ -865,12 +879,9 @@ pub(crate) async fn set_step_model(
 }
 
 /// Set the project's group review model (`step: "group_review"` on the step-models route). The
-/// other review settings are kept as they are. A blank model is refused: the stage 2 default
-/// applies only when the setting was never written.
+/// other review settings are kept as they are. A blank model clears the setting, so the stage 2
+/// built-in default applies again (the engine already reads blank that way).
 fn set_group_review_model(state: &AppState, id: &str, model: &str) -> Json<serde_json::Value> {
-    if model.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
-    }
     let Some(project) = state.projects.get(id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
@@ -1040,6 +1051,112 @@ pub(crate) async fn set_dev_run_spend_limit_handler(
     }
 }
 
+/// Body for `POST /api/projects/:id/scan-exclusions`.
+#[derive(serde::Deserialize)]
+pub(crate) struct SetScanExclusionsReq {
+    /// One glob pattern per entry, matched against `<repo name>/<path within the repo>`.
+    pub(crate) patterns: Vec<String>,
+    /// The list the editor loaded. When given and different from the stored list (something
+    /// else changed it since), the save is refused so a stale editor cannot drop an agreed
+    /// exclusion.
+    #[serde(default)]
+    pub(crate) based_on: Option<Vec<String>>,
+}
+
+/// `POST /api/projects/:id/scan-exclusions` - replace the project's list of files excluded by
+/// agreement. An invalid pattern is refused by name and nothing is saved. Same
+/// `{ ok, project }` / `{ ok: false, message }` shape as `set_client_engagement_handler`.
+pub(crate) async fn set_scan_exclusions_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetScanExclusionsReq>,
+) -> Json<serde_json::Value> {
+    // `based_on` is required: a save that does not say which list it was made from could drop an
+    // agreed exclusion, so it is refused.
+    let Some(based_on) = &req.based_on else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "Send the list you loaded (based_on) with the save, so a stale save cannot drop an agreed exclusion.",
+        }));
+    };
+    // The comparison and the write happen together inside the store's update, so a save racing an
+    // add can never overwrite it.
+    match state
+        .projects
+        .set_scan_exclusions_checked(&id, based_on, &req.patterns)
+    {
+        Ok(Some(Err(current))) => Json(serde_json::json!({
+            "ok": false,
+            "message": "Excluded by agreement changed since you opened it. Reload the settings and try again.",
+            "current": current,
+        })),
+        Ok(Some(Ok(p))) => {
+            // A pattern that matches no file, or names a repo that was not read, is named at
+            // save: it would refuse every start.
+            let local = crate::resolve_local_sources(&state, &p.repos);
+            let scope = crate::onboard::scope::ScanScope::of_project_or_nothing(Some(&p));
+            let checks = crate::onboard::scope::unmatched_patterns(&local.sources, &scope).await;
+            let unchecked: Vec<String> = checks
+                .unchecked
+                .iter()
+                .map(|(pat, why)| format!("{pat} ({why})"))
+                .collect();
+            Json(serde_json::json!({
+                "ok": true, "project": p,
+                "unmatched": checks.unmatched, "unchecked": unchecked,
+                "warned": checks.warned.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>()
+            }))
+        }
+        Ok(None) => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/scan-exclusions/add`.
+#[derive(serde::Deserialize)]
+pub(crate) struct AddScanExclusionReq {
+    /// The repo (`owner/repo`) the file is in.
+    pub(crate) repo: String,
+    /// The file's path within the repo.
+    pub(crate) path: String,
+}
+
+/// `POST /api/projects/:id/scan-exclusions/add` - exclude one file by agreement, by its exact
+/// path (the pre-start check's action for a file over the read limit).
+pub(crate) async fn add_scan_exclusion_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddScanExclusionReq>,
+) -> Json<serde_json::Value> {
+    match state
+        .projects
+        .add_scan_exclusion(&id, req.repo.trim(), req.path.trim())
+    {
+        Ok(Some(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
+        Ok(None) => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/scan-exclusions/remove`.
+#[derive(serde::Deserialize)]
+pub(crate) struct RemoveScanExclusionReq {
+    pub(crate) pattern: String,
+}
+
+/// `POST /api/projects/:id/scan-exclusions/remove` - remove one pattern from Excluded by
+/// agreement (the pre-start check's "Remove pattern" for a pattern that matches no file).
+pub(crate) async fn remove_scan_exclusion_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RemoveScanExclusionReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.remove_scan_exclusion(&id, &req.pattern) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/stall-thresholds`.
 #[derive(serde::Deserialize)]
 pub(crate) struct SetStallThresholdsReq {
@@ -1115,6 +1232,9 @@ pub(crate) async fn rescan_alternatives_handler(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
+    if let Some(why) = state.source_ops.deleting_refusal(&project.id) {
+        return Json(serde_json::json!({ "ok": false, "message": why }));
+    }
     // Re-reads the project's source and calls the model, all inside this request: while it
     // does, deleting that source is refused rather than raced.
     let _scan_claim = state.source_ops.begin_scan(&project.id);
@@ -1141,7 +1261,8 @@ pub(crate) async fn rescan_alternatives_handler(
     if !corpus_path.exists() {
         return Json(serde_json::json!({ "ok": false, "message": "Rule corpus unavailable." }));
     }
-    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let (corpus, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    crate::log_corpus_load_errors("rerun with overrides", &errs);
 
     // Validate every override AGAINST the corpus before any model call. A rule id that isn't a
     // real multi-option semantic rule, or an option id that isn't real on that rule, is
@@ -1207,6 +1328,7 @@ pub(crate) async fn rescan_alternatives_handler(
     // The client-engagement lock, before any repository is read (the same check the main
     // audit runs, over the same step models this rescan uses below).
     let lock_controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         fix_model: fix_step_model(&state),
         clone_judge_model: Some(clone_judge_model_of(&project)),
         review: project.review.clone(),
@@ -1260,7 +1382,23 @@ pub(crate) async fn rescan_alternatives_handler(
     if let Some(why) = partial_run_refusal(&unresolved, project.repos.len(), req.allow_partial) {
         return Json(serde_json::json!({ "ok": false, "message": why }));
     }
+    // An unusable list (for example a repo sharing a name was added after `app/...` was saved)
+    // refuses the rescan with its reason: it must never run on zero files.
+    let rescan_scope = match crate::onboard::scope::ScanScope::of_project(Some(&project)) {
+        Ok(scope) => scope,
+        Err(why) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("Cannot start: Excluded by agreement in the inspection settings cannot be used: {why}."),
+            }));
+        }
+    };
+    // A file over the read limit is a warning, never a refusal: it is not read for the
+    // inspection and the secret checks still search it (see `scope::start_checks`). The warning
+    // goes into the run's notes, as on the scan route.
     run_notes.extend(source_notes);
+    run_notes
+        .extend(crate::onboard::scope::over_limit_warnings(&sources, &rescan_scope, true).await);
 
     let audit_model = Some(step_model_or(&state, crate::project::StepKind::Audit, None));
     let calibration_model = Some(step_model_or(
@@ -1314,20 +1452,22 @@ pub(crate) async fn rescan_alternatives_handler(
             continue;
         }
         let dir = dir.clone();
-        let files =
-            match tokio::task::spawn_blocking(move || crate::onboard::read_local_repo_files(&dir))
-                .await
-            {
-                Ok(Ok(extracted)) => extracted.files,
-                Ok(Err(e)) => {
-                    run_notes.push(format!("{spec}: {e}"));
-                    continue;
-                }
-                Err(e) => {
-                    run_notes.push(format!("{spec}: rescan task failed ({e})"));
-                    continue;
-                }
-            };
+        let repo_scope = rescan_scope.for_repo(spec);
+        let files = match tokio::task::spawn_blocking(move || {
+            crate::onboard::read_local_repo_files(&dir, &repo_scope)
+        })
+        .await
+        {
+            Ok(Ok(extracted)) => extracted.files,
+            Ok(Err(e)) => {
+                run_notes.push(format!("{spec}: {e}"));
+                continue;
+            }
+            Err(e) => {
+                run_notes.push(format!("{spec}: rescan task failed ({e})"));
+                continue;
+            }
+        };
         let alt_slice: Vec<crate::ai_audit::RuleAlternatives> = applicable_ids
             .iter()
             .filter_map(|rid| alternatives_by_rule.get(rid).cloned())
@@ -1620,16 +1760,26 @@ pub(crate) async fn preview_model_profile(
             "noop": true,
             "message": "Custom profile: no cascade — user owns every entry.",
         })),
-        Some(a) => Json(serde_json::json!({
-            "ok": true,
-            "profile": q.profile,
-            "noop": false,
-            "assignments": {
-                "tier_map": a.tier_map,
-                "step_models": a.step_models,
-                "l3_review": a.l3_review,
+        Some(a) => {
+            // Applying keeps the inspection models (scan, calibration, fix), so the preview must
+            // not offer them as a change either: it lists the development steps only.
+            let mut step_models = serde_json::to_value(&a.step_models).unwrap_or_default();
+            if let Some(map) = step_models.as_object_mut() {
+                for kept in ["audit", "calibration", "fix"] {
+                    map.remove(kept);
+                }
             }
-        })),
+            Json(serde_json::json!({
+                "ok": true,
+                "profile": q.profile,
+                "noop": false,
+                "assignments": {
+                    "tier_map": a.tier_map,
+                    "step_models": step_models,
+                    "l3_review": a.l3_review,
+                }
+            }))
+        }
     }
 }
 
@@ -1663,7 +1813,15 @@ pub(crate) async fn apply_model_profile(
         p.model_profile = profile;
         if let Some(ref a) = assignments {
             p.tier_map = a.tier_map.clone();
-            p.step_models = a.step_models.clone();
+            // The profile writes only the development steps. The inspection models (scan,
+            // calibration, fix) are the operator's own picks in the Inspection settings.
+            let kept = p.step_models.clone();
+            p.step_models = crate::project::StepModels {
+                audit: kept.audit,
+                calibration: kept.calibration,
+                fix: kept.fix,
+                ..a.step_models.clone()
+            };
             // A profile assigns the reviewer's on/off and model. The reviewer POLICY (fail
             // closed, fix rounds, tier) is the architect's own choice and is kept.
             let policy = p.l3_review.clone();

@@ -30,7 +30,7 @@ use crate::decisions::{restored_keys_of, DecisionCtx, DecisionStoreError};
 use crate::inspections::InspectionEntry;
 use crate::onboard::{Finding, SealedReport};
 use crate::report_export::overlay::current_value;
-use crate::report_export::{apply_overlay, re_mark_line, ReviewedReport};
+use crate::report_export::{apply_overlay_with_standards, re_mark_line, ReviewedReport};
 use crate::AppState;
 
 fn now() -> String {
@@ -137,11 +137,14 @@ pub(crate) fn review_of(
         .projects
         .get(id)
         .map_or_else(|| sealed.clone(), |p| re_mark_line(&sealed, &p.review));
-    let reviewed = apply_overlay(
+    // A report saved before the convention model gets its records from what it has (section 9).
+    let sealed = sealed.overlaid(crate::conventions::upgrade);
+    let reviewed = apply_overlay_with_standards(
         &sealed,
         &decisions,
         &state.edits.list(id),
         &state.edits.added(id),
+        &crate::conventions::rulings_for_run(&state.decisions.standards(id), &latest.id),
     )
     .with_engine_check(
         state
@@ -506,6 +509,10 @@ pub(crate) async fn source_of(
     let Ok(read) = source_for_read(state, Some(project), repo, None).await else {
         return Vec::new();
     };
+    // A file the project's exclusion list names is not read, not even to check a finding.
+    if crate::onboard::scope::scope_for_read(state, Some(project)).excludes(repo, path) {
+        return Vec::new();
+    }
     let cap = 8 * 1024 * 1024;
     let bytes = match &read {
         SourceRead::Git { dir, sha, .. } => read_bytes(Origin::Git { dir, sha }, path, cap).await,

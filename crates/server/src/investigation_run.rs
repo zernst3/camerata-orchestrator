@@ -1374,7 +1374,7 @@ mod tests {
         let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role, None, &[], None)
             .expect("session prepares");
         let driver = spawn.driver.with_clarification(true);
-        let args = driver.build_args(&role, "analyze");
+        let args = driver.build_args(&role);
 
         let allowed = {
             let i = args.iter().position(|a| a == "--allowedTools").unwrap();

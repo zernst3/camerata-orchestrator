@@ -459,6 +459,8 @@ fn the_scorecards_and_the_cover_count_the_places_all_problems_lists() {
         convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: String::new(),
             convention_label: "a habit".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }));
         rows.push(convention);
     }
@@ -520,12 +522,15 @@ fn your_conventions_is_counts_and_short_lines() {
         f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: String::new(),
             convention_label: "a habit".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }));
         rows.push(f);
     }
     let mut none = finding("ARCH-NONE-1", "src/n.rs", 1, "low");
     none.kind = Some(FindingKind::NoConvention(NoConventionKind {
         observed_options: Vec::new(),
+        left_to_client: false,
     }));
     rows.push(none);
     for line in [3, 4] {
@@ -536,6 +541,9 @@ fn your_conventions_is_counts_and_short_lines() {
             assessed_sites: Some(5),
             convention_option_id: None,
             convention_label: "Handlers call services".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         }));
         rows.push(f);
     }
@@ -748,8 +756,18 @@ fn every_sheet_the_pdf_names_is_a_workbook_tab() {
     let words = crate::report_export::PdfWordsJson::new();
     let mut strings = vec![
         super::super::coverage_gaps::scope_limited_sentence(&[rule]).unwrap(),
-        crate::report_export::ai_tier_note_for(ReviewState::Raw, 1, 1),
-        crate::report_export::ai_tier_note_for(ReviewState::Raw, 1, 2),
+        crate::report_export::ai_tier_note_for(
+            ReviewState::Raw,
+            1,
+            1,
+            &crate::report_export::MethodFacts::default(),
+        ),
+        crate::report_export::ai_tier_note_for(
+            ReviewState::Raw,
+            1,
+            2,
+            &crate::report_export::MethodFacts::default(),
+        ),
         words.details_intro.clone(),
         words.skipped_files_more.clone(),
         words.failed_passes_more.clone(),
@@ -811,5 +829,46 @@ fn the_summary_counts_decision_and_information_only_places_apart() {
     assert!(
         n.contains("1 needs a reviewer's decision, 1 is information only"),
         "{n}"
+    );
+}
+
+/// Convention model design section 7: the PDF says a departure is from a convention the reviewer
+/// set, and counts a rule left to the client as an open question.
+#[test]
+fn your_conventions_words_reviewer_conventions_and_open_questions() {
+    use camerata_api_types::audit::{DeviationKind, FindingKind, NoConventionKind, StandardSource};
+    let mut rows = Vec::new();
+    for line in [3, 4] {
+        let mut f = finding("ARCH-REV-1", "src/d.rs", line, "low");
+        f.category = Some("Area One".to_string());
+        f.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(5),
+            convention_option_id: None,
+            convention_label: "Handlers call services".to_string(),
+            standard_source: Some(StandardSource::Reviewer),
+            differs_from_default: None,
+            following_sites: None,
+        }));
+        rows.push(f);
+    }
+    for n in 0..2 {
+        let mut open = finding(&format!("ARCH-OPEN-{n}"), "src/n.rs", 1, "low");
+        open.kind = Some(FindingKind::NoConvention(NoConventionKind {
+            observed_options: Vec::new(),
+            left_to_client: true,
+        }));
+        rows.push(open);
+    }
+    let report = report_with(rows, vec![]).seal();
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let c = build_report_json(&reviewed, None, &options()).conventions;
+    assert_eq!(
+        c.departures_line,
+        "1 departure from a convention set by the reviewer, in 1 area (2 places)."
+    );
+    assert_eq!(
+        c.none_adopted_line,
+        "2 open questions left for you to decide."
     );
 }

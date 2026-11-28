@@ -24,12 +24,12 @@
 //! the headline AND detail both go through `client_headline_and_detail` — the SAME
 //! plain-language rewrite the PDF uses (preferring a floor rule's authored
 //! `finding_headline`/`finding_detail` template, falling back to `defect_headline`/the raw
-//! `detail` only when no template is authored) — so the product export (`findings.json` /
+//! `detail` only when no template is authored) — so the product export (`json/inspection.json` /
 //! xlsx) can never leak raw internal gate prose ("Deny…"/"Require…") that the PDF has already
 //! rewritten. Before C4-P2, only the headline went through the rewrite; `FindingRow::detail`
 //! took the raw `finding.detail` unconditionally, so a floor rule with an authored
 //! `finding_detail` template rewrote cleanly in the PDF's `CuratedSiteJson::detail` while
-//! `findings.json`/the workbook still printed the gate's own enforcement prose for the exact
+//! `json/inspection.json`/the workbook still printed the gate's own enforcement prose for the exact
 //! same finding. `FindingRow::detail` is NOT an internal-completeness field — the raw
 //! `finding.detail` lives only on `Finding` itself (never re-exported verbatim here).
 //!
@@ -64,10 +64,14 @@
 //!
 //! Row conservation across that partition is a test, not a hope:
 //! `req_pass3_every_exported_row_lands_on_exactly_one_sheet`. It is also what keeps the
-//! self-measurement parity harness honest — that harness requires every `findings.json` row's
+//! self-measurement parity harness honest — that harness requires every `json/inspection.json` row's
 //! headline to appear verbatim somewhere in the workbook, so a kind whose sheet forgot to
 //! render a headline column would be a PARITY FAULT, by name.
 
+use camerata_api_types::package_paths::{
+    csv_path, json_path, ALL_FINDINGS_JSON, DS_CONVENTIONS, DS_COVERAGE, DS_DEPENDENCIES,
+    DS_DEVIATIONS, DS_FALSE_POSITIVES, DS_NOT_ASSESSED, DS_RULES_APPLIED, JSON_DIR,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
@@ -79,9 +83,9 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
     category_for, category_for_finding, citation_for_finding, classify, client_headline_and_detail,
-    disposition_label, effective_bucket, effort_hours_bounds, finding_key, hedge_confidence,
-    is_hedged, normalize_severity, provenance_tier_rank, resolve_citation, resolve_effort,
-    sanitize_report_findings, title_for_finding, Disposition, ReportOptions, ReviewedReport,
+    effort_hours_bounds, finding_key, hedge_confidence, is_hedged, normalize_severity,
+    provenance_tier_rank, resolve_citation, resolve_effort, sanitize_report_findings,
+    title_for_finding, Disposition, ReportOptions, ReviewedReport,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -92,17 +96,17 @@ use crate::report_export::{
 /// once per non-dependency [`crate::onboard::Finding`] in [`partition_rows`], then written
 /// verbatim by every sheet writer (never re-derived per sheet).
 ///
-/// `Serialize`: this is ALSO the row shape `findings.json` (the product export's
+/// `Serialize`: this is ALSO the row shape `json/inspection.json` (the product export's
 /// machine-readable sibling of the workbook, see [`build_findings_export`]) serializes
 /// verbatim — the exact same struct, not a parallel DTO, so the JSON and the xlsx can never
-/// disagree on a field. Field names are the stable wire contract for `findings.json`; treat
+/// disagree on a field. Field names are the stable wire contract for `json/inspection.json`; treat
 /// a rename here as a breaking change for anything that parses that file.
 #[derive(Serialize)]
 pub struct FindingRow {
     severity: String,
     headline: String,
     /// The rule's plain title (or the AI-tier title), for the workbook's Rule columns. Not
-    /// exported: `findings.json` and the datasets keep their field set.
+    /// exported: `json/inspection.json` and the datasets keep their field set.
     #[serde(skip)]
     rule_title: String,
     repo: String,
@@ -137,7 +141,7 @@ pub struct FindingRow {
     needs_review: bool,
     /// The concrete reason a row waits for a reviewer ([`crate::report_export::waiting_reason`]),
     /// the same words the PDF prints. Read by the "Why it is waiting" column; not exported to
-    /// `findings.json`, which keeps its field set.
+    /// `json/inspection.json`, which keeps its field set.
     #[serde(skip)]
     why_waiting: Option<String>,
     in_test: bool,
@@ -146,7 +150,7 @@ pub struct FindingRow {
     provenance: String,
     /// C3-6: the RAW citation kind (`"grounded"` | `"related"` | `"preview"` | `"advisory"`)
     /// behind `provenance`'s display label above — never serialized (the label is the wire value for
-    /// `findings.json`); kept only so the row sort below can call the SAME
+    /// `json/inspection.json`); kept only so the row sort below can call the SAME
     /// `report_export::provenance_tier_rank` the within-bucket matrix ordering uses, rather
     /// than re-deriving a rank from the formatted label string.
     #[serde(skip)]
@@ -156,7 +160,7 @@ pub struct FindingRow {
     /// can carry several URLs).
     citation_urls: String,
     /// C4-P4 (residual defect 2): human-readable rule TITLES (never raw rule ids) — see
-    /// `report_export::also_matches_titles`'s doc comment. This is ALSO the `findings.json`
+    /// `report_export::also_matches_titles`'s doc comment. This is ALSO the `json/inspection.json`
     /// "also_matches" field (this struct serializes verbatim), so the raw-id leak closed in the
     /// PDF's "Also violates" line had a second, independent instance right here.
     /// D2: on a row that carries other rows at its place (`facts.carried_by` of those rows names
@@ -172,11 +176,16 @@ pub struct FindingRow {
     /// kept as demotions of this row. A Fix lists them as rules of its own.
     #[serde(skip)]
     also_match_ids: Vec<String>,
+    /// The rule ids of the rules folded into this row under a rule of their own whose standard fix
+    /// text the row's `fix` carries (#586). The release check reads this, not the prose. Absent
+    /// when the row has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fix_merged_rules: Vec<String>,
     status: String,
     snippet: String,
     detail: String,
     /// Why the problem matters to the client's business, from the finder's `business` (empty for
-    /// a row with none). Cleaned for the client. Workbook only: `findings.json` keeps its fields.
+    /// a row with none). Cleaned for the client. Workbook only: `json/inspection.json` keeps its fields.
     #[serde(skip)]
     why_business: String,
     /// Why the problem matters technically, the finder's `why` on its own (empty for a row with
@@ -191,7 +200,14 @@ pub struct FindingRow {
     /// latter is a pipeline gap only (C3-1b), never a hedge; the `fix` column below still
     /// carries the rule's authored remediation in that case.
     fix_specific: Option<String>,
-    /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row`]), with this
+    /// `fix_specific` with its code-span backticks intact (not in the wire contract): the PDF
+    /// sets the code runs from it. Skipped on serialization.
+    #[serde(skip)]
+    fix_specific_raw: Option<String>,
+    /// `fix` with its code-span backticks intact (not in the wire contract). Skipped.
+    #[serde(skip)]
+    fix_raw: Option<String>,
+    /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row_chosen`]), with this
     /// finding's placeholder tokens already substituted — SECONDARY context now that
     /// `fix_specific` above is the primary fix. `None` — rendered as a blank cell / JSON
     /// `null`, never fabricated and never `directive` — when the rule's default option has no
@@ -206,7 +222,7 @@ pub struct FindingRow {
     fp_reason: String,
     /// M4: the review flags the engine left on the row, comma separated. Written ONLY to the
     /// "Review flags" column of an INTERNAL workbook (A2b: engine notes are never client output),
-    /// so it is not serialized into `findings.json` or any dataset.
+    /// so it is not serialized into `json/inspection.json` or any dataset.
     #[serde(skip)]
     review_flags: String,
     /// M4: why the row is held for a reviewer's decision (evidence not found, junk text), or
@@ -219,12 +235,12 @@ pub struct FindingRow {
     /// row representing three detected sites exported as one line at one `path:line` — an
     /// over-merge was observationally identical to a detection miss (tracker C5: the client
     /// was told there is one site; there were three; the other two reached no artifact).
-    /// Serialized into `findings.json` and rendered in the workbook's "Also found at"
+    /// Serialized into `json/inspection.json` and rendered in the workbook's "Also found at"
     /// column, so every absorbed site is observable in the detail artifacts.
     also_locations: Vec<crate::onboard::MergedLocation>,
     /// Every source that was collapsed into this row because it was mechanically the same site
     /// (`Finding::flagged_by`), each with its OWN path and line (amendment A1): a collapse never
-    /// loses a location. Serialized into `findings.json` and listed in the workbook's "Also found
+    /// loses a location. Serialized into `json/inspection.json` and listed in the workbook's "Also found
     /// at" column when the source cited another line.
     flagged_by: Vec<crate::review_tree::FlaggedBy>,
     /// The row's own place from the RAW finding (the `snippet` above is capped for the
@@ -238,11 +254,11 @@ pub struct FindingRow {
     /// row, one site".
     site_count: usize,
     /// Pass-1 W3 (A5.6): what this row IS — flattened
-    /// [`camerata_api_types::audit::KindOnWire`], so `findings.json` (which serializes this
+    /// [`camerata_api_types::audit::KindOnWire`], so `json/inspection.json` (which serializes this
     /// struct verbatim) carries a flat `"kind"` discriminator plus the variant's payload
     /// fields (a Deviation's numerator/denominator/convention) on EVERY row; an absent kind
     /// renders the explicit `"unspecified"` tag, never a silent `"defect"`. The grader reads
-    /// findings.json — a kind that reached only the PDF would be the exact B2 defect class
+    /// json/inspection.json — a kind that reached only the PDF would be the exact B2 defect class
     /// that produced the hearth 0/12 result.
     #[serde(flatten)]
     kind: camerata_api_types::audit::KindOnWire,
@@ -275,7 +291,7 @@ pub struct FindingRow {
     #[serde(flatten)]
     facts: crate::report_export::RowFacts,
     /// Why the row was escalated, in the closed reason vocabulary, on an INTERNAL package's data
-    /// files only (`findings.json`, `json/` and `csv/`). Empty, and so absent from the file, for a
+    /// files only (`json/inspection.json`, `json/` and `csv/`). Empty, and so absent from the file, for a
     /// row that was not escalated and for every row of a client package: no client file carries
     /// the key. No rank, outlier mark, disagreement or model text is ever serialized.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -430,7 +446,7 @@ fn build_rules_applied_rows(
 /// C3-6 added the provenance tie-break so a security/deterministic finding sorts ahead of an
 /// architecture/advisory one of the same severity, matching the within-bucket order
 /// `report_export::build_report_json`'s matrix now uses) — the one true sort order both
-/// `build_workbook` and `build_findings_export` (`findings.json`) consume as-is, rather than
+/// `build_workbook` and `build_findings_export` (`json/inspection.json`) consume as-is, rather than
 /// each sorting its own copy and risking two orderings silently drifting apart.
 #[cfg(test)]
 fn partition_rows(
@@ -559,17 +575,21 @@ fn partition_rows_for(
             .map(|s| s.url.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        // Plain-text artifacts (workbook cells, findings.json, CSV): hard wraps joined and the
+        // Plain-text artifacts (workbook cells, json/inspection.json, CSV): hard wraps joined and the
         // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
         // R1-3: kind-aware, so a deviation row falls back to the rule's default option's
         // remediation here exactly as in the PDF data.
-        let fix = crate::report_export::resolve_fix_for_row(
+        let fix_raw = crate::report_export::resolve_fix_for_row_chosen(
             &f.rule_id,
             corpus,
             f,
             chosen_option_for_rule,
+            chosen_options,
         )
-        .map(|s| crate::report_export::fix_text::plain(&s));
+        .map(|s| crate::report_export::fix_text::prepare(&s));
+        let fix = fix_raw
+            .as_deref()
+            .map(crate::report_export::fix_text::plain);
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
         // deterministic/RLS-replay floor finding with an authored band doesn't render "not
@@ -596,19 +616,24 @@ fn partition_rows_for(
             // gate here to hold it out of an action tier). C5-8 extends this same shared call
             // with a "has a fix" check, so `chosen_option_for_rule` (already computed above for
             // `fix`/`headline`/`detail`) is threaded through here too.
-            let bucket = effective_bucket(
+            let bucket = crate::report_export::effective_bucket_with(
                 f,
                 disposition,
                 &severity,
                 corpus,
                 report.test_file_count,
                 chosen_option_for_rule,
+                chosen_options,
             );
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
             // A merged row exports with a pointer to the row it was merged into.
-            let label = crate::report_export::overlay::merged_label(f)
-                .map(str::to_string)
-                .unwrap_or_else(|| disposition_label(disposition, &reason, bucket, confirmed));
+            let label = crate::report_export::row_disposition_label(
+                f,
+                disposition,
+                &reason,
+                bucket,
+                confirmed,
+            );
             let why_waiting = crate::report_export::row_waiting_reason(
                 f,
                 disposition,
@@ -616,6 +641,7 @@ fn partition_rows_for(
                 corpus,
                 report.test_file_count,
                 chosen_option_for_rule,
+                chosen_options,
                 bucket,
             )
             .map(str::to_string);
@@ -659,6 +685,15 @@ fn partition_rows_for(
             also_legacy: crate::report_export::also_matches_titles(&f.also_matches, corpus)
                 .join(", "),
             also_match_ids: f.also_matches.clone(),
+            fix_merged_rules: crate::report_export::merged_rule_fix_parts(
+                &f.rule_id,
+                corpus,
+                f,
+                chosen_options,
+            )
+            .into_iter()
+            .map(|m| m.rule_id)
+            .collect(),
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
@@ -677,6 +712,12 @@ fn partition_rows_for(
                 .as_deref()
                 .map(crate::report_export::fix_text::plain)
                 .filter(|s| !s.is_empty()),
+            fix_specific_raw: f
+                .fix_specific
+                .as_deref()
+                .map(crate::report_export::fix_text::prepare)
+                .filter(|s| !s.is_empty()),
+            fix_raw,
             fix_type: {
                 let specific = f
                     .fix_specific
@@ -788,11 +829,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
         .collect();
     let decided = flagged
         .iter()
-        .filter(|r| {
-            r.is_fp
-                || r.disposition_kind
-                    .is_some_and(|d| d != Disposition::Unresolved)
-        })
+        .filter(|r| r.is_fp || sheets::row_is_decided(r))
         .count();
     (flagged.len(), decided)
 }
@@ -803,9 +840,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
 fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
     let mut fixes: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
     for r in rows.iter().filter(|r| !r.possible_duplicate_of.is_empty()) {
-        let decided = r.is_fp
-            || r.disposition_kind
-                .is_some_and(|d| d != Disposition::Unresolved);
+        let decided = r.is_fp || sheets::row_is_decided(r);
         let all = fixes.entry(r.facts.fix_id.as_str()).or_insert(true);
         *all &= decided;
     }
@@ -813,10 +848,18 @@ fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
 }
 
 /// What a cell ends with when prose (not a site list) had to be cut to fit. The full text is in
-/// `findings.json` and the `json/` and `csv/` files of the same export, none of which has a cell
+/// `json/inspection.json` and the `json/` and `csv/` files of the same export, none of which has a cell
 /// limit.
-const CELL_CUT_POINTER: &str = "\n[cut to fit Excel's 32,767-character cell limit: the full text \
-     is in findings.json and the json/ and csv/ files of this export]";
+const CELL_CUT_POINTER: &str = concat!(
+    "\n[cut to fit Excel's 32,767-character cell limit: the full text \
+     is in ",
+    camerata_api_types::pkg_inspection_json!(),
+    " and the ",
+    camerata_api_types::pkg_json_dir!(),
+    " and ",
+    camerata_api_types::pkg_csv_dir!(),
+    " files of this export]"
+);
 
 /// `text` as a cell may hold it: unchanged when it fits, otherwise cut on a character boundary
 /// with [`CELL_CUT_POINTER`] at the end. The last line of defence for every cell this module
@@ -1275,6 +1318,8 @@ pub(crate) struct CountRow {
     pub kind: CountKind,
     pub tool_preview: bool,
     pub escalated: bool,
+    /// A person read this row (its review level is `personally_reviewed`).
+    pub reviewed_in_person: bool,
     pub rule_id: String,
 }
 
@@ -1344,6 +1389,7 @@ pub(crate) fn counting_view(
             },
             tool_preview: r.provenance.starts_with("Preview:"),
             escalated: r.facts.escalated,
+            reviewed_in_person: r.facts.review_level == "personally_reviewed",
             rule_id: r.rule_id.clone(),
         })
         .collect();
@@ -1387,7 +1433,7 @@ fn rule_title(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String
 
 /// `path:line` for a row's own site plus every merge-absorbed site, with a consequence site
 /// labeled exactly as the findings sheet's "Also found at" column labels it. Client-facing:
-/// no raw rule ids (each absorbed site's own rule identity travels in `findings.json`'s
+/// no raw rule ids (each absorbed site's own rule identity travels in `json/inspection.json`'s
 /// `also_locations` entries, which is where a machine consumer reads it).
 fn site_locations(row: &FindingRow) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + row.also_locations.len());
@@ -1481,6 +1527,13 @@ struct DeviationGroupRow {
     /// D8: the label for `recommended_fix`. It is always the rule's own guidance, so
     /// `"Standard fix"`; empty when the rule has no authored remediation.
     fix_type: String,
+    /// Where the convention came from (observed, set by the reviewer), in the words of the
+    /// convention model design, section 7.
+    #[serde(skip)]
+    standard_note: String,
+    /// Where the convention came from, as the payload states it. Not exported.
+    #[serde(skip)]
+    standard_source: Option<camerata_api_types::audit::StandardSource>,
 }
 
 /// Group the Deviation rows by rule into the `Deviations` sheet's rows. Sorted worst-severity
@@ -1512,8 +1565,16 @@ fn build_deviation_groups(
             let mut declared_numerator = 0usize;
             let mut assessed_sites: Option<usize> = None;
             let mut convention_label = String::new();
+            let mut source = None;
+            let mut differs: Option<String> = None;
+            let mut following: Option<usize> = None;
             for row in &group {
                 if let Some(FindingKind::Deviation(d)) = &row.kind.0 {
+                    source = source.or(d.standard_source);
+                    following = following.or(d.following_sites);
+                    if differs.is_none() {
+                        differs = d.differs_from_default.clone();
+                    }
                     declared_numerator = declared_numerator.max(d.deviating_sites);
                     if assessed_sites.is_none() {
                         assessed_sites = d.assessed_sites;
@@ -1534,7 +1595,17 @@ fn build_deviation_groups(
                 crate::report_export::STANDARD_FIX_LABEL.to_string()
             };
             let deviating_sites = declared_numerator.max(sites_represented);
+            let note = standard_note(
+                source,
+                &convention_label,
+                deviating_sites,
+                assessed_sites.map(|a| a.max(deviating_sites)),
+                following,
+                differs.as_deref(),
+            );
             DeviationGroupRow {
+                standard_note: note,
+                standard_source: source,
                 repo,
                 category: group[0].category.clone(),
                 rule_title: rule_title(&rule_id, corpus),
@@ -1577,6 +1648,67 @@ fn build_deviation_groups(
 /// them from here, so the gate counts exactly the cells written.
 pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently, no exceptions found";
 pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
+/// A convention the reviewer set (convention model design, section 7), followed with no exception.
+pub(crate) const CONVENTION_STATUS_SET_BY_REVIEWER: &str =
+    "Set by the reviewer, no exceptions found";
+/// A rule the reviewer left to the client: every option is listed and none is marked.
+pub(crate) const CONVENTION_STATUS_OPEN_QUESTION: &str = "Open question: left to you to decide";
+
+/// "N place(s)" with the right number word.
+fn n_places(n: usize) -> String {
+    if n == 1 {
+        "1 place".to_string()
+    } else {
+        format!("{n} places")
+    }
+}
+
+/// The sentence a Departures row states about where its convention came from (section 7).
+fn standard_note(
+    source: Option<camerata_api_types::audit::StandardSource>,
+    label: &str,
+    departing: usize,
+    assessed: Option<usize>,
+    following: Option<usize>,
+    differs: Option<&str>,
+) -> String {
+    use camerata_api_types::audit::StandardSource;
+    let departs = if departing == 1 {
+        "1 place departs.".to_string()
+    } else {
+        format!("{departing} places depart.")
+    };
+    match source {
+        Some(StandardSource::Reviewer) => {
+            format!("Convention set by the reviewer: {label}. {departs}")
+        }
+        Some(StandardSource::RuleDefault) => {
+            format!("Convention taken from the rule's default: {label}. {departs}")
+        }
+        Some(StandardSource::EarlierChoice) => {
+            format!(
+                "Convention taken from the option your project chose earlier: {label}. {departs}"
+            )
+        }
+        Some(StandardSource::MostCommon) => {
+            format!("Convention taken from the option most places follow: {label}. {departs}")
+        }
+        _ => {
+            // "N of M" counts the places of the standard's own option: a place of a third option,
+            // or of the rule's default while the standard is only observed, does not follow it.
+            let follow = match (following, assessed) {
+                (Some(n), Some(m)) => {
+                    format!("Observed in your code: {n} of {m} places follow it.")
+                }
+                _ => "Observed in your code.".to_string(),
+            };
+            let differs = differs
+                .map(|d| format!(" Differs from the rule's default: {d}."))
+                .unwrap_or_default();
+            format!("{follow} {departs}{differs}")
+        }
+    }
+}
 
 /// "Your conventions" as the PDF states it: how many conventions the code follows consistently,
 /// where it has settled on none, and where it departs from the ones it follows. Counts and a few
@@ -1600,7 +1732,8 @@ pub(crate) fn pdf_conventions_of(
     let convention_rows = build_convention_rows(&conventions, corpus);
     let departures = build_deviation_groups(&others, corpus);
     let followed: Vec<&ConventionRow> = convention_rows.iter().filter(|c| c.rank == 0).collect();
-    let none_adopted = convention_rows.len() - followed.len();
+    let open_questions = convention_rows.iter().filter(|c| c.open_question).count();
+    let none_adopted = convention_rows.len() - followed.len() - open_questions;
     let areas = |names: Vec<&str>| -> usize {
         names
             .into_iter()
@@ -1621,7 +1754,7 @@ pub(crate) fn pdf_conventions_of(
             )
         )
     };
-    let none_adopted_line = if none_adopted == 0 {
+    let split_line = if none_adopted == 0 {
         String::new()
     } else {
         format!(
@@ -1629,21 +1762,54 @@ pub(crate) fn pdf_conventions_of(
             word(none_adopted, "rule", "rules")
         )
     };
-    let departing_places: usize = departures.iter().map(|d| d.deviating_sites).sum();
-    let departures_line = if departures.is_empty() {
+    let open_line = if open_questions == 0 {
         String::new()
     } else {
         format!(
-            "{} from a convention your code mostly follows, in {} ({}).",
-            word(departures.len(), "departure", "departures"),
+            "{} left for you to decide.",
+            word(open_questions, "open question", "open questions")
+        )
+    };
+    let none_adopted_line = [split_line, open_line]
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Departures from a convention the code mostly follows, and from one the reviewer set (the
+    // convention model's wording, section 7), each counted on its own.
+    let by_reviewer = |d: &&DeviationGroupRow| {
+        d.standard_source == Some(camerata_api_types::audit::StandardSource::Reviewer)
+    };
+    let departure_line = |group: Vec<&DeviationGroupRow>, from: &str| -> String {
+        if group.is_empty() {
+            return String::new();
+        }
+        let places: usize = group.iter().map(|d| d.deviating_sites).sum();
+        format!(
+            "{} from {from}, in {} ({}).",
+            word(group.len(), "departure", "departures"),
             word(
-                areas(departures.iter().map(|d| d.category.as_str()).collect()),
+                areas(group.iter().map(|d| d.category.as_str()).collect()),
                 "area",
                 "areas"
             ),
-            vocabulary::places_count(departing_places)
+            vocabulary::places_count(places)
         )
     };
+    let departures_line = [
+        departure_line(
+            departures.iter().filter(|d| !by_reviewer(d)).collect(),
+            "a convention your code mostly follows",
+        ),
+        departure_line(
+            departures.iter().filter(by_reviewer).collect(),
+            "a convention set by the reviewer",
+        ),
+    ]
+    .into_iter()
+    .filter(|l| !l.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ");
     let lines: Vec<String> = departures
         .iter()
         .take(PDF_MAX_DEPARTURES)
@@ -1693,6 +1859,9 @@ struct ConventionRow {
     /// block first, because that is this sheet's headline job.
     #[serde(skip)]
     rank: u8,
+    /// The reviewer left the rule to the client: an open question, not a split.
+    #[serde(skip)]
+    open_question: bool,
     /// The service this convention is about, set only when the project has several repos: a
     /// convention one service follows is not stated for another.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1732,24 +1901,84 @@ fn build_convention_rows(
             let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
                 Some(FindingKind::ConventionObserved(c)) => (
                     0u8,
-                    CONVENTION_STATUS_FOLLOWED.to_string(),
-                    c.convention_label.clone(),
+                    if c.standard_source
+                        == Some(camerata_api_types::audit::StandardSource::Reviewer)
+                    {
+                        CONVENTION_STATUS_SET_BY_REVIEWER.to_string()
+                    } else {
+                        CONVENTION_STATUS_FOLLOWED.to_string()
+                    },
+                    match &c.differs_from_default {
+                        Some(d) => format!(
+                            "{}\nDiffers from the rule's default: {d}.",
+                            c.convention_label
+                        ),
+                        None => c.convention_label.clone(),
+                    },
                     String::new(),
                 ),
-                Some(FindingKind::NoConvention(n)) => (
-                    1u8,
-                    CONVENTION_STATUS_NONE_ADOPTED.to_string(),
-                    String::new(),
-                    n.observed_options
-                        .iter()
-                        .map(|o| match o.sites {
-                            Some(1) => format!("{} (1 place)", o.label),
-                            Some(n) => format!("{} ({n} places)", o.label),
-                            None => o.label.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
+                Some(FindingKind::NoConvention(n)) => {
+                    let usage = |o: &camerata_api_types::audit::ObservedOptionUsage| match o.sites {
+                        Some(1) => format!("{} (1 place)", o.label),
+                        Some(n) => format!("{} ({n} places)", o.label),
+                        None => o.label.clone(),
+                    };
+                    if n.left_to_client {
+                        // Every option of the rule from the corpus, none marked.
+                        let from_corpus: Vec<String> = corpus
+                            .and_then(|c| c.get_by_id(&row.rule_id))
+                            .map(|r| {
+                                r.options
+                                    .iter()
+                                    .map(|o| {
+                                        let places = n
+                                            .observed_options
+                                            .iter()
+                                            .find(|u| u.option_id == o.id)
+                                            .and_then(|u| u.sites)
+                                            .map(n_places)
+                                            .unwrap_or_default();
+                                        format!(
+                                            "{}: {} Why: {} {}",
+                                            o.label,
+                                            o.directive.trim(),
+                                            o.why.trim(),
+                                            if places.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!("({places})")
+                                            }
+                                        )
+                                        .trim_end()
+                                        .to_string()
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let lines = if from_corpus.is_empty() {
+                            n.observed_options.iter().map(usage).collect()
+                        } else {
+                            from_corpus
+                        };
+                        (
+                            1u8,
+                            CONVENTION_STATUS_OPEN_QUESTION.to_string(),
+                            String::new(),
+                            lines.join("\n"),
+                        )
+                    } else {
+                        (
+                            1u8,
+                            CONVENTION_STATUS_NONE_ADOPTED.to_string(),
+                            String::new(),
+                            n.observed_options
+                                .iter()
+                                .map(usage)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                    }
+                }
                 _ => return None,
             };
             let also_found_items: Vec<String> = site_locations(row)
@@ -1759,6 +1988,7 @@ fn build_convention_rows(
                 .collect();
             Some(ConventionRow {
                 rank,
+                open_question: status == CONVENTION_STATUS_OPEN_QUESTION,
                 repo: if row.multi_repo {
                     row.repo.clone()
                 } else {
@@ -1809,7 +2039,7 @@ struct NotAssessedRow {
     /// The structured reason in client language. The payload's `reason_detail` is the
     /// PRODUCER's verbatim diagnostic ("eslint exited 2") and is deliberately NOT rendered —
     /// G3: a client-facing coverage statement is a concise sentence, never an internal
-    /// diagnostic dump. The machine-readable reason and detail both reach `findings.json`.
+    /// diagnostic dump. The machine-readable reason and detail both reach `json/inspection.json`.
     why: String,
     /// The row's own client-facing headline, verbatim (parity — see [`ConventionRow`]).
     headline: String,
@@ -2161,7 +2391,7 @@ pub fn build_workbook_with_counts(
         .coverage_notes
         .iter()
         .filter(|n| n.tool == "osv-scanner")
-        .map(|n| n.message.clone())
+        .map(|n| crate::dep_audit::client_note_message(&n.message))
         .collect();
     let gaps = crate::report_export::coverage_gaps::coverage_gaps(report);
     let patterns_json = crate::report_export::patterns_across_services_json(
@@ -2206,7 +2436,13 @@ pub fn build_workbook_with_counts(
         sheets::needs_a_decision_table(&lay),
         sheets::conventions_table(&convention_rows, &lay),
         sheets::departures_table(&deviation_groups, &lay),
-        sheets::dependencies_table(&sorted_deps),
+        sheets::dependencies_table(
+            &sorted_deps,
+            crate::report_export::audited_dependencies_note(
+                report.ledger.audited_dependency_files(),
+                report.repos.len() > 1,
+            ),
+        ),
         sheets::rules_checked_table(&coverage_rows, &rules_applied_rows, &lay, corpus),
     ];
     if let Some(patterns) = &patterns_json {
@@ -2351,13 +2587,6 @@ pub fn build_workbook_with_counts(
         tables::write_table(&mut wb, &fmts, table)
             .with_context(|| format!("writing the {} sheet", table.name))?;
     }
-    // H4: the optional triage log, last so every existing sheet keeps its position. Off by
-    // default; see `triage_log`.
-    if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
-        triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
-            .context("writing the Triage Log sheet")?;
-    }
 
     // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
     // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
@@ -2380,9 +2609,9 @@ pub(crate) fn sheet_footer(line: &str) -> String {
     format!("&L{}&RPage &P of &N", line.replace('&', "&&"))
 }
 
-// ── `findings.json` (product export, machine-readable sibling of the workbook) ────────
+// ── `json/inspection.json` (product export, machine-readable sibling of the workbook) ────────
 
-/// The `findings.json` payload bundled into the product-export zip: the machine-readable
+/// The `json/inspection.json` payload bundled into the product-export zip: the machine-readable
 /// version of the Excel data. `findings` is the WHOLE non-FP (severity-desc-then-repo/path/
 /// line-sorted) [`FindingRow`] set — the same `partition_rows` output the workbook is built
 /// from, so the two can never disagree on a field value.
@@ -2391,7 +2620,7 @@ pub(crate) fn sheet_footer(line: &str) -> String {
 /// was until 2026-10-12. Since the Pass-3 restructure the workbook PARTITIONS that set across
 /// three destinations by [`FindingKind`] (see `kind_sheet`): "All Findings" takes only
 /// Defect/Deviation/absent-kind rows, Conventions takes the informational ones, and Coverage's
-/// "could not complete" section takes the not-assessed ones. `findings.json` is deliberately
+/// "could not complete" section takes the not-assessed ones. `json/inspection.json` is deliberately
 /// unpartitioned — a machine-readable export exists to be filtered by its consumer, and
 /// dropping the informational rows from it would make the JSON a lossy subset of the workbook
 /// it is supposed to be the complete sibling of.
@@ -2435,7 +2664,21 @@ pub struct FindingsExport {
     pub fixes: Vec<crate::review_tree::FixNode>,
 }
 
-/// The `summary` of findings.json: the executive summary's sentence and its tallies, every tally
+impl FindingsExport {
+    /// The Place ids ([`crate::report_export::RowFacts::site_id`]) of the rows shown at critical
+    /// severity: the severity the PDF and the workbook print, with every bound applied. The release
+    /// gate holds each of these to a reviewer's decision
+    /// ([`crate::release_gate::needs_decision`]).
+    pub(crate) fn shown_critical_site_ids(&self) -> std::collections::HashSet<&str> {
+        self.findings
+            .iter()
+            .filter(|r| r.severity == "critical")
+            .map(|r| r.facts.site_id.as_str())
+            .collect()
+    }
+}
+
+/// The `summary` of json/inspection.json: the executive summary's sentence and its tallies, every tally
 /// read from the counts object so no field contradicts `counts`. The old row tallies
 /// `curated_total` and `open` are retired words and are not in the file.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -2536,13 +2779,13 @@ fn open_beside_ruled_out(reviewed: &ReviewedReport) -> Vec<OpenSiteJson> {
     out
 }
 
-/// The tree in `findings.json`.
+/// The tree in `json/inspection.json`.
 #[derive(Serialize)]
 pub struct TreeJson {
     pub nodes: Vec<crate::report_export::tree_view::TreeNodeView>,
 }
 
-/// Build the `findings.json` payload — the JSON sibling of [`build_workbook`]. Takes the
+/// Build the `json/inspection.json` payload — the JSON sibling of [`build_workbook`]. Takes the
 /// already-built `report_json` (the SAME [`crate::report_export::AuditReportJson`] the PDF
 /// was compiled from and the caller also passes to `build_workbook`'s call site) so
 /// `provenance`/`summary` are reused, never recomputed a second time from `report` directly.
@@ -2588,24 +2831,14 @@ pub fn build_findings_export(
 /// Build the per-dataset JSON exports that ride in the product ZIP under `json/`. Each file is
 /// a second SERIALIZER over the SAME typed row structs the xlsx sheets are built from (the exact
 /// `partition_rows` + `build_*` outputs [`build_workbook`] uses, called here identically), never
-/// an independent walk of the scan - so `json/`, the xlsx, and `findings.json` can never
+/// an independent walk of the scan - so `json/`, the xlsx, and `json/inspection.json` can never
 /// disagree. Returns `(archive_path, pretty-JSON bytes)` pairs.
 ///
-/// The eight machine-readable datasets every product package ships, as `csv/{name}.csv` and
-/// `json/{name}.json`. The ONE definition: the release gate's dataset-set check and the export
-/// tests both read it, so a dataset added here is demanded of every package.
-pub const DATASETS: [&str; 8] = [
-    "all-findings",
-    "deviations",
-    "conventions",
-    "not-assessed",
-    "dependencies",
-    "false-positives",
-    "coverage",
-    "rules-applied",
-];
+/// The eight machine-readable datasets every product package ships: defined once, in
+/// `package_paths`, and read from here by the exports and the release gate.
+pub use camerata_api_types::package_paths::DATASETS;
 
-/// `json/all-findings.json` is the flat sibling of `findings.json`'s `findings` array (the whole
+/// `json/all-findings.json` is the flat sibling of `json/inspection.json`'s `findings` array (the whole
 /// non-FP set); the other files are the partitioned sheet tables, each its own one-table file.
 pub fn build_json_exports(
     reviewed: &ReviewedReport,
@@ -2642,35 +2875,35 @@ pub fn build_json_exports(
     // One (path, bytes) per table; pretty-printed for a diffable, human-skimmable file.
     Ok(vec![
         (
-            "json/all-findings.json".to_string(),
+            ALL_FINDINGS_JSON.to_string(),
             serde_json::to_vec_pretty(&live_rows)?,
         ),
         (
-            "json/deviations.json".to_string(),
+            json_path(DS_DEVIATIONS),
             serde_json::to_vec_pretty(&deviation_groups)?,
         ),
         (
-            "json/conventions.json".to_string(),
+            json_path(DS_CONVENTIONS),
             serde_json::to_vec_pretty(&convention_rows)?,
         ),
         (
-            "json/not-assessed.json".to_string(),
+            json_path(DS_NOT_ASSESSED),
             serde_json::to_vec_pretty(&not_assessed_rows)?,
         ),
         (
-            "json/dependencies.json".to_string(),
+            json_path(DS_DEPENDENCIES),
             serde_json::to_vec_pretty(&dep_rows)?,
         ),
         (
-            "json/false-positives.json".to_string(),
+            json_path(DS_FALSE_POSITIVES),
             serde_json::to_vec_pretty(&fp_rows)?,
         ),
         (
-            "json/coverage.json".to_string(),
+            json_path(DS_COVERAGE),
             serde_json::to_vec_pretty(&coverage_rows)?,
         ),
         (
-            "json/rules-applied.json".to_string(),
+            json_path(DS_RULES_APPLIED),
             serde_json::to_vec_pretty(&rules_applied_rows)?,
         ),
     ])
@@ -2715,14 +2948,14 @@ fn json_array_to_csv(value: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
                 Some(other) => serde_json::to_string(other).unwrap_or_default(),
             })
             .collect();
-        wtr.write_record(&record)?;
+        wtr.write_record(crate::csv_cell::safe_record(&record))?;
     }
     Ok(wtr.into_inner()?)
 }
 
 /// Build the per-dataset CSV exports that ride in the product ZIP under `csv/` - the plain-table
 /// sibling of [`build_json_exports`]. Each CSV is derived from the EXACT JSON that file's `json/`
-/// sibling carries (via [`json_array_to_csv`]), so `csv/`, `json/`, the xlsx, and `findings.json`
+/// sibling carries (via [`json_array_to_csv`]), so `csv/`, `json/`, the xlsx, and `json/inspection.json`
 /// all trace to the one `partition_rows` pass and cannot disagree. Returns `(csv/<name>.csv,
 /// bytes)` pairs mirroring the eight JSON tables.
 pub fn build_csv_exports(
@@ -2736,11 +2969,11 @@ pub fn build_csv_exports(
         .map(|(path, bytes)| {
             // json/foo.json -> csv/foo.csv
             let name = path
-                .strip_prefix("json/")
+                .strip_prefix(JSON_DIR)
                 .and_then(|s| s.strip_suffix(".json"))
                 .unwrap_or(&path);
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            Ok((format!("csv/{name}.csv"), json_array_to_csv(&value)?))
+            Ok((csv_path(name), json_array_to_csv(&value)?))
         })
         .collect::<anyhow::Result<_>>()?;
     // WO9b: one ticket per sub-group, for a client's Jira, Linear or GitHub Issues importer.
@@ -2748,15 +2981,6 @@ pub fn build_csv_exports(
         tickets::TICKETS_CSV.to_string(),
         tickets::tickets_csv(reviewed, corpus, &opts.chosen_options)?,
     ));
-    // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
-    // not one of the eight `DATASETS`; the release gate admits it as an optional member).
-    if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
-        csv.push((
-            triage_log::TRIAGE_LOG_CSV.to_string(),
-            triage_log::triage_log_csv(&log)?,
-        ));
-    }
     Ok(csv)
 }
 
@@ -2802,6 +3026,7 @@ mod tests {
             discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: Default::default(),
             volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
@@ -3185,7 +3410,7 @@ mod tests {
     #[tokio::test]
     async fn json_all_findings_matches_findings_json_rows() {
         // The load-bearing parity gate: json/all-findings.json is byte-for-byte the same data
-        // as findings.json's `findings` array, because both serialize the SAME non-FP FindingRow
+        // as json/inspection.json's `findings` array, because both serialize the SAME non-FP FindingRow
         // set from the SAME partition_rows pass. If they ever diverge, the artifacts disagree.
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
@@ -3219,7 +3444,7 @@ mod tests {
 
         assert_eq!(
             got, expected,
-            "json/all-findings.json must equal findings.json's findings array"
+            "json/all-findings.json must equal json/inspection.json's findings array"
         );
     }
 
@@ -3873,7 +4098,7 @@ mod tests {
             .is_some_and(|s| s.contains("profiles")));
     }
 
-    /// Fix text reaches the plain-text artifacts (workbook cells, `findings.json`, CSV) as ONE
+    /// Fix text reaches the plain-text artifacts (workbook cells, `json/inspection.json`, CSV) as ONE
     /// paragraph per authored paragraph and without markdown backticks: the rule TOML's hard
     /// line wraps are joined and `code` spans lose their backticks.
     #[tokio::test]
@@ -3946,9 +4171,9 @@ mod tests {
         }
     }
 
-    // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
+    // ── `json/inspection.json` (product export, machine-readable sibling of the workbook) ─────
 
-    // ── Pass-1 W3 (A5.6/A5.2): the kind must survive to findings.json, losslessly ────────
+    // ── Pass-1 W3 (A5.6/A5.2): the kind must survive to json/inspection.json, losslessly ────────
 
     /// 22d: the release gate compares the All problems sheet with the JSON rows of
     /// `ALL_PROBLEMS_SHEET_KINDS` only, so that list must be exactly the kinds `kind_sheet`
@@ -3967,13 +4192,19 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             })),
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: String::new(),
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
             })),
             Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: Vec::new(),
+                left_to_client: false,
             })),
             Some(FindingKind::NotAssessed(NotAssessedKind {
                 reason: NotAssessedReason::PassFailed,
@@ -3996,14 +4227,14 @@ mod tests {
     }
 
     /// req A5.6 — THE W3 end-to-end guarantee: every one of the five kinds (plus the
-    /// legacy/unspecified case) reaches `findings.json` INTACT — flat `"kind"` discriminator
+    /// legacy/unspecified case) reaches `json/inspection.json` INTACT — flat `"kind"` discriminator
     /// and, for a Deviation, the full structured sentence (numerator / denominator /
-    /// observed-majority convention) — because findings.json is the grader's input ("the
+    /// observed-majority convention) — because json/inspection.json is the grader's input ("the
     /// JSON is just the data structure"); a kind that reached only the PDF would be the
     /// exact B2 defect class behind the hearth 0/12 result.
     ///
     /// FAILS BEFORE THE FIX: `FindingRow` had no kind field, so no `"kind"` key existed in
-    /// findings.json at all (verified by the pre-W3 tree: `grep FindingKind crates/` was
+    /// json/inspection.json at all (verified by the pre-W3 tree: `grep FindingKind crates/` was
     /// empty), and every assertion below had nothing to read.
     #[test]
     fn req_a5_6_every_kind_survives_to_findings_json_losslessly() {
@@ -4020,6 +4251,9 @@ mod tests {
                     assessed_sites: Some(47),
                     convention_option_id: Some("versioned".to_string()),
                     convention_label: "URI-versioned endpoints".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
+                    following_sites: None,
                 }),
             ),
             kinded(
@@ -4027,6 +4261,8 @@ mod tests {
                 FindingKind::ConventionObserved(ConventionObservedKind {
                     convention_option_id: "cursor".to_string(),
                     convention_label: "Cursor pagination".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -4044,6 +4280,7 @@ mod tests {
                             sites: Some(2),
                         },
                     ],
+                    left_to_client: false,
                 }),
             ),
             kinded(
@@ -4074,13 +4311,13 @@ mod tests {
             &json,
             &HashMap::new(),
         );
-        let v = serde_json::to_value(&export).expect("findings.json serializes");
+        let v = serde_json::to_value(&export).expect("json/inspection.json serializes");
         let rows = v["findings"].as_array().expect("findings array");
         assert_eq!(rows.len(), 6, "all six rows ship");
         let row_for = |rule: &str| -> &serde_json::Value {
             rows.iter()
                 .find(|r| r["rule_id"] == rule)
-                .unwrap_or_else(|| panic!("no findings.json row for {rule}"))
+                .unwrap_or_else(|| panic!("no json/inspection.json row for {rule}"))
         };
 
         assert_eq!(row_for("SEC-1")["kind"], "defect");
@@ -4119,7 +4356,7 @@ mod tests {
         let legacy = row_for("LEGACY-1");
         assert_eq!(
             legacy["kind"], "unspecified",
-            "an absent kind must surface explicitly in findings.json"
+            "an absent kind must surface explicitly in json/inspection.json"
         );
         assert_ne!(legacy["kind"], "defect", "never silently a defect");
     }
@@ -4155,6 +4392,9 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: Some("default".to_string()),
                 convention_label: "Default".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let defect = kinded(
@@ -4204,7 +4444,7 @@ mod tests {
     }
 
     /// req A5.6 — minimal workbook render: the All Findings sheet carries a `Kind` column
-    /// whose cell is the same stable wire tag findings.json serializes (no layout redesign —
+    /// whose cell is the same stable wire tag json/inspection.json serializes (no layout redesign —
     /// that is Pass 3 work).
     #[test]
     fn req_a5_6_kind_column_renders_in_the_all_findings_sheet() {
@@ -4216,6 +4456,9 @@ mod tests {
                 assessed_sites: Some(5),
                 convention_option_id: None,
                 convention_label: "observed majority".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let legacy = finding("LEGACY-1", "b.rs", 2, "high");
@@ -4298,11 +4541,11 @@ mod tests {
         assert_eq!(
             row_count.saturating_sub(1),
             findings_export.findings.len(),
-            "findings.json row count must match the All problems sheet's actual data rows"
+            "json/inspection.json row count must match the All problems sheet's actual data rows"
         );
     }
 
-    /// A finding's `fix` field in `findings.json` is exactly `resolve_fix`'s output for the
+    /// A finding's `fix` field in `json/inspection.json` is exactly `resolve_fix`'s output for the
     /// same rule id + corpus + finding — the same guarantee the xlsx's Recommended Fix column
     /// has, and `null` (never a string), never `directive`, for a rule with no `fix` at all.
     #[tokio::test]
@@ -4384,7 +4627,7 @@ mod tests {
         );
     }
 
-    /// P2: `findings.json` must carry `fix_specific` and place it BEFORE `fix` in the
+    /// P2: `json/inspection.json` must carry `fix_specific` and place it BEFORE `fix` in the
     /// serialized object — the same primary-then-secondary ordering as the xlsx columns and
     /// the PDF template. `serde_json::Value`'s map does not preserve field order (it's a
     /// `BTreeMap` without the `preserve_order` feature), so this asserts on the serialized
@@ -4554,7 +4797,7 @@ mod tests {
     }
 
     /// W3: a floor finding whose raw `Finding::detail` is internal, imperative gate prose
-    /// ("Deny …") must export its AUTHORED plain-language headline in BOTH `findings.json`
+    /// ("Deny …") must export its AUTHORED plain-language headline in BOTH `json/inspection.json`
     /// and the xlsx's "Headline" column — the exact same rewrite the PDF already applies via
     /// `client_headline_and_detail` — never the raw gate directive. The raw text must still be
     /// recoverable (completeness): it stays verbatim in `FindingRow::detail`/the "Detail"
@@ -4609,15 +4852,15 @@ mod tests {
         let exported_headline = &findings_export.findings[0].headline;
         assert_eq!(
             exported_headline, AUTHORED_HEADLINE,
-            "findings.json headline must be the authored plain-language rewrite, not the raw \
+            "json/inspection.json headline must be the authored plain-language rewrite, not the raw \
              gate directive, got: {exported_headline:?}"
         );
         assert!(
             !exported_headline.starts_with("Deny"),
-            "findings.json headline must never be the raw gate directive verbatim"
+            "json/inspection.json headline must never be the raw gate directive verbatim"
         );
         // C4-P2: the DETAIL column goes through the SAME plain-language rewrite as the
-        // headline — before this fix, `findings.json`'s `detail` carried `RAW_GATE_TEXT`
+        // headline — before this fix, `json/inspection.json`'s `detail` carried `RAW_GATE_TEXT`
         // verbatim (the PDF's `CuratedSiteJson::detail` already rewrote it; only the headline
         // was fixed in a prior cycle), so a floor rule's authored `finding_detail` template
         // rewrote cleanly in the PDF while the product export still printed internal gate
@@ -4627,7 +4870,7 @@ mod tests {
         assert_eq!(findings_export.findings[0].detail, AUTHORED_DETAIL);
         assert!(
             !findings_export.findings[0].detail.starts_with("Deny"),
-            "findings.json detail must never be the raw gate directive verbatim"
+            "json/inspection.json detail must never be the raw gate directive verbatim"
         );
 
         // "All Findings" is the second worksheet added (after Index) -> sheet2.xml; row 1 is
@@ -4659,7 +4902,7 @@ mod tests {
     /// General guard (not fixture-specific): across a MIX of findings — one whose rule has an
     /// authored plain-language template and one whose rule the corpus doesn't know at all (so
     /// it falls back to the pre-P4 `defect_headline`-over-`detail` derivation) — no exported
-    /// headline in `findings.json` may begin with an internal imperative rule-text pattern.
+    /// headline in `json/inspection.json` may begin with an internal imperative rule-text pattern.
     /// This pins the CLASS of bug (any floor rule's raw directive leaking as a client-facing
     /// headline), not one specific rule id or wording.
     #[test]
@@ -4703,7 +4946,7 @@ mod tests {
                 !IMPERATIVE_PREFIXES
                     .iter()
                     .any(|p| row.headline.starts_with(p)),
-                "findings.json headline must never start with an internal imperative rule-text \
+                "json/inspection.json headline must never start with an internal imperative rule-text \
                  pattern, got: {:?}",
                 row.headline
             );
@@ -4837,7 +5080,7 @@ mod tests {
 
     // ── C3-6: one bucket computation, shared by every artifact ───────────────────────
 
-    /// The three export artifacts (PDF, xlsx, `findings.json`) each used to bucket a finding
+    /// The three export artifacts (PDF, xlsx, `json/inspection.json`) each used to bucket a finding
     /// independently: `build_report_json`'s matrix pass applied `is_informational`/
     /// `is_uncited_ai_finding` BEFORE `matrix_bucket`, but this module's `partition_rows`
     /// called `matrix_bucket` directly with no such gate at all — a hedged (`needs-review`)
@@ -5079,7 +5322,7 @@ mod tests {
     /// fallback (`classify_ai_finding`) into a known defect class, must carry the IDENTICAL
     /// citation (the class's sources, labelled as a related standard since H5), a
     /// human-readable title (never the bare invented rule id), and its real semantic category
-    /// (never a mangled rule-id-token key) across `findings.json`, the xlsx workbook, and the
+    /// (never a mangled rule-id-token key) across `json/inspection.json`, the xlsx workbook, and the
     /// PDF's curated-findings data — and the category scorecard must count it as a checked rule. This is the general class behind the "AI-tier critical is
     /// uncited in json/xlsx while the PDF prints a different rule's citation under a mangled
     /// category with 0 rules checked" bug.
@@ -5184,7 +5427,7 @@ mod tests {
         let row = &findings_export.findings[0];
         assert_eq!(
             row.citation_label, group.citation.label,
-            "findings.json citation_label must be byte-identical to the PDF's curated-site citation"
+            "json/inspection.json citation_label must be byte-identical to the PDF's curated-site citation"
         );
         assert_eq!(
             row.category, "RLS Policy",
@@ -5328,7 +5571,7 @@ mod tests {
 
     /// General guard (not fixture-specific), mirroring
     /// `no_findings_export_headline_matches_the_imperative_rule_text_pattern` above for the
-    /// `detail` column: across a mix of findings, no exported `detail` in `findings.json` may
+    /// `detail` column: across a mix of findings, no exported `detail` in `json/inspection.json` may
     /// begin with an internal imperative gate verb. Before C4-P2, `detail` was NEVER rewritten
     /// (only `headline` was, in a prior cycle) — this pins the fix at the same generality as
     /// the existing headline test, using the task's own anchor pattern.
@@ -5371,13 +5614,13 @@ mod tests {
         for row in &findings_export.findings {
             assert!(
                 !imperative.is_match(&row.headline),
-                "findings.json headline must never start with an internal imperative rule-text \
+                "json/inspection.json headline must never start with an internal imperative rule-text \
                  pattern, got: {:?}",
                 row.headline
             );
             assert!(
                 !imperative.is_match(&row.detail),
-                "findings.json detail must never start with an internal imperative rule-text \
+                "json/inspection.json detail must never start with an internal imperative rule-text \
                  pattern, got: {:?}",
                 row.detail
             );
@@ -5386,7 +5629,7 @@ mod tests {
 
     /// C4-P2's durable fix: the cross-artifact EQUALITY GATE. For the SAME finding, citation
     /// label, detail, severity, bucket, and hedge state must be byte-identical across
-    /// `findings.json` and the xlsx workbook — and the PDF's curated-findings data (what the
+    /// `json/inspection.json` and the xlsx workbook — and the PDF's curated-findings data (what the
     /// template actually renders) must carry those same values too, never a value the
     /// template or a renderer recomputed independently. This is the test that stops the whole
     /// "three renderers, three answers" bug family from recurring: any future change that
@@ -5461,29 +5704,31 @@ mod tests {
                 .findings
                 .iter()
                 .find(|r| r.path == site.path && r.line == site.line)
-                .unwrap_or_else(|| panic!("findings.json must carry a row for {}", site.path));
+                .unwrap_or_else(|| {
+                    panic!("json/inspection.json must carry a row for {}", site.path)
+                });
 
             assert_eq!(
                 row.citation_label, site.citation.label,
-                "citation must be byte-identical between findings.json and the PDF's curated \
+                "citation must be byte-identical between json/inspection.json and the PDF's curated \
                  site, for {}",
                 site.path
             );
             assert_eq!(
                 row.detail, site.detail,
-                "detail must be byte-identical between findings.json and the PDF's curated \
+                "detail must be byte-identical between json/inspection.json and the PDF's curated \
                  site, for {}",
                 site.path
             );
             assert_eq!(
                 row.severity, site.severity,
-                "severity must be byte-identical between findings.json and the PDF's curated \
+                "severity must be byte-identical between json/inspection.json and the PDF's curated \
                  site, for {}",
                 site.path
             );
             assert_eq!(
                 row.bucket, site.bucket,
-                "bucket must be byte-identical between findings.json and the PDF's curated \
+                "bucket must be byte-identical between json/inspection.json and the PDF's curated \
                  site, for {}",
                 site.path
             );
@@ -5491,7 +5736,7 @@ mod tests {
             let site_hedged = site.confidence.as_deref() == Some("needs-review");
             assert_eq!(
                 row_hedged, site_hedged,
-                "hedge state must be byte-identical between findings.json and the PDF's curated \
+                "hedge state must be byte-identical between json/inspection.json and the PDF's curated \
                  site, for {}",
                 site.path
             );
@@ -5548,7 +5793,7 @@ mod tests {
 
     // ── C4-P4 residual defect 2: no raw rule id in client-facing "also matches" prose ──────
 
-    /// `findings.json`'s `also_matches` field (and the xlsx "Also matches" column it mirrors
+    /// `json/inspection.json`'s `also_matches` field (and the xlsx "Also matches" column it mirrors
     /// verbatim) used to be `f.also_matches.join(", ")` — the raw internal rule ids, exactly
     /// the kind of token a client has no way to decode. Both must now render the OTHER rule's
     /// human-readable TITLE instead, never the bare id.
@@ -5593,12 +5838,12 @@ mod tests {
         let row = &findings_export.findings[0];
         assert!(
             row.also_matches.contains(&other_title),
-            "findings.json also_matches must render the rule TITLE, got: {:?}",
+            "json/inspection.json also_matches must render the rule TITLE, got: {:?}",
             row.also_matches
         );
         assert!(
             !row.also_matches.contains(other_rule_id),
-            "findings.json also_matches must never contain the raw rule id, got: {:?}",
+            "json/inspection.json also_matches must never contain the raw rule id, got: {:?}",
             row.also_matches
         );
 
@@ -5619,7 +5864,7 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             also_matches_cell, row.also_matches,
-            "the xlsx Also matches column must be byte-identical to findings.json"
+            "the xlsx Also matches column must be byte-identical to json/inspection.json"
         );
         assert!(
             !also_matches_cell.contains(other_rule_id),
@@ -5649,7 +5894,7 @@ mod tests {
     }
 
     /// req_c5: a merged row's absorbed evidence sites (`Finding::also_locations`) reach
-    /// `findings.json` verbatim, together with an explicit `site_count` — before W7 neither
+    /// `json/inspection.json` verbatim, together with an explicit `site_count` — before W7 neither
     /// field was exported anywhere, so a row representing three detected sites was
     /// observationally identical to a single-site row (tracker C5: an over-merge was
     /// indistinguishable from a detection miss in every client artifact).
@@ -5699,7 +5944,7 @@ mod tests {
         );
         let locs = row["also_locations"]
             .as_array()
-            .expect("findings.json rows must carry an also_locations array");
+            .expect("json/inspection.json rows must carry an also_locations array");
         assert_eq!(locs.len(), 2);
         assert_eq!(locs[0]["path"], "src/orders.rs");
         assert_eq!(locs[0]["line"], 24);
@@ -5734,7 +5979,7 @@ mod tests {
         assert_eq!(site.also_locations.len(), 2);
     }
 
-    /// Amendment A1: a source collapsed into a row keeps its OWN line. findings.json carries it in
+    /// Amendment A1: a source collapsed into a row keeps its OWN line. json/inspection.json carries it in
     /// `flagged_by` with its path and line, `site_count` counts it as a place, and the workbook's
     /// "Also found at" column names it. (The SARIF half of the same test lands with the SARIF
     /// work order.)
@@ -5800,6 +6045,51 @@ mod tests {
             shared.contains("src/orders.rs:12"),
             "the workbook names the collapsed source's own line"
         );
+    }
+
+    /// #586 check 1: a finding the collapse folded into a row of another rule is still listed in
+    /// the workbook and in the data the PDF is drawn from, under its OWN rule id and location.
+    #[test]
+    fn a_row_merged_into_another_rule_is_listed_with_its_own_rule_and_location() {
+        let mut floor = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        floor.snippet = "let q = format!(\"SELECT {}\", id);".to_string();
+        let merged_rule = "camerata.security.sql-string-concat-python";
+        let mut tool = finding(merged_rule, "src/orders.rs", 12, "high");
+        tool.snippet = floor.snippet.clone();
+        tool.preview = true;
+        tool.preview_tool = Some("semgrep".to_string());
+        let collapsed = crate::review_tree::collapse_identical(
+            vec![floor, tool],
+            &crate::review_tree::ToolMap::builtin(),
+        );
+        assert_eq!(collapsed.rows.len(), 1);
+        assert_ne!(
+            collapsed.rows[0].rule_id, merged_rule,
+            "the survivor is the other rule"
+        );
+        let report = report_with(collapsed.rows, vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let reviewed = crate::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        );
+        let json = crate::report_export::build_report_json(&reviewed, None, &empty_opts());
+        let wire = serde_json::to_string(&json).unwrap();
+        assert!(
+            wire.contains(merged_rule),
+            "the PDF data names the merged rule: {wire}"
+        );
+        assert!(wire.contains("src/orders.rs"), "and its location");
+        let export = build_findings_export(&reviewed, None, &json, &HashMap::new());
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["flagged_by"][0]["rule_id"], merged_rule);
+        assert_eq!(row["flagged_by"][0]["line"], 12);
+        let xlsx = build_workbook(&reviewed, None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains(merged_rule),
+            "the workbook names the merged rule"
+        );
+        assert!(shared.contains("src/orders.rs:12"), "and its own line");
     }
 
     /// req_c6: a rule that FIRED and was merged away as a group member must never render
@@ -6118,6 +6408,9 @@ mod tests {
                     assessed_sites: Some(47),
                     convention_option_id: Some("versioned".to_string()),
                     convention_label: "URI-versioned endpoints".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
+                    following_sites: None,
                 }),
             ),
             kinded(
@@ -6125,6 +6418,8 @@ mod tests {
                 FindingKind::ConventionObserved(ConventionObservedKind {
                     convention_option_id: "cursor".to_string(),
                     convention_label: "Cursor pagination".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -6142,6 +6437,7 @@ mod tests {
                             sites: Some(1),
                         },
                     ],
+                    left_to_client: false,
                 }),
             ),
             kinded(
@@ -6156,7 +6452,7 @@ mod tests {
         ]
     }
 
-    /// req_pass3: EVERY row `findings.json` exports lands on exactly ONE of the three kind
+    /// req_pass3: EVERY row `json/inspection.json` exports lands on exactly ONE of the three kind
     /// destinations — All Findings, Conventions, or Coverage's "could not complete" section.
     ///
     /// The restructure's entire risk lives here. Before Pass 3 every non-FP row went to one
@@ -6262,7 +6558,7 @@ mod tests {
     /// URI-versioned endpoints" is readable off three adjacent cells with no prose parsing.
     ///
     /// FAILS BEFORE THE CHANGE: there was no Deviations sheet. The structured numbers reached
-    /// `findings.json` (W3) and the workbook carried neither them nor the convention label in
+    /// `json/inspection.json` (W3) and the workbook carried neither them nor the convention label in
     /// any column — a reader had to find the two numbers inside the `Detail` sentence, which
     /// is exactly the prose-parsing the structured payload exists to abolish. Re-verified by
     /// reverting the two count columns to a single rendered sentence: `cell_number` then
@@ -6332,6 +6628,9 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "the pattern used elsewhere in this codebase".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6380,6 +6679,9 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: None,
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6433,6 +6735,9 @@ mod tests {
                         assessed_sites: Some(3),
                         convention_option_id: None,
                         convention_label: "Typed path params".to_string(),
+                        standard_source: None,
+                        differs_from_default: None,
+                        following_sites: None,
                     }),
                 )
             })
@@ -6468,6 +6773,9 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6518,6 +6826,9 @@ mod tests {
                 assessed_sites: Some(3),
                 convention_option_id: Some("typed-extraction".to_string()),
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -6556,7 +6867,7 @@ mod tests {
     }
 
     /// Review of R1-3 (ii): one deviation row, one fix, in every artifact. The workbook's group
-    /// fix, `findings.json`'s `fix` and the PDF data's curated site fix are the same Standard fix
+    /// fix, `json/inspection.json`'s `fix` and the PDF data's curated site fix are the same Standard fix
     /// (the default option's remediation) for the ARCH-TYPED-PATH-PARAMS-1 / parse-in-handler
     /// deviation, and a defect row stays strict in all of them.
     #[tokio::test]
@@ -6579,6 +6890,9 @@ mod tests {
                 assessed_sites: Some(3),
                 convention_option_id: Some("typed-extraction".to_string()),
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -6611,7 +6925,7 @@ mod tests {
             &HashMap::new(),
         );
         let findings_json_fix = export.findings[0].fix.clone().unwrap_or_default();
-        assert_eq!(findings_json_fix, workbook_fix, "findings.json fix");
+        assert_eq!(findings_json_fix, workbook_fix, "json/inspection.json fix");
 
         let pdf_fix = json
             .curated_findings
@@ -6744,7 +7058,7 @@ mod tests {
     /// FAILS BEFORE THE CHANGE: these rows sat on the one findings sheet, interleaved by
     /// severity with real defects, with the raw wire tag `convention_observed` in a `Kind`
     /// cell as the only indication of what they were, and the convention label reachable
-    /// nowhere in the workbook at all (it lived only in `findings.json`'s payload).
+    /// nowhere in the workbook at all (it lived only in `json/inspection.json`'s payload).
     #[test]
     fn req_pass3_conventions_sheet_reports_followed_and_no_convention_distinctly() {
         let report = report_with(all_five_kinds(), vec![]);
@@ -6880,7 +7194,7 @@ mod tests {
             "a not-assessed row must not take equal billing with the defects"
         );
 
-        // The producer's own diagnostic reaches `findings.json` (machine-readable) and NO
+        // The producer's own diagnostic reaches `json/inspection.json` (machine-readable) and NO
         // cell of the workbook.
         let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
         assert!(
@@ -7091,6 +7405,9 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: None,
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         dev.also_locations = vec![loc(18, false), loc(31, true)];
@@ -7100,6 +7417,8 @@ mod tests {
             FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "Cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         conv.also_locations = vec![crate::onboard::MergedLocation::site(

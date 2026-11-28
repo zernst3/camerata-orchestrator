@@ -218,16 +218,11 @@ async fn a_failed_batch_loses_only_that_batch() {
         48,
         "24 candidates of two sites each"
     );
-    assert_eq!(
-        outcome.not_assessed.len(),
-        1,
-        "one row for the whole remainder"
-    );
-    assert!(
-        outcome.not_assessed[0].detail.contains("16 of the 40"),
-        "{}",
-        outcome.not_assessed[0].detail
-    );
+    // One rule, one surface: the lost batch is a gap the ledger discloses, never held rows (the
+    // model did not look at it) and never a not_assessed row beside the confirmed ones.
+    assert!(outcome.findings.iter().all(|f| !f.needs_review));
+    assert!(outcome.not_assessed.is_empty());
+    assert_eq!(outcome.failed.len(), 1);
 }
 
 #[tokio::test]
@@ -297,6 +292,35 @@ async fn text_around_the_json_and_fences_are_tolerated() {
     });
     let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
     assert_eq!(outcome.findings.len(), 2);
+}
+
+#[tokio::test]
+async fn braces_in_prose_around_the_verdict_object_do_not_hide_it() {
+    let all = discount_repo("0.2", "0.15");
+    let stub = StubJudge::new(|req, _| {
+        Ok(format!(
+            "I compared {{both copies}} first.\n```json\n{}\n```\nNote the {{rate}} differs.",
+            verdicts(&asked_ids(req), "same_decision", "the discount")
+        ))
+    });
+    let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
+    assert_eq!(stub.call_count(), 1, "a readable reply needs no repair");
+    assert_eq!(outcome.findings.len(), 2);
+    assert!(outcome.failed.is_empty());
+}
+
+#[test]
+fn the_verdict_object_is_the_first_object_with_a_verdicts_array() {
+    use super::prompt::find_verdict_object;
+    // An object without a verdicts array is skipped, never loosened into a verdict object.
+    let text = r#"{"note":"x"} then {"verdicts":[{"id":"a","verdict":"same_decision"}]}"#;
+    assert!(find_verdict_object(text).is_some());
+    assert!(find_verdict_object(r#"{"verdicts":"same_decision"}"#).is_none());
+    assert!(find_verdict_object(r#"{"note":{"verdicts":1}}"#).is_none());
+    // Braces inside a string do not unbalance the scan.
+    let tricky = r#"{"verdicts":[{"id":"a}{","verdict":"different","concept":"}"}]}"#;
+    assert!(find_verdict_object(tricky).is_some());
+    assert!(find_verdict_object("{ never closed").is_none());
 }
 
 #[tokio::test]
@@ -403,12 +427,22 @@ async fn over_cap_candidates_are_counted_and_disclosed_not_judged() {
         64,
         "32 candidates of two sites each"
     );
-    // Disclosed: one row, with the count and the limit.
-    assert_eq!(outcome.not_assessed.len(), 1);
-    let row = &outcome.not_assessed[0];
-    assert!(row.detail.contains("7 of the 39"), "{}", row.detail);
-    assert!(row.detail.contains("limit of 160"), "{}", row.detail);
+    // Disclosed in the ledger, not as a second surface: the rule has judged candidates, so it
+    // carries no not_assessed row, and the partial-rule note says how many were not assessed.
+    assert!(outcome.not_assessed.is_empty());
     assert!(!c.fully_assessed());
+    let mut ledger = crate::scan_ledger::ScanLedger::default();
+    record_in_ledger(&mut ledger, "acme/shop", &outcome);
+    let entry = ledger.rule(RULE.id()).expect("the rule is in the ledger");
+    assert!(!entry.ran);
+    assert!(
+        entry
+            .skip_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("7 of 39")),
+        "{:?}",
+        entry.skip_reason
+    );
 }
 
 #[tokio::test]

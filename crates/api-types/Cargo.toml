@@ -20,3 +20,9 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 # thiserror is a general-purpose leaf crate (not a camerata-* dep), so it stays
 # consistent with the "pure serde leaf" rule.
 thiserror = { workspace = true }
+# `claude_cli::PromptWriter` writes a prompt to a child's stdin through `AsyncWrite` on a spawned
+# task. `io-util`, `rt` and `time` only: no process, no net, so this stays a leaf with no transport code.
+tokio = { workspace = true, features = ["io-util", "rt", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "rt", "macros", "time"] }

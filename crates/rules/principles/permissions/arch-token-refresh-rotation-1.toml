@@ -1,5 +1,5 @@
 id = "ARCH-TOKEN-REFRESH-ROTATION-1"
-version = 4
+version = 5
 title = "Access tokens are short-lived; a long-lived session is maintained by a rotating refresh token whose reuse is detected and revokes the whole token family"
 domain = "permissions"
 layer = "universal"
@@ -46,7 +46,7 @@ new refresh token and invalidates the one just spent) turns a single stolen refr
 problem: the legitimate client's next ordinary refresh, using the current valid token, is unaffected, but if an
 attacker has ALSO obtained a copy of that same refresh token and either party uses it after the other already has,
 one of the two refresh attempts will present an already-used token. Detecting that specific condition (reuse of a
-refresh token already consumed) and responding by revoking the ENTIRE token family — not just the one token — is
+refresh token already consumed) and responding by revoking the ENTIRE token family, not just the one token, is
 what actually surfaces the compromise: the legitimate user gets logged out and has to re-authenticate, which is a
 real signal, rather than the attacker's parallel use continuing undetected indefinitely alongside the legitimate
 session.

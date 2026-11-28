@@ -104,11 +104,19 @@ pub(crate) fn project_and_repo(
             format!("project not found: {project_id}"),
         )
     })?;
+    // The project's own repos, else a repo one of its saved inspections audited: a project still
+    // in onboarding owns its repos through its inspections (the same ownership reading uses,
+    // `read::project_owns_repo`), so it can delete the source of what it inspected.
     let repo = project
         .repos
         .iter()
         .find(|r| r.eq_ignore_ascii_case(repo_param.trim()))
         .cloned()
+        .or_else(|| {
+            super::read::is_owner_name(repo_param.trim())
+                .then(|| state.inspections.audited_spelling(&project.id, repo_param))
+                .flatten()
+        })
         .ok_or_else(|| {
             Refusal::conflict(
                 "repo_not_in_project",
@@ -134,11 +142,7 @@ pub(crate) fn inspected_entry(
     project_id: &str,
     repo: &str,
 ) -> Option<crate::inspections::InspectionEntry> {
-    state
-        .inspections
-        .list(project_id)
-        .into_iter()
-        .find(|e| e.sha_for(repo).is_some())
+    state.inspections.newest_with_sha(project_id, repo)
 }
 
 /// The deletion record that still stands, i.e. the newest deletion unless a re-fetch is newer.
@@ -178,7 +182,7 @@ pub(crate) fn deleted_record(
 /// The status of one repo of `project_id`. Never errors: every failure is a state.
 pub async fn source_status(state: &AppState, project_id: &str, repo: &str) -> RepoSourceStatus {
     let dir = resolve_dir(state, repo);
-    let deletion = state.source_records.latest_deletion(project_id, repo);
+    let mut deletion = state.source_records.latest_deletion(project_id, repo);
     let refetch = state.source_records.latest_refetch(project_id, repo);
 
     // A folder that is a git checkout decides the matter by what it IS, whatever the records say:
@@ -203,7 +207,14 @@ pub async fn source_status(state: &AppState, project_id: &str, repo: &str) -> Re
         };
     }
 
-    // No checkout on disk. The newest of {deletion, re-fetch} decides.
+    // No checkout on disk. A project with no record of its own (it only inspected the repo) hears
+    // the record of another project that owns it, as reading does.
+    if deletion.is_none() && refetch.is_none() {
+        deletion = super::read::other_projects_using(state, project_id, repo)
+            .iter()
+            .find_map(|p| deleted_record(state, &p.id, repo));
+    }
+    // The newest of {deletion, re-fetch} decides.
     if let Some(deletion) = newer_deletion(deletion, refetch.as_ref()) {
         return RepoSourceStatus::Deleted {
             repo: repo.to_string(),

@@ -261,7 +261,19 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
     // audit from the same draft.
     use_future(move || async move {
         if scan.peek().is_none() {
-            if let Some(draft) = load_onboarding_draft().await {
+            let loaded = match load_onboarding_draft().await {
+                Ok(draft) => draft,
+                Err(message) => {
+                    // An unreadable draft is said out loud, never taken for "nothing saved".
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        message.message,
+                    );
+                    None
+                }
+            };
+            if let Some(draft) = loaded {
                 // Rehydrate the repos textarea too — otherwise it reloads empty (showing the
                 // placeholder) even though the scan + rules restored, which reads as "the repos
                 // were lost." The repo set is exactly the scanned repos.
@@ -272,6 +284,15 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
             }
         }
     });
+
+    // The open project, for the Inspection settings: the start screen shows them BEFORE any run.
+    let active_project = use_resource(fetch_active_project);
+    let active_project = active_project.read().clone().flatten();
+    // What the settings last saved, shared with the results' run block (see `LiveProject`).
+    let mut live_project = use_signal(|| None::<ProjectView>);
+    use_context_provider(|| LiveProject(live_project));
+    use_context_provider(|| InspectionPanelOnScreen);
+    let run_in_flight = active_audit_job.read().is_some();
 
     let brownfield_cls = if path() == OnboardPath::Brownfield {
         "onboard-path on"
@@ -288,9 +309,9 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
     let steps: &[(&str, &str)] = match path() {
         OnboardPath::Brownfield => &[
             ("Point at the repo(s)", "Name the existing owner/repo(s) your token can reach, or browse to a local folder."),
-            ("Scan + propose per-repo rules", "Camerata detects each repo's stack and proposes a starter ruleset per repo — you review, you don't author from scratch."),
+            ("Propose rules per repo", "Camerata detects each repo's stack and proposes a starter ruleset per repo. You review it and do not author from scratch."),
             ("Pick rules", "Select rules per repo (project-level rules apply to all). Click a rule to read its options and choose an alternative."),
-            ("Audit (optional) + triage", "Optionally scan the code against your selected rules + the security floor, then triage findings (Unresolved / Ignored / Tech debt). Not required to finish onboarding."),
+            ("Inspect, then triage", "Inspect the code against your selected rules and the security floor, then triage the findings (Unresolved / Ignored / Tech debt). Not required to finish onboarding."),
             ("Add rules to repo(s)", "Write the governance files onto a camerata/onboard-governance branch in each local clone and push it — no PR (Open governance PR separately). Applying marks the repo onboarded."),
             ("Wire mechanical rules into CI", "The final step: add the selected mechanical rules to each repo's existing CI as enforced lint gates."),
         ],
@@ -304,10 +325,31 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
     rsx! {
         div { class: "onboard",
             div { class: "onboard-head",
-                p { class: "onboard-title", "Onboard repos into governance" }
-                p { class: "onboard-sub", "Bring a repo new to Camerata under the gate. This sets up the REPO's rules and CI enforcement — separate from a story's Investigation phase, which refines one piece of work." }
+                p { class: "onboard-title", "Inspection" }
+                p { class: "onboard-sub", "Choose rules, inspect, then review and export." }
                 // The inspection's start screen carries the "Guided inspection" switch.
                 crate::walkthrough::GuidedSwitch {}
+            }
+
+            // The Inspection settings: the finder, every model, where it runs and the client name,
+            // set before the first run and still here once rules are proposed. The one shared
+            // component, reading the project. It tells the run block below when something changes,
+            // so the estimate and the controls follow without a remount. Client name lives here
+            // only: the results below do not carry a second field.
+            if let Some(p) = active_project.as_ref() {
+                div { class: "onboard-inspection-settings",
+                    p { class: "scan-section-h", "Inspection settings" }
+                    // A list of one: `key` is honoured only among list children, so another
+                    // project is then a fresh host.
+                    for project_id in [p.id.clone()] {
+                        super::super::inspection_settings::InspectionSettingsHost {
+                            key: "{project_id}",
+                            project_id: project_id.clone(),
+                            run_in_flight,
+                            on_changed: move |changed: ProjectView| live_project.set(Some(changed)),
+                        }
+                    }
+                }
             }
 
             // Path chooser.
@@ -427,7 +469,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
                         },
                         "Browse for a local repo folder\u{2026}"
                     }
-                    p { class: "scan-section-sub", "Scans only the currently checked-out branch of each repo. Switch branches first if you want a different branch scanned." }
+                    p { class: "scan-section-sub", "Only the currently checked-out branch of each repo is read. Switch branches first if you want a different branch." }
                     ScanReposButton {
                         repos: scan_scope.clone(),
                         scanning: scanning(),
@@ -533,7 +575,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
     }
 }
 
-/// The brownfield "Scan repos" start button. Scanning reads the repos' source, so it is off for
+/// The brownfield "Propose rules" start button. Proposing rules reads the repos' source, so it is off for
 /// any listed repo whose source was deleted from this machine, with the way back beside it.
 #[component]
 pub(super) fn ScanReposButton(
@@ -558,7 +600,7 @@ pub(super) fn ScanReposButton(
                     on_scan.call(repos.clone());
                 }
             },
-            if scanning { "Scanning\u{2026}" } else { "Scan repos" }
+            if scanning { "Proposing rules\u{2026}" } else { "Propose rules" }
         }
     }
 }

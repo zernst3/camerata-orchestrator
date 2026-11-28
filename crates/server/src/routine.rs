@@ -259,6 +259,30 @@ impl RoutineStore {
         Some(updated)
     }
 
+    /// Remove the routines with these ids and persist. When the write fails nothing is removed
+    /// and the error is returned. Returns how many were removed.
+    pub fn remove_ids(&self, ids: &[String]) -> std::io::Result<usize> {
+        let mut items = self
+            .items
+            .lock()
+            .map_err(|_| std::io::Error::other("store mutex poisoned"))?;
+        let kept: Vec<Routine> = items
+            .iter()
+            .filter(|r| !ids.iter().any(|i| i == &r.id))
+            .cloned()
+            .collect();
+        let removed = items.len() - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        if let Some(p) = &self.path {
+            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(p.as_ref(), json)?;
+        }
+        *items = kept;
+        Ok(removed)
+    }
+
     /// Delete a routine by id. Returns true if one was removed.
     pub fn delete(&self, id: &str) -> bool {
         let Ok(mut guard) = self.items.lock() else {

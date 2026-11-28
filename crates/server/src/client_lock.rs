@@ -40,8 +40,7 @@ use crate::llm::ProjectBackend;
 /// `claude-haiku-4-5-20251001`). False for every OpenRouter id (`vendor/model`, `vendor/model:free`)
 /// and for an empty id. See the module docs for why this is an allowlist on the id's shape.
 pub fn is_anthropic_api_model(model: &str) -> bool {
-    let model = model.trim();
-    model.starts_with("claude-") && !model.contains('/') && !model.contains(':')
+    camerata_api_types::project::is_anthropic_model_id(model)
 }
 
 /// The reason a client engagement must not run with `backend` and `models` (each a
@@ -314,5 +313,28 @@ mod tests {
         assert_eq!(r.models[0].model, "claude-sonnet-5");
         assert!(!r.client_tooling_opt_in);
         assert!(!r.client_tooling_allowed);
+    }
+}
+
+#[cfg(test)]
+mod refusal_prefix_tests {
+    use super::*;
+
+    /// The desktop recognises a client-lock refusal of a scan by this prefix
+    /// (`crates/ui/src/cockpit/scan/banners_panels.rs`, `job_failure_kind`) and shows the
+    /// server's text under its own heading, with no backend-setup hint. Every refusal text must
+    /// keep it.
+    #[test]
+    fn every_scan_lock_refusal_starts_with_the_prefix_the_screen_matches() {
+        const PREFIX: &str = "This is a client engagement";
+        let cli = refusal(true, ProjectBackend::Cli, &[]).expect("cli is refused");
+        assert!(cli.starts_with(PREFIX), "{cli}");
+        let models = [(
+            "the scan".to_string(),
+            "some-other-provider/model".to_string(),
+        )];
+        let other = refusal(true, ProjectBackend::Api, &models).expect("a non-Anthropic model");
+        assert!(other.starts_with(PREFIX), "{other}");
+        assert_eq!(refusal(false, ProjectBackend::Cli, &[]), None);
     }
 }

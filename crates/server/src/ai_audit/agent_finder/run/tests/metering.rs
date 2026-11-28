@@ -116,3 +116,112 @@ async fn a_self_metering_agents_failure_advances_the_outage_streak_once() {
     let _ = go(&agent).await;
     assert_eq!(agent.meter.health().streak(), 1);
 }
+
+#[test]
+fn a_piece_stopped_mid_conversation_by_the_run_stop_keeps_its_outage_class() {
+    use super::super::piece::stop_class;
+    use camerata_llm::failure::FailureClass;
+    let meter = UsageMeter::default();
+    meter.health().note_failure(
+        camerata_llm::failure::FailureClass::AuthOrBilling,
+        "Your credit balance is too low to access the Anthropic API.",
+    );
+    let text = super::super::super::api_agent::run_stopped_text(&meter);
+    assert_eq!(
+        stop_class(&AgentStop::Failed(text.clone())),
+        FailureClass::OutageStop,
+        "the stop text must keep its class: {text}"
+    );
+    assert!(
+        text.contains("refused the request for billing (credit balance)"),
+        "{text}"
+    );
+    assert!(!text.contains("could not be reached"), "{text}");
+
+    // An unreachable provider keeps the plain sentence, and the same class.
+    let meter = UsageMeter::default();
+    let text = super::super::super::api_agent::run_stopped_text(&meter);
+    assert_eq!(
+        stop_class(&AgentStop::Failed(text.clone())),
+        FailureClass::OutageStop,
+        "{text}"
+    );
+    // A stop that is not the run's own keeps the class its text gives.
+    assert_eq!(
+        stop_class(&AgentStop::Failed("connection reset by peer".into())),
+        FailureClass::Transport
+    );
+}
+
+/// A stored finder record counts its input side with the cache reads and writes folded in (every
+/// transport stores it so). The stage row shows that figure once, not the figure plus the cache
+/// again. The record is a made-up sample: 100 plain, 800 read and 100 written is 1,000 in all.
+#[test]
+fn a_stored_finder_record_reads_back_as_one_row_without_counting_its_cache_twice() {
+    let line = crate::checkpoint::AbsorbedLine {
+        key: "src/a.rs".to_string(),
+        model: "acme-model-1".to_string(),
+        backend: "cli".to_string(),
+        cost_usd: Some(0.25),
+        input_tokens: Some(1_000),
+        output_tokens: Some(50),
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        text: String::new(),
+        members: Vec::new(),
+        batch_id: None,
+    };
+    let usage = super::super::line_usage(&line);
+    let meter = UsageMeter::default();
+    meter.record_stage(
+        crate::stage_telemetry::Stage::Finder,
+        &super::super::piece::response_of(&options(), &usage),
+    );
+    let telemetry = meter.stage_telemetry(0);
+    let row = telemetry
+        .stages
+        .iter()
+        .find(|s| s.stage == crate::stage_telemetry::Stage::Finder)
+        .expect("a finder row");
+    assert_eq!(row.usage.input_tokens, 1_000);
+    assert_eq!(row.usage.cache_read_input_tokens, 800);
+    assert_eq!(row.usage.cache_creation_input_tokens, 100);
+    assert!((row.usage.cost_usd - 0.25).abs() < 1e-9);
+}
+
+/// The meter's input figure for a turn is the turn's own input, which already holds its cache.
+#[test]
+fn a_turns_meter_input_is_its_own_input_figure() {
+    let usage = super::super::super::TurnUsage {
+        input_tokens: 1_000,
+        output_tokens: 0,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        cost_usd: None,
+    };
+    let resp = super::super::piece::response_of(&options(), &usage);
+    assert_eq!(resp.input_tokens, Some(1_000));
+}
+
+/// A turn with no stored cost is priced on its input with the cache counted once: the plain part
+/// at the input rate, the reads at the read rate, the writes at the write rate, plus the output.
+/// The expected figure is built from the model's own rates, so no price is written in here.
+#[test]
+fn a_turn_with_no_stored_cost_is_priced_with_its_cache_counted_once() {
+    let usage = super::super::super::TurnUsage {
+        input_tokens: 1_000,
+        output_tokens: 50,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        cost_usd: None,
+    };
+    let options = options();
+    let resp = super::super::piece::response_of(&options, &usage);
+    let rates = camerata_llm::model_registry::rates_for(&options.model, 1_000).expect("priced");
+    let expected = 100.0 * rates.input
+        + 800.0 * rates.cache_read
+        + 100.0 * rates.cache_write_5m
+        + 50.0 * rates.output;
+    let got = resp.cost_usd.expect("priced from its tokens");
+    assert!((got - expected).abs() < 1e-12, "{got} vs {expected}");
+}

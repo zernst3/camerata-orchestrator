@@ -15,9 +15,9 @@ pub enum CheckId {
     Secrets,
     /// Exactly the promised files and datasets are in the package.
     DatasetSet,
-    /// Every dataset's CSV agrees with its JSON; `findings.json` agrees with `all-findings`.
+    /// Every dataset's CSV agrees with its JSON; `json/inspection.json` agrees with `all-findings`.
     DatasetParity,
-    /// The PDF's rows and `findings.json`'s rows are the same set.
+    /// The PDF's rows and `json/inspection.json`'s rows are the same set.
     RowParity,
     /// The PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV
     /// agree with `json/all-findings.json` by severity AND kind (22d).
@@ -43,6 +43,10 @@ pub enum CheckId {
     /// out. Its operator-facing name says "Engine Check"; the label the README prints does not,
     /// because the Engine Check never appears in a client output.
     EngineCheckNoWithoutCorrection,
+    /// Every finding shown at critical severity, and every finding the finder was unsure of,
+    /// carries a reviewer's decision before a client package leaves. Runs over the in-memory
+    /// rows, like the evidence check.
+    CriticalOrUnsureWithoutDecision,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -53,6 +57,10 @@ pub enum CheckId {
     /// The review screen holds no change the decision store has not accepted. An undo whose
     /// revoke has not landed would export the decision the reviewer took back.
     UnsyncedReviewerChanges,
+    /// Every rule split between options with no convention carries the reviewer's decision (an
+    /// option accepted, or the rule left to the client) before a client package leaves (Zach,
+    /// 2026-11-20).
+    SplitRuleWithoutDecision,
     /// One fix, one row (item #1): every row has a Fix, the tickets and the Fix plan list the same
     /// Fixes once each, the PDF's escalation list has one entry for each escalated place, and its
     /// top three are three distinct Fixes.
@@ -64,11 +72,15 @@ pub enum CheckId {
     /// names (`camerata_api_types::rewrite_advisory`): owner ruling, fix or rewrite is the
     /// architect's call alone. Its label says neither, because the README a client reads lists it.
     InternalNotes,
+    /// No file names a folder of the operator's own machine: the home directory, the state, scan
+    /// copy and temp folders, or a repo's clone folder. Not `/home/` or the macOS home root as such: a
+    /// client's code quotes paths like `/home/node`.
+    OperatorPaths,
 }
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 18] = [
+    pub const ALL: [CheckId; 21] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -80,13 +92,16 @@ impl CheckId {
         CheckId::RestoredWithoutDecision,
         CheckId::SplitOutWithoutDecision,
         CheckId::EngineCheckNoWithoutCorrection,
+        CheckId::CriticalOrUnsureWithoutDecision,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
         CheckId::UnsyncedReviewerChanges,
+        CheckId::SplitRuleWithoutDecision,
         CheckId::FixParity,
         CheckId::ClientTextStyle,
         CheckId::InternalNotes,
+        CheckId::OperatorPaths,
     ];
 
     /// The name the operator reads (`[secrets]`, and the README's "Release checks" line).
@@ -103,13 +118,18 @@ impl CheckId {
             CheckId::RestoredWithoutDecision => "reviewer decision on restored findings",
             CheckId::SplitOutWithoutDecision => "reviewer decision on split-out problems",
             CheckId::EngineCheckNoWithoutCorrection => "reviewer correction on flagged findings",
+            CheckId::CriticalOrUnsureWithoutDecision => {
+                "reviewer decision on critical and unsure findings"
+            }
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
             CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
+            CheckId::SplitRuleWithoutDecision => "reviewer decision on split rules",
             CheckId::FixParity => "one fix per row",
             CheckId::ClientTextStyle => "client text style",
             CheckId::InternalNotes => "internal notes kept out",
+            CheckId::OperatorPaths => "operator paths kept out",
         }
     }
 }
@@ -117,7 +137,7 @@ impl CheckId {
 /// One fail-loud line. Never carries a secret: `evidence` is the redacted form only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
-    /// The file the problem is in (`findings.json`, `camerata-...-findings.xlsx`, `PDF data`).
+    /// The file the problem is in (`json/inspection.json`, `camerata-...-findings.xlsx`, `PDF data`).
     pub file: String,
     /// Where in that file (`findings[0].fix_specific`, `sheet "All Findings" cell V2`).
     pub location: String,
@@ -135,7 +155,7 @@ impl Problem {
         message: impl AsRef<str>,
         evidence: Option<String>,
     ) -> Self {
-        let clean = |text: &str| camerata_secrets::redact_str(text).into_owned();
+        let clean = |text: &str| camerata_secrets::redact_str_for_client(text).into_owned();
         Self {
             file: clean(file.as_ref()),
             location: clean(location.as_ref()),
@@ -227,7 +247,7 @@ impl GateFailure {
     /// it is client-controlled text like any other: a secret-shaped repo or branch name must not
     /// reach the failure block or the HTTP body through the one field no [`Problem`] wraps.
     pub fn stem_for_display(&self) -> String {
-        camerata_secrets::redact_str(&self.stem).into_owned()
+        camerata_secrets::redact_str_for_client(&self.stem).into_owned()
     }
 }
 

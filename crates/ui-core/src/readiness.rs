@@ -175,6 +175,343 @@ pub fn should_open_resolve_modal(readiness: ProjectReadiness) -> bool {
     readiness.is_paused()
 }
 
+/// A file the inspection could not read because it is over the 1 MB file size limit and Excluded
+/// by agreement does not name it, as the pre-start check lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverLimitFile {
+    /// The repo (`owner/repo`).
+    pub repo: String,
+    /// The path within the repo.
+    pub path: String,
+    /// The path as a pattern writes it (`repo/path`, or `owner/repo/path` when two repos share a
+    /// name), as the server states it. Empty when it did not.
+    pub display: String,
+    /// Why it cannot be read when that is not the file size limit ("has a line longer than
+    /// 100 KB"), as the server states it. Empty for the size limit.
+    pub reason: String,
+    pub bytes: u64,
+}
+
+/// What the pre-start check shows besides a deleted source: files over the 1 MB file size limit
+/// (a warning, never a hold), and patterns of Excluded by agreement that match no file (a hold: a
+/// pattern that names nothing is fixed or removed, so an intended exclusion is never silently
+/// void). A second source for the same Start button as [`ScanBlock`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OverLimitBlock {
+    /// The limit as a person reads it ("1 MB"), as the server states it.
+    pub limit: String,
+    pub files: Vec<OverLimitFile>,
+    /// Patterns that match no file, as written.
+    pub unmatched: Vec<String>,
+    /// One entry per unmatched pattern: why it never can, or empty.
+    pub unmatched_notes: Vec<String>,
+    /// Patterns naming a repo that was not read, each as `pattern (cannot be checked: ...)`.
+    /// They block Start and are never offered for removal.
+    pub unchecked: Vec<String>,
+    /// Patterns that match only files Camerata never reads anyway, with the reason: a warning
+    /// that never holds a start, with Remove pattern still offered.
+    pub warned: Vec<(String, String)>,
+    /// The largest over-limit file the secret checks still search, as a person reads it ("20 MB"),
+    /// as the server states it. Empty when the server did not say.
+    pub secret_limit: String,
+    /// Files that declare themselves generated, over every repo, and the non-blank lines in them:
+    /// not read, not billed, searched for secrets only. A statement, never a hold.
+    pub generated_files: usize,
+    pub generated_lines: usize,
+    /// The generated files' paths (repo-qualified when several repos are read), for the list.
+    pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet (repo-qualified when several
+    /// repos are read): not read, billed or searched for secrets. A statement, never a hold.
+    pub not_inspected_paths: Vec<String>,
+    /// Files of a type not inspected yet that the engine still opens for their declared runtime
+    /// and package versions: not billed or searched for secrets. Never called plainly not read.
+    pub not_inspected_versions_only_paths: Vec<String>,
+}
+
+/// How many generated paths the pre-start check names before it says how many more there are.
+pub const GENERATED_PATHS_SHOWN: usize = 10;
+
+impl OverLimitBlock {
+    /// This block with the files of a type not inspected yet the server named.
+    pub fn with_not_inspected_paths(mut self, paths: Vec<String>) -> Self {
+        self.not_inspected_paths = paths;
+        self
+    }
+
+    /// This block with the files of a type not inspected yet that are opened for declared
+    /// versions, as the server named them.
+    pub fn with_not_inspected_versions_only_paths(mut self, paths: Vec<String>) -> Self {
+        self.not_inspected_versions_only_paths = paths;
+        self
+    }
+
+    /// This block with the generated files' paths the server named.
+    pub fn with_generated_paths(mut self, paths: Vec<String>) -> Self {
+        self.generated_paths = paths;
+        self
+    }
+
+    /// This block with the generated files and lines the server counted.
+    pub fn with_generated(mut self, files: usize, lines: usize) -> Self {
+        self.generated_files = files;
+        self.generated_lines = lines;
+        self
+    }
+
+    /// This block with the secret search ceiling the server stated.
+    pub fn with_secret_limit(mut self, limit: &str) -> Self {
+        self.secret_limit = limit.trim().to_string();
+        self
+    }
+
+    /// Whether the block holds Start: patterns matching nothing and patterns that cannot be
+    /// checked do. Files over the limit and never-read patterns are warnings and do not.
+    pub fn blocks(&self) -> bool {
+        !self.unmatched.is_empty() || !self.unchecked.is_empty()
+    }
+}
+
+/// The block for `files` and `unmatched` patterns, or `None` when neither is left. Pure.
+pub fn over_limit_block(
+    limit: &str,
+    files: Vec<OverLimitFile>,
+    unmatched: Vec<String>,
+    unmatched_notes: Vec<String>,
+    unchecked: Vec<String>,
+    warned: Vec<(String, String)>,
+) -> Option<OverLimitBlock> {
+    (!files.is_empty() || !unmatched.is_empty() || !unchecked.is_empty() || !warned.is_empty())
+        .then(|| OverLimitBlock {
+            limit: limit.trim().to_string(),
+            files,
+            unmatched,
+            unmatched_notes,
+            unchecked,
+            warned,
+            secret_limit: String::new(),
+            generated_files: 0,
+            generated_lines: 0,
+            generated_paths: Vec::new(),
+            not_inspected_paths: Vec::new(),
+            not_inspected_versions_only_paths: Vec::new(),
+        })
+}
+
+/// The sentence for the generated files of the block: how many and how many lines are not read or
+/// billed, in the one phrase every surface uses ([`GENERATED_FILES_LABEL`]). With the security
+/// floor off (AI review only) nothing searches them, and the sentence says so. Empty when there
+/// are none.
+pub fn generated_text(block: &OverLimitBlock, floor_on: bool) -> String {
+    let n = block.generated_files;
+    if n == 0 {
+        return String::new();
+    }
+    let what = format!(
+        "{n} {} ({} {}) will not be read for the inspection",
+        if n == 1 { "file" } else { "files" },
+        group_thousands(block.generated_lines),
+        if block.generated_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        },
+    );
+    if floor_on {
+        format!(
+            "{what}, {}.",
+            camerata_api_types::audit::GENERATED_FILES_LABEL
+        )
+    } else {
+        format!("{what} or billed, and are not searched for secrets in this run: the security floor is off.")
+    }
+}
+
+/// `paths` joined with "; ", up to [`GENERATED_PATHS_SHOWN`] and then how many more ("a; b; and
+/// 3 more"). The one cap every pre-start and count path list uses. Empty when there are none.
+pub fn capped_paths(paths: &[String]) -> String {
+    let shown = paths
+        .iter()
+        .take(GENERATED_PATHS_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match paths.len().saturating_sub(GENERATED_PATHS_SHOWN) {
+        0 => shown,
+        more => format!("{shown}; and {more} more"),
+    }
+}
+
+/// The sentence for `n` hand-written files of a type the inspection does not read yet, as the
+/// command line's warning and the app's pre-start check state it. Empty when there are none.
+pub fn not_inspected_note(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(
+        "{n} {} will not be read for the inspection, billed or searched for secrets: {}.",
+        if n == 1 { "file" } else { "files" },
+        camerata_api_types::audit::NOT_INSPECTED_TYPE_LABEL
+    )
+}
+
+/// The sentence for `n` files of a type not inspected yet that the engine still opens for their
+/// declared runtime and package versions. Empty when there are none.
+pub fn not_inspected_versions_note(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(
+        "{n} {} not billed or searched for secrets: {}.",
+        if n == 1 { "file is" } else { "files are" },
+        camerata_api_types::audit::NOT_INSPECTED_VERSIONS_LABEL
+    )
+}
+
+/// The files of a type not inspected yet by path, capped by [`capped_paths`]. Empty when none.
+pub fn not_inspected_paths_line(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    format!("Not inspected yet: {}.", capped_paths(paths))
+}
+
+/// The generated files by path, as `camerata count` and the command line's warning name them, up
+/// to [`GENERATED_PATHS_SHOWN`] and then how many more. Empty when there are none.
+pub fn generated_paths_text(block: &OverLimitBlock) -> String {
+    if block.generated_paths.is_empty() {
+        return String::new();
+    }
+    let shown = block
+        .generated_paths
+        .iter()
+        .take(GENERATED_PATHS_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match block
+        .generated_paths
+        .len()
+        .saturating_sub(GENERATED_PATHS_SHOWN)
+    {
+        0 => format!("Generated: {shown}."),
+        more => format!("Generated: {shown}; and {more} more."),
+    }
+}
+
+/// `n` with a comma between thousands (1,234).
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A size as the pre-start check prints it, in the base the limit is written in (1 MB is
+/// 1,048,576 bytes): whole kilobytes under a megabyte, then megabytes to one decimal rounded UP,
+/// so a file over the limit never prints as 1.0 MB.
+pub fn format_file_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{} KB", (bytes + KB / 2) / KB)
+    } else {
+        let tenths = (bytes * 10).div_ceil(MB);
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
+}
+
+/// The sentence above the file list: what will happen to the files, never a hold. Empty when no
+/// file is over.
+pub fn over_limit_text(block: &OverLimitBlock, floor_on: bool) -> String {
+    let n = block.files.len();
+    if n == 0 {
+        return String::new();
+    }
+    let (file, it) = if n == 1 {
+        ("file", "It is")
+    } else {
+        ("files", "Each one is")
+    };
+    let limit = if block.limit.is_empty() {
+        "the file size limit".to_string()
+    } else {
+        format!("the {} file size limit", block.limit)
+    };
+    let cause = match block
+        .files
+        .iter()
+        .map(|f| f.reason.as_str())
+        .find(|r| !r.is_empty())
+    {
+        Some(reason) => format!("over {limit} or {reason}"),
+        None => format!("over {limit}"),
+    };
+    let fate = if floor_on {
+        let ceiling = if block.secret_limit.is_empty() {
+            "that is too large".to_string()
+        } else {
+            format!("over {}", block.secret_limit)
+        };
+        format!(
+            "{it} still searched for secrets by pattern checks, never by the model; one {ceiling} or not text is checked by name only, and so is one that does not fit in what is left of the run's secret search budget."
+        )
+    } else {
+        format!(
+            "{} not searched for secrets in this run: the security floor is off.",
+            if n == 1 { "It is" } else { "Each one is" }
+        )
+    };
+    format!("{n} {file} will not be read for the inspection ({cause}). {fate} A start is not held.")
+}
+
+/// The sentence above the unmatched patterns. Empty when there are none.
+pub fn unmatched_text(block: &OverLimitBlock) -> String {
+    match block.unmatched.len() {
+        0 => String::new(),
+        1 => "Excluded by agreement holds a pattern that matches no file. Remove it, or fix it in the inspection settings, before you start.".to_string(),
+        _ => "Excluded by agreement holds patterns that match no file. Remove them, or fix them in the inspection settings, before you start.".to_string(),
+    }
+}
+
+/// The sentence above the warned patterns. Empty when there are none.
+pub fn warned_text(block: &OverLimitBlock) -> String {
+    match block.warned.len() {
+        0 => String::new(),
+        1 => "Excluded by agreement holds a pattern that matches only files Camerata never reads, so it changes nothing. A start is not held; you can remove it.".to_string(),
+        _ => "Excluded by agreement holds patterns that match only files Camerata never reads, so they change nothing. A start is not held; you can remove them.".to_string(),
+    }
+}
+
+/// The sentence above the patterns that cannot be checked. Empty when there are none.
+pub fn unchecked_text(block: &OverLimitBlock) -> String {
+    match block.unchecked.len() {
+        0 => String::new(),
+        1 => "Excluded by agreement holds a pattern that cannot be checked. A start is refused until the repo it names can be read; it is not removed for you.".to_string(),
+        _ => "Excluded by agreement holds patterns that cannot be checked. A start is refused until the repos they name can be read; they are not removed for you.".to_string(),
+    }
+}
+
+/// One listed file: its pattern form and size, `repo/path (size)`.
+pub fn over_limit_file_line(file: &OverLimitFile) -> String {
+    let name = if file.display.is_empty() {
+        format!("{}/{}", file.repo, file.path)
+    } else {
+        file.display.clone()
+    };
+    if file.reason.is_empty() {
+        format!("{name} ({})", format_file_size(file.bytes))
+    } else {
+        format!("{name} ({}, {})", format_file_size(file.bytes), file.reason)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +712,262 @@ mod tests {
             unresolved.is_empty(),
             "a fully-resolved repo list must produce an empty unresolved set (ResolveModal early-return guard)"
         );
+    }
+
+    #[test]
+    fn nothing_over_the_limit_and_no_void_pattern_is_no_block() {
+        assert_eq!(
+            over_limit_block(
+                "1 MB",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new()
+            ),
+            None
+        );
+    }
+
+    fn file(repo: &str, path: &str, display: &str, bytes: u64) -> OverLimitFile {
+        OverLimitFile {
+            repo: repo.into(),
+            path: path.into(),
+            display: display.into(),
+            reason: String::new(),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn the_block_names_each_file_in_pattern_form_with_its_size() {
+        let files = vec![
+            file("acme/api", "seeds/data.js", "api/seeds/data.js", 1_258_291),
+            file("acme/api", "dump.sql", "api/dump.sql", 6_100_000),
+        ];
+        let block = over_limit_block(
+            "1 MB",
+            files.clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            over_limit_text(&block, true),
+            "2 files will not be read for the inspection (over the 1 MB file size limit). Each one is still searched for secrets by pattern checks, never by the model; one that is too large or not text is checked by name only, and so is one that does not fit in what is left of the run's secret search budget. A start is not held."
+        );
+        assert_eq!(
+            over_limit_file_line(&files[0]),
+            "api/seeds/data.js (1.2 MB)"
+        );
+        let one = over_limit_block(
+            "1 MB",
+            files[..1].to_vec(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(over_limit_text(&one, true).starts_with(
+            "1 file will not be read for the inspection (over the 1 MB file size limit)."
+        ));
+        assert!(over_limit_text(&one, true).contains("It is still searched for secrets"));
+        assert!(over_limit_text(
+            &over_limit_block("", files, Vec::new(), Vec::new(), Vec::new(), Vec::new()).unwrap(),
+            true
+        )
+        .starts_with("2 files will not be read for the inspection (over the file size limit)."));
+    }
+
+    #[test]
+    fn a_file_over_the_limit_never_prints_as_one_point_zero() {
+        assert_eq!(format_file_size(1_048_576), "1.0 MB", "exactly the limit");
+        assert_eq!(format_file_size(1_048_577), "1.1 MB");
+        assert_eq!(format_file_size(1_258_291), "1.2 MB");
+    }
+
+    #[test]
+    fn a_pattern_that_matches_nothing_blocks_with_its_own_words() {
+        let block = over_limit_block(
+            "1 MB",
+            Vec::new(),
+            vec!["app/sedes/**".into()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(over_limit_text(&block, true).is_empty());
+        assert!(unmatched_text(&block)
+            .starts_with("Excluded by agreement holds a pattern that matches no file."));
+        assert_eq!(
+            over_limit_file_line(&file("acme/api", "a.js", "", 5)),
+            "acme/api/a.js (5 B)",
+            "no display from the server: the repo and path"
+        );
+    }
+
+    #[test]
+    fn a_file_with_a_long_line_is_listed_with_its_reason_and_the_text_says_both_causes() {
+        let mut wide = file("acme/api", "d/wide.js", "api/d/wide.js", 150_000);
+        wide.reason = "has a line longer than 97 KB".to_string();
+        assert_eq!(
+            over_limit_file_line(&wide),
+            "api/d/wide.js (146 KB, has a line longer than 97 KB)"
+        );
+        let block = over_limit_block(
+            "1 MB",
+            vec![wide],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            over_limit_text(&block, true),
+            "1 file will not be read for the inspection (over the 1 MB file size limit or has a line longer than 97 KB). It is still searched for secrets by pattern checks, never by the model; one that is too large or not text is checked by name only, and so is one that does not fit in what is left of the run's secret search budget. A start is not held."
+        );
+    }
+
+    /// A pattern in a never-read folder is a warning: it makes a block (so it is listed) but never
+    /// holds the start; a pattern that matches nothing, a file over the limit, or a pattern that
+    /// cannot be checked still does.
+    #[test]
+    fn a_warned_pattern_is_listed_but_never_holds_the_start() {
+        let warned = vec![(
+            "api/node_modules/**".to_string(),
+            "node_modules is never read, so this pattern is not needed".to_string(),
+        )];
+        let only_warned = over_limit_block(
+            "1 MB",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            warned.clone(),
+        )
+        .unwrap();
+        assert!(!only_warned.blocks());
+        // A file over the limit is a warning too: listed, never a hold.
+        let only_files = over_limit_block(
+            "1 MB",
+            vec![file("acme/api", "d/big.js", "api/d/big.js", 2_000_000)],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(!only_files.blocks());
+        assert_eq!(
+            warned_text(&only_warned),
+            "Excluded by agreement holds a pattern that matches only files Camerata never reads, so it changes nothing. A start is not held; you can remove it."
+        );
+        let with_unmatched = over_limit_block(
+            "1 MB",
+            Vec::new(),
+            vec!["api/typo/**".to_string()],
+            vec![String::new()],
+            Vec::new(),
+            warned,
+        )
+        .unwrap();
+        assert!(with_unmatched.blocks());
+    }
+
+    /// Round 1: the generated files are named by path, capped, with how many more.
+    #[test]
+    fn the_generated_paths_are_listed_up_to_the_cap_and_then_counted() {
+        assert!(generated_paths_text(&OverLimitBlock::default()).is_empty());
+        let few = OverLimitBlock::default()
+            .with_generated(2, 5)
+            .with_generated_paths(vec!["a/One.Designer.cs".into(), "b/two.go".into()]);
+        assert_eq!(
+            generated_paths_text(&few),
+            "Generated: a/One.Designer.cs; b/two.go."
+        );
+        let many: Vec<String> = (0..13).map(|i| format!("g/f{i}.cs")).collect();
+        let text = generated_paths_text(&OverLimitBlock::default().with_generated_paths(many));
+        assert!(text.contains("g/f9.cs"), "{text}");
+        assert!(!text.contains("g/f10.cs"), "{text}");
+        assert!(text.ends_with("; and 3 more."), "{text}");
+    }
+
+    #[test]
+    fn files_opened_for_versions_are_never_called_not_read() {
+        assert!(not_inspected_versions_note(0).is_empty());
+        let note = not_inspected_versions_note(2);
+        assert_eq!(
+            note,
+            "2 files are not billed or searched for secrets: this file type is not inspected yet; \
+             only its declared runtime and package versions are checked."
+        );
+        assert!(!note.contains("not read"), "{note}");
+    }
+
+    /// GitHub #338: files of a type not inspected yet are stated with the reason and listed with
+    /// the same cap as the generated files.
+    #[test]
+    fn files_of_a_type_not_inspected_yet_are_stated_and_capped() {
+        assert!(not_inspected_note(0).is_empty());
+        assert!(not_inspected_paths_line(&[]).is_empty());
+        assert_eq!(
+            not_inspected_note(1),
+            "1 file will not be read for the inspection, billed or searched for secrets: this \
+             file type is not inspected yet."
+        );
+        let many: Vec<String> = (0..12).map(|i| format!("app/v{i}.cshtml")).collect();
+        let line = not_inspected_paths_line(&many);
+        assert!(
+            line.starts_with("Not inspected yet: app/v0.cshtml; "),
+            "{line}"
+        );
+        assert!(line.contains("app/v9.cshtml"), "{line}");
+        assert!(!line.contains("app/v10.cshtml"), "{line}");
+        assert!(line.ends_with("; and 2 more."), "{line}");
+    }
+
+    /// With the security floor off the warning must not say the file is searched; and the ceiling
+    /// is the one the server sends, printed as "over 20 MB".
+    #[test]
+    fn the_warning_follows_the_floor_and_names_the_secret_search_ceiling() {
+        let block = over_limit_block(
+            "1 MB",
+            vec![file("acme/api", "d/big.js", "api/d/big.js", 2_000_000)],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_secret_limit("20 MB");
+        let on = over_limit_text(&block, true);
+        assert!(
+            on.contains("one over 20 MB or not text is checked by name only"),
+            "{on}"
+        );
+        assert!(!on.contains("too large"), "{on}");
+        let off = over_limit_text(&block, false);
+        assert!(
+            off.contains("not searched for secrets in this run: the security floor is off"),
+            "{off}"
+        );
+        assert!(!off.contains("still searched"), "{off}");
+    }
+    #[test]
+    fn the_generated_sentence_counts_files_and_lines_in_the_one_coverage_phrase() {
+        let block = OverLimitBlock::default().with_generated(1, 1);
+        assert_eq!(
+            generated_text(&block, true),
+            "1 file (1 line) will not be read for the inspection, generated: searched for secrets only, not billed."
+        );
+        let block = OverLimitBlock::default().with_generated(4, 1_234_567);
+        assert!(generated_text(&block, true).starts_with("4 files (1,234,567 lines)"));
+        assert!(generated_text(&block, false).contains("not searched for secrets in this run"));
+        assert!(generated_text(&OverLimitBlock::default(), true).is_empty());
     }
 }

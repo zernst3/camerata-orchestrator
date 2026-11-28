@@ -7,7 +7,7 @@
 
 use camerata_server::scan_routing::{audit_rules, files_for_rule};
 
-/// The three families of scoped rule, each with the files it MUST still be sent (the surfaces the
+/// The families of scoped rule, each with the files it MUST still be sent (the surfaces the
 /// rule's own text reads, including the non-SQL migration tools that embed SQL) and a file it must
 /// NOT be sent (the saving).
 #[derive(Clone, Copy)]
@@ -24,6 +24,8 @@ enum Family {
     ReactEffects,
     /// ECMAScript files with async functions or promise chains.
     AsyncCode,
+    /// Terraform and OpenTofu configuration files.
+    Terraform,
 }
 
 impl Family {
@@ -161,6 +163,13 @@ impl Family {
                     "useDeepCompareEffect(() => { ch.subscribe(); }, [opts]);",
                 ),
             ],
+            Family::Terraform => vec![
+                ("main.tf", "resource \"aws_s3_bucket\" \"b\" {}"),
+                ("infra/modules/db/main.tf", ""),
+                ("infra/main.tf.json", "{}"),
+                ("envs/prod.tfvars", "env = \"prod\""),
+                ("envs/prod.auto.tfvars.json", "{}"),
+            ],
             Family::AsyncCode => vec![
                 (
                     "src/components/SaveButton.tsx",
@@ -235,6 +244,14 @@ const REVIEWED: &[(&str, Family)] = &[
     ("ARCH-BOUNDED-LIST-READS-1", Family::ListQueries),
     ("JAVASCRIPT-REACT-EFFECT-CLEANUP-1", Family::ReactEffects),
     ("JAVASCRIPT-ASYNC-REJECTION-HANDLED-1", Family::AsyncCode),
+    ("IAC-TERRAFORM-ENCRYPTION-AT-REST-1", Family::Terraform),
+    ("IAC-TERRAFORM-DATABASE-EXPOSURE-1", Family::Terraform),
+    ("IAC-TERRAFORM-ACCESS-LOGGING-1", Family::Terraform),
+    ("IAC-TERRAFORM-DELETION-PROTECTION-1", Family::Terraform),
+    ("IAC-TERRAFORM-WILDCARD-IAM-POLICY-1", Family::Terraform),
+    ("IAC-TERRAFORM-PUBLIC-BUCKET-1", Family::Terraform),
+    ("IAC-TERRAFORM-REMOTE-STATE-1", Family::Terraform),
+    ("IAC-TERRAFORM-NETWORK-EXPOSURE-1", Family::Terraform),
 ];
 
 async fn corpus() -> camerata_rules::RuleSet {

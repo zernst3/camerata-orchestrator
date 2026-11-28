@@ -1,5 +1,5 @@
 id = "ARCH-REFUND-AUTHORIZATION-1"
-version = 4
+version = 5
 title = "A refund or credit is authorized against the specific charge's owner and bounded by that charge's remaining refundable amount"
 domain = "api-layer"
 layer = "universal"
@@ -22,13 +22,13 @@ question = "Does a refund/credit endpoint verify both that the caller is authori
 default = "scoped-authorization-and-amount-bound"
 why = """
 A refund endpoint typically takes a charge or order identifier plus an amount, and two independent checks have to
-both hold before it runs: first, that the caller is authorized to act on THAT SPECIFIC charge — not merely
-authorized to issue refunds in the abstract — and second, that the amount requested does not exceed what remains
+both hold before it runs: first, that the caller is authorized to act on THAT SPECIFIC charge, not merely
+authorized to issue refunds in the abstract, and second, that the amount requested does not exceed what remains
 refundable on it. Missing the first check is CWE-639 / OWASP API1:2023's object-level-authorization defect applied
 to money movement: a staff account scoped to refund orders within their own store, or a customer-facing 'request a
 refund on your own order' flow, that does not verify the referenced charge actually belongs to the caller's scope
 lets the caller refund (or trigger a credit against) a charge they have no legitimate claim over, simply by
-supplying a different charge/order id in the request — the classic IDOR shape, with a monetary payload instead of a
+supplying a different charge/order id in the request. The classic IDOR shape, with a monetary payload instead of a
 data leak. Missing the second check is a distinct failure even for a correctly-scoped caller: without the endpoint
 tracking (or querying the provider for) how much of a charge has ALREADY been refunded, a refund request can be
 issued more than once, or for more than the original amount, resulting in a double-refund or over-refund that moves
@@ -50,7 +50,7 @@ not belong to the caller's scope (expect rejection) and by attempting to refund 
 charge until the cumulative total exceeds the original amount (expect the excess rejected).
 """
 effort = "medium"
-why = "Both checks reuse data the refund flow already needs to look up (the charge record, its owner, its refund history), so the cost is wiring two guard clauses rather than building new infrastructure — against a failure mode (refund an arbitrary charge, or refund the same charge repeatedly) that moves real money."
+why = "Both checks reuse data the refund flow already needs to look up (the charge record, its owner, its refund history), so the cost is wiring two guard clauses rather than building new infrastructure, against a failure mode (refund an arbitrary charge, or refund the same charge repeatedly) that moves real money."
 
 [[option]]
 id = "role-permission-check-only-no-amount-bound"

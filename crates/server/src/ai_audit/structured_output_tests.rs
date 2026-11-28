@@ -21,6 +21,7 @@ pub(super) fn response(text: &str, backend: &str, model: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: model.to_string(),
         backend: backend.to_string(),
@@ -585,6 +586,7 @@ async fn seeded<F: std::future::Future>(fut: F) -> F::Output {
 
 fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("o/r".to_string(), repo_dir.to_path_buf())],
         models: ModelsRecord {
@@ -596,6 +598,8 @@ fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),

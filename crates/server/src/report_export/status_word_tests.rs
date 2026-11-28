@@ -40,17 +40,17 @@ fn a_preview_row_never_prints_a_baseline_status() {
     let reviewed = ReviewedReport::unreviewed(&sealed, &HashMap::new());
     let opts = empty_opts();
 
-    // findings.json
+    // json/inspection.json
     let json = build_report_json(&reviewed, None, &opts);
     let fe = crate::xlsx_export::build_findings_export(&reviewed, None, &json, &HashMap::new());
     let findings_json = serde_json::to_string(&fe.findings).expect("json");
     assert!(
         findings_json.contains("SYN-TOOL-1"),
-        "anti-vacuity: the tool row is in findings.json"
+        "anti-vacuity: the tool row is in json/inspection.json"
     );
     assert!(
         !findings_json.contains("baseline"),
-        "findings.json prints no baseline word: {findings_json}"
+        "json/inspection.json prints no baseline word: {findings_json}"
     );
     assert!(findings_json.contains("\"status\":\"active\""));
 

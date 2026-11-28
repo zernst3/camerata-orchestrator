@@ -35,12 +35,19 @@ pub(super) enum Reply {
     Missing,
     /// A failed item that was nevertheless billed (a model refusal).
     Refused,
+    /// A failed item the provider refused for credit (not billed): [`CREDIT_ERROR`].
+    CreditError,
 }
+
+/// The provider's row error when the account has no credit left. It is not billed.
+pub(super) const CREDIT_ERROR: &str =
+    "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing.";
 
 fn response(text: &str, truncated: bool, cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api/batch".to_string(),
@@ -192,7 +199,11 @@ impl FakeBatch {
             })
             .collect()
     }
-    fn submitted_ids(&self) -> Vec<Vec<String>> {
+    /// Real-time calls so far (the end-of-run second try and the truncation retry).
+    pub(super) fn realtime_calls(&self) -> usize {
+        self.realtime.calls.load(Ordering::SeqCst)
+    }
+    pub(super) fn submitted_ids(&self) -> Vec<Vec<String>> {
         self.submissions
             .lock()
             .unwrap()
@@ -285,21 +296,23 @@ impl BatchApi for FakeBatch {
                         billed: Some(self.reply("", false)),
                         ..row(None, Some("the model refused this request (refusal)"))
                     }),
+                    Reply::CreditError => Some(row(None, Some(CREDIT_ERROR))),
                 }
             })
             .collect())
     }
 }
 
-fn eff(batch_default: bool) -> EfficiencyConfig {
+pub(super) fn eff(batch_default: bool) -> EfficiencyConfig {
     EfficiencyConfig {
         batch_default,
         ..EfficiencyConfig::default()
     }
 }
 
-fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
+pub(super) fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -1225,4 +1238,27 @@ async fn a_billed_batch_refusal_is_not_resubmitted_or_sent_again_in_real_time() 
         0,
         "no real-time second try"
     );
+}
+
+/// Batch mode (the API backend's default, `resolve_scan_mode`) has no per-call time: the stage's
+/// run figures come from the round, so a batched scan still saves a span and a wait.
+#[tokio::test(start_paused = true)]
+async fn a_batched_scan_stage_records_its_round_span() {
+    let api = FakeBatch::new(|_, _| Reply::Ok);
+    let m = meter(eff(true), None);
+    let _ = run(&api, &m).await;
+    let t = m.stage_telemetry(0);
+    let scan = &t
+        .stages
+        .iter()
+        .find(|s| s.stage == crate::stage_telemetry::Stage::ScanPass)
+        .expect("the scan stage ran")
+        .usage;
+    let (first, last) = (scan.first_call_unix_ms, scan.last_call_unix_ms);
+    assert!(
+        first.is_some() && last.is_some(),
+        "the round span is recorded"
+    );
+    assert!(last >= first);
+    assert_eq!(scan.busy_ms, 0, "batch rows have no call time");
 }

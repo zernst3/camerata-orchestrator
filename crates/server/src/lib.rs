@@ -18,7 +18,7 @@
 //!   [`dep_audit`], `mechanical_gate` (private) and [`suppression`].
 //! - **The client deliverable.** [`report_export`] builds the PDF's JSON and owns the
 //!   severity choke-point; [`xlsx_export`] builds the kind-partitioned workbook and
-//!   `findings.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
+//!   `json/inspection.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
 //!   row set cannot be mutated after sealing. See `docs/TECHNICAL.md` section 6a.
 //! - **Self-measurement.** [`scan_ledger`] records what actually ran;
 //!   [`integrity_gate`] turns that into a verdict with an exit code. See
@@ -47,14 +47,17 @@ pub mod client_text;
 pub mod connections;
 /// H5: the three-pass consensus option (off by default).
 pub mod consensus;
+pub mod conventions;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
 /// resulting Camerata project. See the module doc comment for the full flow.
 pub mod create_app;
+pub mod csv_cell;
 pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;
+pub mod diagnostic_bundle;
 pub mod draft;
 pub mod edits;
 pub mod enforcement_ledger;
@@ -127,6 +130,7 @@ mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
 mod scan_cli_version;
+pub mod scan_mirror;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
@@ -134,6 +138,8 @@ pub mod seed;
 pub mod severity_bounds;
 pub mod stage_telemetry;
 pub mod stall_sweep;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_defects;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and
 /// `docs/design/2026-07-27_product-export.md`.
@@ -207,6 +213,10 @@ pub mod workspace;
 mod routes;
 pub use routes::*;
 
+use camerata_api_types::package_paths::{
+    self, ALL_FINDINGS_CSV, ALL_FINDINGS_JSON, CSV_DIR, DECISIONS_JSON, INSPECTION_JSON, JSON_DIR,
+    MANIFEST_JSON, README_TXT, TICKETS_CSV,
+};
 use std::sync::Arc;
 
 use axum::{
@@ -496,17 +506,27 @@ impl AppState {
     }
 
     /// The client-engagement lock for a step whose model id comes from the request (the routine
-    /// prompt draft, the escalation review chat, the chat), checked against the ACTIVE project.
+    /// prompt draft, the escalation review chat), checked against the ACTIVE project.
     /// [`AppState::llm_for_project`] is handed no model and so cannot check one: without this a
     /// non-Anthropic id would be routed to OpenRouter by `build_completer`. A blank id is the
     /// server default (a Claude model) and passes; with no active project there is no client
     /// code in the step's context and nothing is refused.
     pub fn client_lock_step_model_refusal(&self, model: &str) -> Option<String> {
+        self.client_lock_model_refusal_for(self.projects.active().as_ref(), model)
+    }
+
+    /// [`AppState::client_lock_step_model_refusal`] for an explicit project (`None` = no project,
+    /// nothing refused). The chat uses this with the project its request names.
+    pub fn client_lock_model_refusal_for(
+        &self,
+        project: Option<&crate::project::Project>,
+        model: &str,
+    ) -> Option<String> {
         let model = model.trim();
         if model.is_empty() {
             return None;
         }
-        let p = self.projects.active()?;
+        let p = project?;
         crate::client_lock::refusal(
             p.client_engagement,
             p.backend,
@@ -515,14 +535,23 @@ impl AppState {
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
     }
 
-    /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
-    /// project, so `settings.chat_backend` decides.
-    ///
-    /// When the ACTIVE project is a client engagement, the chat backend setting must pass the
-    /// client-engagement lock too (a `cli` chat is refused with the lock's message): the chat can
-    /// carry that project's context, and the setting is global, not the project's own.
+    /// The `Llm` for the CHAT assistant when it is NOT tied to a project (home screen): the Chat
+    /// backend setting decides and no client lock applies, because the request carries no
+    /// project data. Same as `chat_llm_for(None)`.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
-        if let Some(p) = self.projects.active() {
+        self.chat_llm_for(None)
+    }
+
+    /// The `Llm` for the chat assistant, locked by ONE project: the project the chat request
+    /// names (its `project_id`), NOT the server's last active project. With `Some(project)` a
+    /// client engagement refuses a `cli` chat with the lock's message; with `None` the chat runs
+    /// on the Chat backend setting and nothing is locked (the chat then carries no project
+    /// layer).
+    pub fn chat_llm_for(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> Result<crate::llm::Llm, String> {
+        if let Some(p) = project {
             let backend = self.settings.chat_backend();
             if let Some(why) = crate::client_lock::refusal(p.client_engagement, backend, &[]) {
                 return Err(format!(
@@ -792,17 +821,24 @@ impl AppState {
             }
         }
 
+        // The project's exclusion list also bounds what grounding reads; a list that cannot be
+        // used grounds nothing from the checkout rather than reading excluded files.
+        let digest_scope = crate::onboard::scope::ScanScope::of_project(Some(&project));
         let repo_digests = if resolved.is_empty() {
             Vec::new()
-        } else {
+        } else if let Ok(digest_scope) = digest_scope {
             tokio::task::spawn_blocking(move || {
                 resolved
                     .iter()
-                    .filter_map(|(repo, dir)| crate::grounding::render_repo_digest(repo, dir))
+                    .filter_map(|(repo, dir)| {
+                        crate::grounding::render_repo_digest(repo, dir, &digest_scope)
+                    })
                     .collect::<Vec<String>>()
             })
             .await
             .unwrap_or_default()
+        } else {
+            Vec::new()
         };
 
         // ── Soft context (#112): the product brief + the enabled operating principles. The brief
@@ -880,6 +916,31 @@ impl AppState {
     /// reads AND the gateway write-jail — `gated_write` stays the only (gated) write path.
     pub(crate) fn active_repo_dir(&self) -> Option<std::path::PathBuf> {
         self.active_repo_dirs().into_iter().next()
+    }
+
+    /// The folders of this machine that hold the project's repos, for the release gate: the
+    /// workspace root, and each repo's resolved folder (its own path override or
+    /// `<workspace_root>/<owner>/<repo>`), whether or not the folder exists now. A client file
+    /// that names one is refused.
+    pub(crate) fn export_operator_roots(
+        &self,
+        project: &crate::project::Project,
+    ) -> Vec<std::path::PathBuf> {
+        let workspace_root = self.settings.workspace_root();
+        let mut roots: Vec<std::path::PathBuf> = workspace_root
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        for repo in &project.repos {
+            let override_path = self.settings.repo_path(repo);
+            roots.extend(crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo,
+            ));
+        }
+        roots
     }
 
     /// Resolve the local clones of ALL of the active project's repos — the UNION read scope
@@ -1095,6 +1156,30 @@ impl AppState {
         guard.clone()
     }
 
+    /// Drop the in-memory copies of a project's last completed scan: its entry in `last_scan`,
+    /// and the project-agnostic `recent_scan` when that scan covered one of the project's repos
+    /// (it may be this project's). Returns how many copies were dropped. Used when a project and
+    /// all its data are deleted; the persisted inspections are removed by the caller.
+    pub(crate) fn forget_project_scans(&self, project_id: &str, repos: &[String]) -> usize {
+        let mut dropped = 0;
+        let mut last = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
+        if last.remove(project_id).is_some() {
+            dropped += 1;
+        }
+        drop(last);
+        let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
+        let covers_project = recent.as_ref().is_some_and(|r| {
+            r.repos
+                .iter()
+                .any(|scanned| repos.iter().any(|own| own.eq_ignore_ascii_case(scanned)))
+        });
+        if covers_project {
+            *recent = None;
+            dropped += 1;
+        }
+        dropped
+    }
+
     /// Build state seeded with the representative spine + seeded open clarifications,
     /// native provider. Used by tests and the creds-free demo default.
     pub fn seeded() -> Self {
@@ -1157,7 +1242,15 @@ impl AppState {
         // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
         // resolves its `Llm` from `project.backend` and the chat path from
         // `state.settings.chat_backend()`, both read directly at the call seam.
-        self.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
+        self.draft = crate::draft::DraftStore::at(
+            dir.join("onboarding-draft.json"),
+            &self
+                .projects
+                .list()
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+        );
         self.uow = crate::uow::UowStore::at(dir.join("uow.json"));
         // Clarifications persist too: every open structured question is a resumable
         // pause point, so the user can leave and come back to any unanswered question
@@ -1451,6 +1544,18 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/dev-run-spend-limit",
             post(set_dev_run_spend_limit_handler),
         )
+        .route(
+            "/api/projects/:id/scan-exclusions",
+            post(set_scan_exclusions_handler),
+        )
+        .route(
+            "/api/projects/:id/scan-exclusions/add",
+            post(add_scan_exclusion_handler),
+        )
+        .route(
+            "/api/projects/:id/scan-exclusions/remove",
+            post(remove_scan_exclusion_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",
@@ -1523,6 +1628,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/decisions/:decision_id/revoke",
             post(crate::decisions::routes::revoke_decision),
+        )
+        .route(
+            "/api/projects/:id/standards",
+            post(crate::decisions::routes::post_standard)
+                .get(crate::decisions::routes::get_standards),
+        )
+        .route(
+            "/api/projects/:id/standards/:ruling_id/revoke",
+            post(crate::decisions::routes::revoke_standard),
         )
         .route(
             "/api/projects/:id/decisions/:decision_id/needed-me",
@@ -1709,6 +1823,14 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/repos/:repo/source/delete",
             post(crate::client_source::delete::delete),
         )
+        .route(
+            "/api/projects/:id/delete-all-preview",
+            post(crate::client_source::delete_project::delete_all_preview),
+        )
+        .route(
+            "/api/projects/:id/delete-all",
+            post(crate::client_source::delete_project::delete_all_handler),
+        )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
@@ -1882,6 +2004,14 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── Triage log (the operator's file, never in the client package) ─────
+        .route(
+            concat!(
+                "/api/projects/:id/",
+                camerata_api_types::pkg_triage_log_file!()
+            ),
+            get(export_triage_log),
+        )
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
@@ -2037,6 +2167,15 @@ fn trigger_anthropic_refresh_if_needed(
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
+    // A `claude` call's system prompt file is removed when the call ends, or at shutdown
+    // (`kill_inflight_claude`). A SIGKILL, a crash or a power cut skips both: remove what a dead
+    // process left, so client data never outlives the process that wrote it. It is per call, so
+    // this and the shutdown removal are the whole lifecycle: deleting a project's client source
+    // or the project itself has no such file to find (none is kept between calls).
+    let swept = camerata_api_types::claude_cli::sweep_leftover_system_prompts();
+    if swept > 0 {
+        println!("removed {swept} leftover system prompt folder(s) from an earlier run");
+    }
     let state = AppState::from_env();
 
     // OpenRouter model-registry refresh, trigger 1 of 3 (startup). The other two are the
@@ -2070,7 +2209,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
     // comes due. Spawned here (not in `router`) so tests that build the router don't
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
-    crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
+    crate::auto_fire::spawn_routine_scheduler(
+        state.routines.clone(),
+        state.escalations.clone(),
+        state.source_ops.clone(),
+    );
 
     // Stall sweep (LIFECYCLE-6): periodically auto-cancel AUTONOMOUS runs that have stalled
     // (no activity past the active project's routine threshold). Watched runs stay alert-only.
@@ -2250,6 +2393,7 @@ async fn onboard_audit(
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
     let run_controls = req.run_controls_for(&state);
+    let scan_scope = run_controls.scope.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -2272,6 +2416,14 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // A project being deleted with all its data starts nothing.
+    if let Some(why) = state
+        .projects
+        .active()
+        .and_then(|p| state.source_ops.deleting_refusal(&p.id))
+    {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // The client-engagement lock, before any repository is located or read.
     if let Some(why) = client_lock_refusal_for_scan(
         state.projects.active().as_ref(),
@@ -2290,6 +2442,16 @@ async fn onboard_audit(
     ) {
         return Json(client_lock_blocked_report(&repos, why));
     }
+    // A client inspection starts only on a build that can be named exactly (a commit, no
+    // uncommitted changes); the lock above has already refused a scan with no project.
+    if let Some(why) = state.projects.active().and_then(|p| {
+        crate::run_store::engine_pin::client_start_refusal(
+            p.client_engagement,
+            &crate::run_store::engine_pin::BuildId::current(),
+        )
+    }) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
     let LocalSources {
         sources,
@@ -2302,6 +2464,19 @@ async fn onboard_audit(
         // report would show as a successful scan that found nothing.
         return Json(client_lock_blocked_report(&repos, why));
     }
+    // A file over the read limit that the project does not exclude by agreement is a warning,
+    // never a refusal: it is not read for the inspection and, with the security floor on, the
+    // secret checks still search it. A pattern that matches nothing still refuses the start.
+    let (refusal, start_warnings) = crate::onboard::scope::start_check(
+        state.projects.active().as_ref(),
+        &sources,
+        effective_scan_modes(req.run_ai_review, req.run_deterministic).1,
+    )
+    .await;
+    if let Some(why) = refusal {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
+    notes.extend(start_warnings);
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
@@ -2342,6 +2517,8 @@ async fn onboard_audit(
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
+    // However this scan ends, no row of it stays "running".
+    let _sweep = crate::transcript::SweepOnDrop::new(state.transcripts.clone(), SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
     let active_project = state.projects.active();
     let project_id = active_project.as_ref().map(|p| p.id.clone());
@@ -2350,7 +2527,7 @@ async fn onboard_audit(
     let _scan_claim = project_id
         .as_deref()
         .map(|id| state.source_ops.begin_scan(id));
-    let prior = if req.incremental {
+    let prior = if uses_prior_manifest(req.incremental, run_controls.review.finder) {
         project_id
             .as_deref()
             .and_then(|id| state.scan_cache.get(id))
@@ -2409,6 +2586,19 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
+    // An agent finder run stops, before any spend, when a rule file did not load (the rule would
+    // silently not be checked).
+    if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &run_controls,
+        run_ai_review && !ai_review_blocked,
+        &corpus_load_failures,
+    ) {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.ai_error = Some(why.clone());
+        r.message = Some(why);
+        return Json(r);
+    }
     // The agent finder's setup, built by the one function the command line uses (this request has
     // no run folder of its own, so the rooms go under the per-user state folder).
     let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
@@ -2494,6 +2684,7 @@ async fn onboard_audit(
                 corpus.as_ref(),
                 None,
                 project_client_tooling(active_project.as_ref()),
+                &scan_scope,
             )
             .await;
         }
@@ -2512,26 +2703,29 @@ async fn onboard_audit(
             // the enrichment range below, so a known-exploited runtime vulnerability is labelled
             // and floored exactly like a dependency one.
             let runtime_rows_in = report.findings.len();
-            crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
+            crate::runtime_audit::run_runtime_audit(&mut report, &sources, &scan_scope).await;
             let dep_audit_rows_in = report.findings.len();
             let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
-                let run = crate::dep_audit::run_dep_audit(spec, dir);
-                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                    Ok(result) => result,
-                    Err(_elapsed) => (
-                        Vec::new(),
-                        Some(crate::onboard::CoverageNote {
-                            tool_failed: false,
-                            repo: None,
-                            tool: "osv-scanner".to_string(),
-                            message: format!(
+                let repo_scope = scan_scope.for_repo(spec);
+                let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
+                let (dep_findings, dep_note, dep_files) =
+                    match timeout(dep_audit_timeout, run).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => (
+                            Vec::new(),
+                            Some(crate::onboard::CoverageNote {
+                                tool_failed: false,
+                                repo: None,
+                                tool: "osv-scanner".to_string(),
+                                message: format!(
                                 "dependency audit (osv-scanner) timed out after 60 s for {spec}"
                             ),
-                        }),
-                    ),
-                };
+                            }),
+                            Vec::new(),
+                        ),
+                    };
                 let dep_note = dep_note.map(|mut note| {
                     note.repo.get_or_insert_with(|| spec.to_string());
                     note
@@ -2540,6 +2734,7 @@ async fn onboard_audit(
                     spec,
                     dep_note.as_ref(),
                 ));
+                crate::dep_audit::record_audited_files(&mut report, dep_files, osv_runs.last());
                 if !dep_findings.is_empty() {
                     report.findings.extend(dep_findings);
                 }
@@ -2592,7 +2787,10 @@ async fn onboard_audit(
                 &review_controls,
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
+                // The synchronous endpoint has no job to record a batch id on: real time.
+                false,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
                 corpus.as_ref(),
             )
             .await;
@@ -2602,7 +2800,9 @@ async fn onboard_audit(
                 &llm,
                 &review_controls,
                 review_backend == crate::llm::Backend::Cli,
+                false,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
             )
             .await;
         }
@@ -2652,6 +2852,12 @@ async fn onboard_audit(
     Json(report)
 }
 
+/// True when a finished audit job records its enforcement catches: a fresh full scan only (see
+/// the call in [`start_audit_job`]).
+pub(crate) fn captures_enforcement_catches(is_resume: bool, is_delta_retest: bool) -> bool {
+    !is_resume && !is_delta_retest
+}
+
 /// Start the audit job for `req` and return its id. The asynchronous body of
 /// [`onboard_audit_start`], shared with the delta rescan (`client_source::rescan`) so there is
 /// ONE implementation of "run an audit as a job". See [`AuditJobOptions`].
@@ -2670,6 +2876,7 @@ pub(crate) async fn start_audit_job(
         .and_then(|id| state.projects.get(id))
         .or_else(|| state.projects.active());
     let mut run_controls = req.run_controls_for_project(active_project.as_ref());
+    let scan_scope = run_controls.scope.clone();
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
@@ -2722,6 +2929,15 @@ pub(crate) async fn start_audit_job(
     // The job is stamped with its project (ROUTES-5, so a project's deep-report export finds ITS
     // OWN latest deep report) AND it seeds the incremental-scan manifest lookup below.
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // A project being deleted with all its data starts nothing: the job fails at once.
+    if let Some(why) = project_id
+        .as_deref()
+        .and_then(|id| state.source_ops.deleting_refusal(id))
+    {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
     if let Some(why) = client_lock_refusal_for_scan(
@@ -2746,6 +2962,22 @@ pub(crate) async fn start_audit_job(
         state.jobs.fail(&job_id, why);
         return job_id;
     }
+    // A file over the read limit that the project does not exclude by agreement is a warning,
+    // never a refusal: it is not read for the inspection and, with the security floor on, the
+    // secret checks still search it. A pattern that matches nothing still refuses the start.
+    let (refusal, start_warnings) = crate::onboard::scope::start_check(
+        active_project.as_ref(),
+        &sources,
+        effective_scan_modes(req.run_ai_review, req.run_deterministic).1,
+    )
+    .await;
+    if let Some(why) = refusal {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
+    // A pattern that matches only files never read is a warning the run goes ahead with.
+    notes.extend(start_warnings);
     notes.extend(options.extra_notes);
     let delta = options.delta;
     let client_tooling = project_client_tooling(active_project.as_ref());
@@ -2781,8 +3013,10 @@ pub(crate) async fn start_audit_job(
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
+    // The Agent finder inspects every file (the command line refuses an incremental Agent run), so
+    // an Agent run that asks for an incremental one runs in full instead: no prior manifest.
     let prior = options.prior_override.or_else(|| {
-        if req.incremental {
+        if uses_prior_manifest(req.incremental, run_controls.review.finder) {
             project_id
                 .as_deref()
                 .and_then(|id| state.scan_cache.get(id))
@@ -2807,7 +3041,10 @@ pub(crate) async fn start_audit_job(
         // never got to handle.
         let body_jobs = jobs.clone();
         let body_jid = jid.clone();
+        let sweep = crate::transcript::SweepOnDrop::new(transcripts.clone(), SCAN_AUDIT_KEY);
         run_job_body_with_panic_guard(&jobs, &jid, async move {
+            // Held to the end of the body (normal end, cancel, panic): closes any row left running.
+            let _sweep = sweep;
             if sources.is_empty() {
                 body_jobs.fail(
                     &body_jid,
@@ -2843,8 +3080,9 @@ pub(crate) async fn start_audit_job(
                     // will not run on a repo is not left waiting in the denominator.
                     for (spec, dir) in &sources {
                         let dir_clone = dir.clone();
+                        let repo_scope = scan_scope.for_repo(spec);
                         let languages = tokio::task::spawn_blocking(move || {
-                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                            crate::onboard::files::read_local_repo_files(&dir_clone, &repo_scope)
                                 .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
                                 .unwrap_or_default()
                         })
@@ -2874,10 +3112,11 @@ pub(crate) async fn start_audit_job(
                     // but adds to the same job). Using the union is conservative: a tool
                     // present in ANY repo stays in the denominator.
                     let mut union_languages = std::collections::HashSet::<String>::new();
-                    for (_, dir) in &sources {
+                    for (spec, dir) in &sources {
                         let dir_clone = dir.clone();
+                        let repo_scope = scan_scope.for_repo(spec);
                         if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
-                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                            crate::onboard::files::read_local_repo_files(&dir_clone, &repo_scope)
                         })
                         .await
                         {
@@ -2952,8 +3191,28 @@ pub(crate) async fn start_audit_job(
                 }
             }
             let mut prior = prior;
+            // The build and the rule library this run starts on (or must still be on to resume),
+            // read from the running binary and the rules it loaded.
+            let engine_pin = rs::engine_pin::EnginePin::for_run(corpus.as_ref(), &run_controls);
+            if resume_run.is_none() {
+                let client_engagement = engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement);
+                if let Some(why) =
+                    rs::engine_pin::client_start_refusal(client_engagement, &engine_pin.build)
+                {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            }
             let run_store = match &resume_run {
-                Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
+                Some(id) => match rs::open_for_resume(
+                    id,
+                    &sources,
+                    &ai_scan_key,
+                    &models_record,
+                    &engine_pin,
+                ) {
                     Ok((store, _estimate)) => {
                         // The baseline the run started from, not one an attempt since replaced.
                         prior = store.load_prior_manifest();
@@ -2962,6 +3221,11 @@ pub(crate) async fn start_audit_job(
                         // The run keeps the finder it started with, whatever the project's
                         // setting is now (a mid-run switch would mix two finders' work).
                         if let Some(notice) = store.hold_finder(&mut run_controls) {
+                            store.add_note(&notice);
+                        }
+                        // The clone judge stays on the model the run started with, whatever the
+                        // project's setting is now.
+                        if let Some(notice) = store.hold_clone_judge_model(&mut run_controls) {
                             store.add_note(&notice);
                         }
                         // The group reviewer stays on the model the run started with.
@@ -2977,6 +3241,20 @@ pub(crate) async fn start_audit_job(
                                 store.add_note(&notice);
                             }
                             Err(why) => {
+                                // A resume refused before any work leaves no segment of its own.
+                                store.discard_segment();
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
+                        // The agent finder finishes on the finder model it started with.
+                        match store.hold_finder_model(&mut run_controls) {
+                            Ok(Some(line)) => {
+                                store.add_note(&line);
+                            }
+                            Ok(None) => {}
+                            Err(why) => {
+                                store.discard_segment();
                                 body_jobs.fail(&body_jid, why);
                                 return;
                             }
@@ -2999,6 +3277,7 @@ pub(crate) async fn start_audit_job(
                             &ids,
                             &run_controls,
                         ) {
+                            store.discard_segment();
                             body_jobs.fail(&body_jid, format!("{why} {APP_CLIENT_LOCK_FIX}"));
                             return;
                         }
@@ -3014,6 +3293,7 @@ pub(crate) async fn start_audit_job(
                             &run_controls,
                             crate::claude_version::check_run_models,
                         ) {
+                            store.discard_segment();
                             body_jobs.fail(&body_jid, why);
                             return;
                         }
@@ -3034,6 +3314,7 @@ pub(crate) async fn start_audit_job(
                     include_alternatives: corpus.is_some(),
                     origin: rs::RunOrigin::Cockpit,
                     project_id: project_id.clone(),
+                    pin: engine_pin,
                 }) {
                     Ok(store) => {
                         if let Some(p) = &prior {
@@ -3078,6 +3359,16 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
+            // An agent finder run stops, before any spend, when a rule file did not load (the rule
+            // would silently not be checked).
+            if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+                &run_controls,
+                run_ai_review && !ai_review_blocked,
+                &corpus_load_failures,
+            ) {
+                body_jobs.fail(&body_jid, why);
+                return;
+            }
             // The agent finder's setup, built by the one function the command line uses: the
             // rooms folder inside the run's own folder, the saved key, the project's engagement
             // kind. A missing key stops the run before the first call.
@@ -3161,6 +3452,7 @@ pub(crate) async fn start_audit_job(
                     corpus.as_ref(),
                     Some((&body_jobs, &body_jid)),
                     client_tooling,
+                    &scan_scope,
                 )
                 .await;
             }
@@ -3181,26 +3473,29 @@ pub(crate) async fn start_audit_job(
                 // path — one ledger stage entry for the whole loop's net additions.
                 // Runtime end of life and runtime vulnerabilities (see `onboard_audit`).
                 let runtime_rows_in = report.findings.len();
-                crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
+                crate::runtime_audit::run_runtime_audit(&mut report, &sources, &scan_scope).await;
                 let dep_audit_rows_in = report.findings.len();
                 let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
-                    let run = crate::dep_audit::run_dep_audit(spec, dir);
-                    let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                        Ok(result) => result,
-                        Err(_elapsed) => (
-                            Vec::new(),
-                            Some(crate::onboard::CoverageNote {
-                                tool_failed: false,
-                                repo: None,
-                                tool: "osv-scanner".to_string(),
-                                message: format!(
+                    let repo_scope = scan_scope.for_repo(spec);
+                    let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
+                    let (dep_findings, dep_note, dep_files) =
+                        match timeout(dep_audit_timeout, run).await {
+                            Ok(result) => result,
+                            Err(_elapsed) => (
+                                Vec::new(),
+                                Some(crate::onboard::CoverageNote {
+                                    tool_failed: false,
+                                    repo: None,
+                                    tool: "osv-scanner".to_string(),
+                                    message: format!(
                                     "dependency audit (osv-scanner) timed out after 60 s for {spec}"
                                 ),
-                            }),
-                        ),
-                    };
+                                }),
+                                Vec::new(),
+                            ),
+                        };
                     let dep_note = dep_note.map(|mut note| {
                         note.repo.get_or_insert_with(|| spec.to_string());
                         note
@@ -3214,6 +3509,7 @@ pub(crate) async fn start_audit_job(
                         spec,
                         dep_note.as_ref(),
                     ));
+                    crate::dep_audit::record_audited_files(&mut report, dep_files, osv_runs.last());
                     if !dep_findings.is_empty() {
                         report.findings.extend(dep_findings);
                     }
@@ -3279,7 +3575,9 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
+                            mode == crate::ai_audit::ScanMode::Batch,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                             corpus.as_ref(),
                         )
                         .await;
@@ -3290,7 +3588,9 @@ pub(crate) async fn start_audit_job(
                             model_seam,
                             &review_controls,
                             llm_backend == crate::llm::Backend::Cli,
+                            mode == crate::ai_audit::ScanMode::Batch,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                         )
                         .await;
                     }),
@@ -3311,10 +3611,20 @@ pub(crate) async fn start_audit_job(
                 crate::run_store::note_report(store, &mut report);
             }
 
-            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-            // handler. If you add ledger capture here in the future, follow the same
-            // background-spawn pattern used there.)
+            // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+            // The cockpit runs every scan as this job, so the capture the synchronous
+            // `onboard_audit` handler makes runs here too. Same background-spawn pattern,
+            // best-effort: a failed write is logged and swallowed.
+            // Only a fresh full scan: a resume re-opens a run whose earlier attempt may already
+            // have recorded its catches, and a delta retest re-reads files an earlier scan
+            // recorded; the capture has no dedup, so either would record them twice.
+            if captures_enforcement_catches(resume_run.is_some(), delta.is_some()) {
+                let ledger = state.enforcement_ledger.clone();
+                let all_findings = report.findings.clone();
+                tokio::spawn(async move {
+                    crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+                });
+            }
 
             // ── Write last_scan + recent_scan (async job path) ──────────────────────────
             // Store the completed report before finishing the job so any concurrent chat
@@ -3355,7 +3665,21 @@ pub(crate) async fn start_audit_job(
                     }
                     scan_state.set_last_scan_in_memory(id.clone(), report.clone());
                 }
-                (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
+                (Some(id), None) => {
+                    scan_state.set_last_scan(id.clone(), report.clone());
+                    // The review this run produced goes into the project's onboarding draft
+                    // (when it has one for these repos) even if no screen is mounted to
+                    // receive it: a run finished while the screen was closed must still be
+                    // reopenable with "Continue where you left off".
+                    if let Some(stored) = state.get_last_scan(id) {
+                        state.draft.adopt_audit(
+                            id,
+                            &stored.repos,
+                            &stored.provenance.finished_at,
+                            || serde_json::to_value(&stored).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
                 // No project: only the project-agnostic fallback can hold it, and there is no
                 // project to key a persisted inspection to.
                 (None, _) => scan_state.set_recent_scan(report.clone()),
@@ -3512,6 +3836,80 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
         .into_response()
 }
 
+/// `GET /api/projects/:id/triage-log.csv` — the operator's triage log: per rule, what the AI pass
+/// proposed, what review kept, held or set aside and threw out, and why. The first line marks it
+/// internal. It is written outside the client package and is not gated, because no client reads
+/// it; the client package never carries it. 404 when the project or its scan results are missing.
+async fn export_triage_log(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Some(project) = state.projects.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    };
+    // The reviewer's work is read exactly as the exports read it; a damaged file means it is
+    // unknown, so nothing is written from guesses.
+    if state.decisions.is_corrupt(&id) {
+        return crate::decisions::routes::corrupt_response();
+    }
+    if state.edits.is_corrupt(&id) {
+        return crate::edits::routes::corrupt_response();
+    }
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an inspection first."
+            })),
+        )
+            .into_response();
+    };
+    let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        &state.decisions.active(&id),
+    ));
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let reviewed = reviewed_for_export(&state, &id, &report, &std::collections::HashMap::new());
+    let csv = match xlsx_export::triage_log::operator_csv(
+        &reviewed,
+        corpus.as_ref(),
+        &project_chosen_options(&project),
+    ) {
+        Ok(csv) => csv,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    xlsx_export::triage_log::INTERNAL_FILE_NAME
+                ),
+            ),
+        ],
+        csv,
+    )
+        .into_response()
+}
+
 /// The deep report as Markdown for the operator: the lens prose is model-written text read back
 /// from the job store, so it is redacted here, at the export, whatever path stored it. It is
 /// labelled as the operator's working notes ([`DEEP_REPORT_OPERATOR_LABEL`]); it is not a client
@@ -3642,7 +4040,9 @@ async fn export_audit_report(
     // model-inferred." rather than failing the export.
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -3650,6 +4050,7 @@ async fn export_audit_report(
     // The same options, set the same way, as the package route: the PDF is the one the package
     // carries, built by the same code (`prepare_export_options`).
     prepare_export_options(&mut req.options, &project, &report);
+    req.options.operator_roots = state.export_operator_roots(&project);
 
     // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
     // after the seal, before the gate, in every export.
@@ -3665,7 +4066,7 @@ async fn export_audit_report(
     let stem = gated.released.stem;
     let pdf_bytes = gated.pdf;
 
-    let filename = format!("{stem}.pdf");
+    let filename = package_paths::pdf_name(&stem);
 
     (
         StatusCode::OK,
@@ -3818,12 +4219,16 @@ fn reviewed_for_export(
         || sealed.clone(),
         |p| crate::report_export::re_mark_line(sealed, &p.review),
     );
+    // A report saved before the convention model gets its records from what it has, so the
+    // rows are tagged by the same rules as a new one (design section 9).
+    let marked = marked.overlaid(crate::conventions::upgrade);
     let sealed = &marked;
-    let reviewed = crate::report_export::apply_overlay(
+    let reviewed = crate::report_export::apply_overlay_with_standards(
         sealed,
         &state.decisions.list(project_id),
         &state.edits.list(project_id),
         &state.edits.added(project_id),
+        &crate::conventions::rulings_for_run(&state.decisions.standards(project_id), &run_id),
     )
     .with_engine_check(state.engine_check.evidence_for(
         project_id,
@@ -3962,20 +4367,23 @@ async fn export_product(
     };
     // Pass-1 W1 seal fix: see the identical comment in `export_audit_report` — this is the
     // "row set is final" point for every artifact this handler builds (PDF, xlsx,
-    // findings.json), all three now reading the SAME sealed set.
+    // json/inspection.json), all three now reading the SAME sealed set.
     let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
         &state.decisions.active(&id),
     ));
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
 
     // The same options, set the same way, as the PDF route (`prepare_export_options`).
     prepare_export_options(&mut req.options, &project, &report);
+    req.options.operator_roots = state.export_operator_roots(&project);
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, the PDF route, `camerata inspect
@@ -4131,10 +4539,11 @@ pub fn product_export_readme(
         format!(
             "{services}\n\
              \x20 Where the services of this project differ on a rule: the {services} sheet of the\n\
-             \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+             \x20 workbook, a section in the PDF and a patterns_across_services key in {inspection}.\n\
              \x20 An observation, not a problem: it has no severity and is in no count.\n\
              \n",
             services = v::PATTERNS_ACROSS_SERVICES,
+            inspection = package_paths::INSPECTION_JSON,
         )
     } else {
         String::new()
@@ -4146,14 +4555,14 @@ pub fn product_export_readme(
          \n\
          This ZIP holds the files below. All of them come from the same inspection.\n\
          \n\
-         {stem}.pdf\n\
+         {pdf}\n\
          \x20 The report to read first. It has the cover, the executive summary, the scorecard by\n\
          \x20 area, the severity by effort matrix, the problems with their citations and fixes,\n\
          \x20 what is healthy, the dependency snapshot and how the inspection was done. It is\n\
          \x20 written for a board, a buyer or a decision maker. Problems ruled out are left out\n\
          \x20 and counted once, in the methodology section.\n\
          \n\
-         {stem}-findings.xlsx\n\
+         {workbook}\n\
          \x20 The complete working list for the engineers doing the fixes. Open the {start} sheet\n\
          \x20 first: it lists the sheets and says what each one holds, and the {glossary} sheet says\n\
          \x20 what every word and column means. The {fix_plan} sheet has one row for each fix, in the\n\
@@ -4168,27 +4577,29 @@ pub fn product_export_readme(
          \x20 silently. The last sheets are for reviewers: {source_rows}, {decisions} and\n\
          \x20 {grouped}.\n\
          \n\
-         findings.json\n\
-         \x20 Every row that was not ruled out, of every kind: the rows behind {all_problems},\n\
-         \x20 {conventions} and {not_checked} together, before the {all_problems} sheet shows each\n\
-         \x20 problem once. For scripts, CI and other tools: severity, area, repo, path and line,\n\
-         \x20 the code seen, the explanation, the fix, the decision so far, effort, confidence,\n\
-         \x20 citation and more, wrapped with the report's summary counts.\n\
+         {inspection}\n\
+         \x20 The whole inspection in one file. Every row that was not ruled out, of every kind: the\n\
+         \x20 rows behind {all_problems}, {conventions} and {not_checked} together, before the\n\
+         \x20 {all_problems} sheet shows each problem once. For scripts, CI and other tools:\n\
+         \x20 severity, area, repo, path and line, the code seen, the explanation, the fix, the\n\
+         \x20 decision so far, effort, confidence, citation and more, wrapped with the report's\n\
+         \x20 summary counts.\n\
          \n\
-         decisions.json\n\
+         {decisions_json}\n\
          \x20 Every decision record the report was reviewed with: what was ruled on which place or\n\
          \x20 group of places, and whether a reason was recorded. The {decisions} sheet of the\n\
          \x20 workbook is the same list.\n\
          \n\
-         csv/ and json/\n\
+         {csv_dir} and {json_dir}\n\
          \x20 One file for each table of the workbook, as CSV and as JSON, for tools that do not\n\
-         \x20 read Excel. The all-findings files are the exception: they hold the same rows as\n\
-         \x20 findings.json, as one flat table.\n\
+         \x20 read Excel. The all-findings files hold the same rows as {inspection}, as one\n\
+         \x20 flat table. The {json_dir} folder also holds {inspection} and {decisions_json}.\n\
          \n\
-         manifest.json\n\
-         \x20 The list of the files in this ZIP with a checksum for each.\n\
+         {manifest}\n\
+         \x20 The list of the files in this ZIP with a checksum for each. It stays at the top\n\
+         \x20 level because it describes the whole ZIP.\n\
          \n\
-         csv/tickets.csv\n\
+         {tickets_csv}\n\
          \x20 One ticket for each fix (one kind of problem with one cause) that still has places to\n\
          \x20 change. A place ruled out or accepted as a risk is on no ticket.\n\
          \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {places}\n\
@@ -4221,6 +4632,14 @@ pub fn product_export_readme(
         decisions = v::REVIEWER_DECISIONS,
         grouped = v::HOW_PROBLEMS_WERE_GROUPED,
         fix_id = v::H_FIX_ID,
+        pdf = package_paths::pdf_name(stem),
+        workbook = package_paths::workbook_name(stem),
+        inspection = package_paths::INSPECTION_JSON,
+        decisions_json = package_paths::DECISIONS_JSON,
+        manifest = package_paths::MANIFEST_JSON,
+        tickets_csv = package_paths::TICKETS_CSV,
+        csv_dir = package_paths::CSV_DIR,
+        json_dir = package_paths::JSON_DIR,
     );
     if !internal {
         return format!("{}\n", format!("{files}{patterns}").trim_end());
@@ -4585,8 +5004,15 @@ impl ManifestProvenance {
 /// The git commit this binary was built from, recorded by `build.rs` (`CAMERATA_GIT_COMMIT`).
 /// `None` for a build outside a git checkout: an honest absence, never a placeholder. Stated in
 /// [`ManifestProvenance::engine_version`] (README and `manifest.json`) and in the report cover
-/// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
+/// (`report_export::CoverJson::engine_commit`, which the PDF and `json/inspection.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
+
+/// Whether the tree had uncommitted changes when this binary was built (`build.rs`). Reported on
+/// `/api/health` for information; the app compares commits only.
+pub const ENGINE_DIRTY: bool = match option_env!("CAMERATA_GIT_DIRTY") {
+    Some(flag) => flag.len() == 1 && flag.as_bytes()[0] == b'1',
+    None => false,
+};
 
 /// The README line of an internal package made from a run that did not complete.
 pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \
@@ -4611,31 +5037,39 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
         "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
         "The complete working list, sheet by sheet, for the engineers doing the fixes."
-    } else if path == "findings.json" {
+    } else if path == INSPECTION_JSON {
         "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
-    } else if path == "README.txt" {
+    } else if path == README_TXT {
         "A plain-text guide to what each file is."
-    } else if path == "decisions.json" {
+    } else if path == DECISIONS_JSON {
         "Every decision record the report was reviewed with, for tools."
-    } else if path == "csv/tickets.csv" {
+    } else if path == TICKETS_CSV {
         "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
-    } else if path == "csv/all-findings.csv" {
-        "Every row that was not ruled out, the same rows as findings.json, as one CSV table for tools that do not read Excel."
-    } else if path == "json/all-findings.json" {
-        "Every row that was not ruled out, the same rows as findings.json, as one flat JSON list for tools."
-    } else if path.starts_with("csv/") {
+    } else if path == ALL_FINDINGS_CSV {
+        concat!(
+            "Every row that was not ruled out, the same rows as ",
+            camerata_api_types::pkg_inspection_json!(),
+            ", as one CSV table for tools that do not read Excel."
+        )
+    } else if path == ALL_FINDINGS_JSON {
+        concat!(
+            "Every row that was not ruled out, the same rows as ",
+            camerata_api_types::pkg_inspection_json!(),
+            ", as one flat JSON list for tools."
+        )
+    } else if path.starts_with(CSV_DIR) {
         "One table of the workbook as a CSV file, for tools that do not read Excel."
-    } else if path.starts_with("json/") {
+    } else if path.starts_with(JSON_DIR) {
         "One table of the workbook as a flat JSON list, for tools."
     } else {
         "A file of the inspection package."
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.
-    let schema = if path.starts_with("csv/")
-        || path.starts_with("json/")
-        || path == "findings.json"
-        || path == "decisions.json"
+    let schema = if path.starts_with(CSV_DIR)
+        || path.starts_with(JSON_DIR)
+        || path == INSPECTION_JSON
+        || path == DECISIONS_JSON
     {
         let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
         Some(format!("{dataset}/1.0"))
@@ -4675,10 +5109,10 @@ pub fn build_manifest(
         })
     };
     let mut files = vec![
-        entry(format!("{stem}.pdf"), pdf_bytes),
-        entry(format!("{stem}-findings.xlsx"), xlsx_bytes),
-        entry("findings.json".to_string(), findings_json_bytes),
-        entry("README.txt".to_string(), readme.as_bytes()),
+        entry(package_paths::pdf_name(stem), pdf_bytes),
+        entry(package_paths::workbook_name(stem), xlsx_bytes),
+        entry(INSPECTION_JSON.to_string(), findings_json_bytes),
+        entry(README_TXT.to_string(), readme.as_bytes()),
     ];
     for (path, bytes) in extra_files {
         files.push(entry(path.clone(), bytes));
@@ -4695,7 +5129,7 @@ pub fn build_manifest(
     bytes
 }
 
-/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
+/// Zip the PDF + xlsx + `json/inspection.json` + README.txt into one in-memory archive (Deflate
 /// compression) for the product-export response body. The ONLY I/O here is the in-memory
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
 /// contract.
@@ -4723,16 +5157,16 @@ pub(crate) fn build_product_zip(
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip_now());
 
-    writer.start_file(format!("{stem}.pdf"), options)?;
+    writer.start_file(package_paths::pdf_name(stem), options)?;
     writer.write_all(pdf_bytes)?;
 
-    writer.start_file(format!("{stem}-findings.xlsx"), options)?;
+    writer.start_file(package_paths::workbook_name(stem), options)?;
     writer.write_all(xlsx_bytes)?;
 
-    writer.start_file("findings.json", options)?;
+    writer.start_file(INSPECTION_JSON, options)?;
     writer.write_all(findings_json_bytes)?;
 
-    writer.start_file("README.txt", options)?;
+    writer.start_file(README_TXT, options)?;
     writer.write_all(readme.as_bytes())?;
 
     // The per-dataset CSV/JSON tables (csv/*, json/*), written under their folders.
@@ -4752,7 +5186,7 @@ pub(crate) fn build_product_zip(
         extra_files,
         provenance,
     );
-    writer.start_file("manifest.json", options)?;
+    writer.start_file(MANIFEST_JSON, options)?;
     writer.write_all(&manifest)?;
 
     let cursor = writer.finish()?;
@@ -4847,7 +5281,49 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+/// Whether a run reuses the project's prior manifest (an incremental run). The Agent finder
+/// inspects every file and the command line refuses an incremental Agent run, so an Agent run
+/// that asks for one runs in full: the request is never the only thing that decides it.
+pub(crate) fn uses_prior_manifest(
+    incremental: bool,
+    finder: camerata_api_types::project::ProjectFinder,
+) -> bool {
+    incremental && finder != camerata_api_types::project::ProjectFinder::Agent
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod uses_prior_manifest_tests {
+    use super::uses_prior_manifest;
+    use camerata_api_types::project::ProjectFinder::{Agent, Engine};
+
+    #[test]
+    fn an_agent_run_that_asks_for_an_incremental_one_runs_in_full() {
+        assert!(!uses_prior_manifest(true, Agent));
+        assert!(!uses_prior_manifest(false, Agent));
+        assert!(uses_prior_manifest(true, Engine));
+        assert!(!uses_prior_manifest(false, Engine));
+    }
+}
+
+#[cfg(test)]
+mod enforcement_capture_tests {
+    use super::captures_enforcement_catches;
+
+    #[test]
+    fn only_a_fresh_full_scan_records_enforcement_catches() {
+        assert!(captures_enforcement_catches(false, false));
+        assert!(
+            !captures_enforcement_catches(true, false),
+            "a resume would record twice"
+        );
+        assert!(
+            !captures_enforcement_catches(false, true),
+            "a delta retest would record twice"
+        );
+    }
+}
 
 #[cfg(test)]
 mod lib_multirepo_tests;
@@ -4866,6 +5342,9 @@ mod model_input_chat_tests;
 
 #[cfg(test)]
 mod site_key_paths_tests;
+
+#[cfg(test)]
+mod draft_tests;
 
 #[cfg(test)]
 mod tests;

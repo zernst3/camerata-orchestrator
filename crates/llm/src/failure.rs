@@ -268,6 +268,9 @@ pub struct LlmCallFailure {
     /// The final HTTP status and body, when the failure was an HTTP answer. Lets a caller that
     /// formats its own message keep doing so.
     pub http: Option<(u16, String)>,
+    /// Milliseconds the failed call took (set where the backend call returns), so a failed
+    /// call's wait still counts toward the stage's run figures. `None` when not timed.
+    pub elapsed_ms: Option<u64>,
 }
 
 impl LlmCallFailure {
@@ -278,6 +281,7 @@ impl LlmCallFailure {
             attempts: Vec::new(),
             retryable: false,
             http: None,
+            elapsed_ms: None,
         }
     }
 }
@@ -353,6 +357,12 @@ fn mentions_exhausted_account(lower: &str) -> bool {
     ]
     .iter()
     .any(|p| lower.contains(p))
+}
+
+/// True when `text` says the account is out of credit, quota or usage (a billing stop), as
+/// opposed to a bad credential.
+pub fn is_exhausted_account_text(text: &str) -> bool {
+    mentions_exhausted_account(&text.to_ascii_lowercase())
 }
 
 /// True when `text` says the credential is missing or wrong.
@@ -470,6 +480,7 @@ pub fn classify_text(text: &str) -> (FailureClass, bool) {
         "temporarily unavailable",
         "service unavailable",
         "bad gateway",
+        "api_error",
     ];
     if transport.iter().any(|p| lower.contains(p))
         || mentions_status(&lower, &["500", "502", "503"])
@@ -499,6 +510,11 @@ pub fn classify_error(e: &anyhow::Error) -> FailureClass {
             }
         }
     }
+}
+
+/// How long the failed call inside `e` took, when it is a typed transport failure that was timed.
+pub fn elapsed_ms_of(e: &anyhow::Error) -> Option<u64> {
+    call_failure_of(e).and_then(|f| f.elapsed_ms)
 }
 
 /// The attempt trail inside `e`, empty when the error is not a typed transport failure.

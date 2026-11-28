@@ -56,6 +56,7 @@ impl LlmPort for Varying {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -138,6 +139,7 @@ async fn scan(consensus: bool) -> (ScanReport, usize) {
         None,
         &HashMap::new(),
         RunControls {
+            scope: Default::default(),
             consensus,
             // The scripted model recognises the long-form scan prompt, so the terse scan (and
             // the extra full-explanation step it brings) is switched off.

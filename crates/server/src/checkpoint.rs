@@ -66,6 +66,30 @@ impl CheckpointStore {
         }
     }
 
+    /// Remove the entries with these ids and persist. When the write fails nothing is removed
+    /// and the error is returned. Returns how many were removed.
+    pub fn remove_ids(&self, ids: &[String]) -> std::io::Result<usize> {
+        let mut items = self
+            .items
+            .lock()
+            .map_err(|_| std::io::Error::other("store mutex poisoned"))?;
+        let kept: Vec<Checkpoint> = items
+            .iter()
+            .filter(|c| !ids.iter().any(|i| i == &c.id))
+            .cloned()
+            .collect();
+        let removed = items.len() - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        if let Some(p) = &self.path {
+            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(p.as_ref(), json)?;
+        }
+        *items = kept;
+        Ok(removed)
+    }
+
     /// Create a checkpoint, assigning a fresh `ckpt-N` id + created timestamp. Returns it.
     pub fn create(&self, new: NewCheckpoint) -> Checkpoint {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
@@ -459,9 +483,37 @@ pub fn stage_has_stored_work(stage: &str) -> bool {
         .is_some_and(|c| !c.absorbed_in_order().is_empty() || !c.batches().is_empty())
 }
 
+tokio::task_local! {
+    /// Set for a rerun of a saved run's deterministic stages (#588): see [`with_rerun_scope`].
+    static RERUN_SCOPE: ();
+}
+
+/// Run `fut` as a rerun's work when `rerun` is set (#588). A resume reads a stage's checkpoint to
+/// carry on from where an interrupted run stopped, and so asks again for work the run gave up on.
+/// A rerun carries on from nothing: it plays the whole run again, the model stages answered by the
+/// run's stored replies in the order they were asked, so the stages ask what they asked the first
+/// time and end where they ended. The one thing only the checkpoint holds is the agent finder's
+/// pieces (the finder is not a call the journal stores), so those stay; every other stage reads no
+/// checkpoint and writes none.
+pub async fn with_rerun_scope<F: std::future::Future>(rerun: bool, fut: F) -> F::Output {
+    if rerun {
+        RERUN_SCOPE.scope((), fut).await
+    } else {
+        fut.await
+    }
+}
+
+/// Whether the work in scope is a rerun's ([`with_rerun_scope`]).
+pub fn in_rerun_scope() -> bool {
+    RERUN_SCOPE.try_with(|()| ()).is_ok()
+}
+
 /// The checkpoint of the stage named `stage` (a file stem: a stage on two repos uses two names)
-/// in the run in scope, or `None` outside a run.
+/// in the run in scope, or `None` outside a run (or, in a rerun, for a stage but the finder).
 pub fn stage_checkpoint(stage: &str) -> Option<StageCheckpoint> {
+    if RERUN_SCOPE.try_with(|()| ()).is_ok() && !stage.starts_with("finder_") {
+        return None;
+    }
     RUN_CHECKPOINT_DIR
         .try_with(|dir| StageCheckpoint::new(dir, stage))
         .ok()

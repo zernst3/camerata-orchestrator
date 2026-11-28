@@ -9,14 +9,19 @@
 
 pub mod adopt;
 pub mod backend;
+pub mod convention_view;
+pub mod csv_cell;
 pub mod decision_memory;
 pub mod decision_sync;
 pub mod decisions;
 pub mod designs;
 pub mod edits;
 pub mod engine_check;
+pub mod export_panel;
 pub mod git;
 pub mod govdev;
+pub mod help;
+pub mod inspection_settings;
 pub mod lenient;
 pub mod models;
 pub mod order_preset;

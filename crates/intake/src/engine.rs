@@ -561,10 +561,53 @@ struct ModelOutput {
     verdict: HonestyVerdict,
 }
 
+/// The prompt as it is handed to `claude -p`: through the model-input chokepoint
+/// (`camerata_secrets::model_input`), so nothing handed to a model carries a raw secret.
+pub(crate) fn stdin_prompt(prompt: &str) -> String {
+    camerata_secrets::model_input::redact_for_model(prompt).into_owned()
+}
+
+/// Run a `claude -p` command to completion with `prompt` on its stdin. The prompt is not an
+/// argument because the OS caps the argument list (macOS `ARG_MAX`, about 1 MB) and a prompt
+/// that carries a large grounding block exceeds it ("Argument list too long"). The write runs on
+/// its own task so a child that answers before it has read everything cannot block on a full
+/// pipe. A write that ends early fails the call when the child exited successfully (its answer is
+/// to a truncated prompt); a child that exited with a failure is reported by its exit status.
+pub(crate) async fn output_with_prompt(
+    mut cmd: tokio::process::Command,
+    prompt: &str,
+) -> std::io::Result<std::process::Output> {
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    // Dropped (so aborted) on every way out of this function, a cancelled call included.
+    let writer = child.stdin.take().map(|stdin| {
+        camerata_api_types::claude_cli::PromptWriter::start(
+            stdin,
+            stdin_prompt(prompt).into_bytes(),
+        )
+    });
+    let out = child.wait_with_output().await?;
+    // Any write failure (a broken pipe, the child closing its input early, included) means the
+    // prompt did not arrive whole: a child that exited successfully fails the call rather than
+    // return the answer to a truncated prompt; a failed exit is explained by its own status.
+    if let Some(writer) = writer {
+        if let Err(e) = writer.finish().await {
+            eprintln!("[camerata-intake] writing the prompt to the claude CLI failed: {e}");
+            if out.status.success() {
+                return Err(e);
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl ClaudeLeadEngineer {
     /// The `claude -p` command for one planning call (everything except the spawn), so the exact
-    /// argument list is testable without a `claude` binary.
-    fn build_command(&self, prompt: &str) -> tokio::process::Command {
+    /// argument list is testable without a `claude` binary. The prompt is not in it: it goes to
+    /// the child on stdin (see [`output_with_prompt`]).
+    fn build_command(&self) -> tokio::process::Command {
         // A READ-ONLY, JSON-output, ungoverned planning call. There is NO MCP gateway and
         // NO write tools — the lead engineer reasons and plans, it does not build. THE
         // INVARIANT: when a repo clone is bound, the call runs WITH it as cwd + `--add-dir`
@@ -576,9 +619,8 @@ impl ClaudeLeadEngineer {
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
-        // carries a raw secret, and the prompt reaches `claude -p` as an argument.
+        // carries a raw secret, and the prompt reaches `claude -p` on stdin.
         cmd.arg("-p")
-            .arg(camerata_secrets::model_input::redact_for_model(prompt).as_ref())
             .arg("--model")
             .arg(&self.model)
             .arg("--allowedTools")
@@ -856,8 +898,9 @@ impl LeadEngineer for ClaudeLeadEngineer {
     async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
         let prompt = Self::build_prompt(form, self.grounding.as_deref());
 
-        let mut cmd = self.build_command(&prompt);
-        let out = cmd.output().await.map_err(LeadEngineerError::Spawn)?;
+        let out = output_with_prompt(self.build_command(), &prompt)
+            .await
+            .map_err(LeadEngineerError::Spawn)?;
 
         if !out.status.success() {
             return Err(LeadEngineerError::NonZeroExit {
@@ -952,27 +995,28 @@ mod tests {
         }
     }
 
-    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` as an
-    /// argument, so it is redacted on its way into the argv.
+    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` on stdin,
+    /// so it is redacted on its way there, and it is not in the argv at all.
     #[test]
     fn the_prompt_handed_to_claude_carries_no_raw_secret() {
         let planted =
             camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
-        let cmd = ClaudeLeadEngineer::new()
-            .build_command(&format!("Review this. The config says {}.", planted.text));
+        let cmd = ClaudeLeadEngineer::new().build_command();
         let argv: Vec<String> = cmd
             .as_std()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !argv.iter().any(|a| a.contains(&planted.value)),
-            "a secret value reached the claude argv"
+            !argv.iter().any(|a| a.starts_with("Review this.")),
+            "the prompt must not ride in the claude argv: {argv:?}"
         );
+        let prompt = stdin_prompt(&format!("Review this. The config says {}.", planted.text));
         assert!(
-            argv.iter().any(|a| a.starts_with("Review this.")),
-            "{argv:?}"
+            !prompt.contains(&planted.value),
+            "a secret value reached the claude stdin"
         );
+        assert!(prompt.starts_with("Review this."), "{prompt:?}");
     }
 
     /// The planning call is isolated from the launcher: with no repo it runs in the engine's
@@ -986,14 +1030,14 @@ mod tests {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect()
         };
-        let bare = ClaudeLeadEngineer::new().build_command("plan");
+        let bare = ClaudeLeadEngineer::new().build_command();
         assert_eq!(
             bare.as_std().get_current_dir(),
             Some(camerata_api_types::claude_cli::engine_empty_cwd().as_path())
         );
         let bound = ClaudeLeadEngineer::new()
             .with_repo_dir("/Users/auditor/clients/acme")
-            .build_command("plan");
+            .build_command();
         assert_eq!(
             bound.as_std().get_current_dir(),
             Some(std::path::Path::new("/Users/auditor/clients/acme"))

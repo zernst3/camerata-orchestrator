@@ -485,6 +485,16 @@ impl StageLedgerEntry {
     }
 }
 
+/// One dependency file (a manifest or a lockfile) the dependency audit was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditedDependencyFile {
+    pub repo: String,
+    /// Repo-relative, `/`-separated.
+    pub path: String,
+    /// The file sits inside a folder of bundled outside code such as `vendor/`.
+    pub vendored: bool,
+}
+
 /// The scan-wide evaluation ledger: per-rule execution facts + per-stage row accounting,
 /// accumulated during a scan (see `onboard::audit_repos`, `ai_audit::audit_repo`) and carried
 /// into the report build (`report_export::build_report_json`). See the module doc comment.
@@ -572,6 +582,11 @@ pub struct ScanLedger {
     /// carrying removes no row. `None` for a ledger written before places existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     place_merge: Option<crate::review_tree::PlaceMergeBlock>,
+    /// The convention model's accounting (design 2026-11-20, section 5 step 6): for each rule
+    /// with options, the finder rows citing it split into departures, conforming and unknown,
+    /// plus the places recorded and the departure rows made. `None` for a ledger written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conventions: Option<ConventionsBlock>,
     /// The run's sites and groups for the estimate's fit; see [`GroupReviewCounts`]. Set with the
     /// escalation block. `None` until the group reviewer has run, and for a ledger written
     /// before the record existed.
@@ -610,6 +625,16 @@ pub struct ScanLedger {
     /// existed, or by a caller that does not record one.
     #[serde(default)]
     engagement: Option<crate::client_lock::EngagementRecord>,
+    /// Set when this ledger came from a rerun of a saved run's deterministic stages on another
+    /// build (#588): the build that made the model work and the build that ran the checks. The
+    /// report's "How this was done" names both. `None` for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rerun: Option<crate::run_store::engine_pin::RerunRecord>,
+    /// The dependency files (manifests and lockfiles) the dependency audit was given, per repo,
+    /// with those inside a bundled-code folder marked vendored. Disclosed in the dependency
+    /// section of every export. `serde(default)` so an older ledger still loads.
+    #[serde(default)]
+    audited_dependency_files: Vec<AuditedDependencyFile>,
     /// H11: set when this run re-audited only the files that changed since an earlier
     /// inspection and carried the rest of that inspection's findings forward. The exporters
     /// state it on the cover, so a reader never takes a partial re-audit for a full one.
@@ -875,6 +900,153 @@ pub struct IncrementalCarry {
     pub prior_sha: Option<String>,
 }
 
+/// One rule's convention accounting: the finder rows citing it, split into three parts that add
+/// up to the total, and the recorded places with the departure rows made from them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConventionLedgerRule {
+    pub repo: String,
+    pub rule_id: String,
+    /// Finder rows citing the rule.
+    pub finder_rows: usize,
+    /// Of those, departures from the standard.
+    pub departures: usize,
+    /// Of those, conforming (including places that follow the rule's default).
+    pub conforming: usize,
+    /// Of those, with no standard or an option that could not be worked out.
+    pub unknown: usize,
+    /// Places the scan recorded across the rule's options.
+    pub recorded_places: usize,
+    /// Departure rows the standard asked for beside the finder's own.
+    pub departure_rows: usize,
+}
+
+impl ConventionLedgerRule {
+    /// The three parts add up to the total.
+    pub fn reconciles(&self) -> bool {
+        self.departures + self.conforming + self.unknown == self.finder_rows
+    }
+}
+
+/// The convention accounting of a run, one entry per (repo, rule with options).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConventionsBlock {
+    pub rules: Vec<ConventionLedgerRule>,
+    /// Finder rows the records counted that are in neither the final rows nor the rows set aside
+    /// (lost between tagging and the report). Worked out from the final rows by
+    /// [`Self::check_finder_rows_kept`]; zero until that check runs.
+    #[serde(default)]
+    pub lost_finder_rows: usize,
+}
+
+impl ConventionsBlock {
+    /// Built from the convention records and the rows they ask for.
+    pub fn from_records(
+        records: &[camerata_api_types::audit::RuleConvention],
+        rows: &[crate::onboard::Finding],
+    ) -> Self {
+        use camerata_api_types::audit::PlaceStatus;
+        let rules = records
+            .iter()
+            .map(|c| {
+                let count = |f: &dyn Fn(PlaceStatus) -> bool| {
+                    c.finder_rows.iter().filter(|r| f(r.status)).count()
+                };
+                ConventionLedgerRule {
+                    repo: c.repo.clone(),
+                    rule_id: c.rule_id.clone(),
+                    finder_rows: c.finder_rows.len(),
+                    departures: count(&|s| s == PlaceStatus::Departs),
+                    conforming: count(&|s| {
+                        matches!(s, PlaceStatus::Conforms | PlaceStatus::FollowsRuleDefault)
+                    }),
+                    unknown: count(&|s| s == PlaceStatus::NoStandard),
+                    recorded_places: c.options.iter().map(|o| o.places.len()).sum(),
+                    departure_rows: rows
+                        .iter()
+                        .filter(|f| {
+                            f.repo == c.repo
+                                && f.rule_id.eq_ignore_ascii_case(&c.rule_id)
+                                && f.captures
+                                    .contains_key(crate::conventions::CONVENTION_PLACE_CAPTURE)
+                        })
+                        .count(),
+                }
+            })
+            .collect();
+        Self {
+            rules,
+            lost_finder_rows: 0,
+        }
+    }
+
+    /// The independent check (design section 5, step 6): every finder row a record counted is
+    /// still in the final rows (as a row, or as a place absorbed into one) or in the rows set
+    /// aside. The three-part sum above is true by construction; this is what catches a row lost
+    /// in a merge or a dedup after it was tagged. Rows match by site key when they have one, else
+    /// by their place (repo, path, line). Returns the rows that are gone, and records how many.
+    pub fn check_finder_rows_kept(
+        &mut self,
+        records: &[camerata_api_types::audit::RuleConvention],
+        rows: &[crate::onboard::Finding],
+        discarded: &[crate::onboard::Finding],
+    ) -> Vec<(String, String, usize)> {
+        let keys: std::collections::HashSet<&str> = rows
+            .iter()
+            .chain(discarded)
+            .map(|f| f.site_key.as_str())
+            .chain(
+                rows.iter()
+                    .flat_map(|f| f.flagged_by.iter().map(|s| s.site_key.as_str())),
+            )
+            .filter(|k| !k.is_empty())
+            .collect();
+        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        // Only a FINAL row's `flagged_by` accounts for a folded row (the owner's ruling).
+        let is_final = |f: &crate::onboard::Finding| rows.iter().any(|r| std::ptr::eq(r, f));
+        let place = |repo: &str, path: &str, line: usize, rule: &str| {
+            let path = path.trim_start_matches("./");
+            rows.iter().chain(discarded).any(|f| {
+                (f.repo == repo
+                    && f.path.trim_start_matches("./") == path
+                    && f.line == line
+                    && same(&f.rule_id, rule))
+                    || f.also_locations.iter().any(|l| {
+                        l.repo == repo
+                            && l.path.trim_start_matches("./") == path
+                            && l.line == line
+                            && same(&l.rule_id, rule)
+                    })
+                    // A row the collapse folded into another stays on the survivor's
+                    // `flagged_by` at its own place, under its own rule id: merged, not lost.
+                    || (f.repo == repo
+                        && is_final(f)
+                        && f.flagged_by.iter().any(|s| {
+                            s.path.trim_start_matches("./") == path
+                                && s.line == line
+                                && same(&s.rule_id, rule)
+                        }))
+            })
+        };
+        let mut lost = Vec::new();
+        for c in records {
+            for r in &c.finder_rows {
+                let kept = (!r.site_key.is_empty() && keys.contains(r.site_key.as_str()))
+                    || place(&c.repo, &r.path, r.line, &r.keyed_rule_id);
+                if !kept {
+                    lost.push((c.rule_id.clone(), r.path.clone(), r.line));
+                }
+            }
+        }
+        self.lost_finder_rows = lost.len();
+        lost
+    }
+
+    /// Every rule's three parts add up to its total, and no finder row was lost.
+    pub fn reconciles(&self) -> bool {
+        self.lost_finder_rows == 0 && self.rules.iter().all(ConventionLedgerRule::reconciles)
+    }
+}
+
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
 ///
 /// # Why the gate needed this, and why it lives on the ledger
@@ -930,7 +1102,7 @@ pub struct ScanInputFacts {
     #[serde(default)]
     pub audit_model: Option<String>,
     /// Auditable files the scan did NOT read, by path and reason (over the size cap, or past
-    /// the file cap). H4: listed under Coverage in the report and `findings.json` so a skipped
+    /// the file cap). H4: listed under Coverage in the report and `json/inspection.json` so a skipped
     /// file is named, never silently absent. `serde(default)` so an older ledger still loads.
     #[serde(default)]
     pub skipped_files: Vec<SkippedFile>,
@@ -958,6 +1130,60 @@ pub struct SkippedTotals {
     pub beyond_file_cap: usize,
     #[serde(default)]
     pub not_text: usize,
+    /// Files the project's exclusion list names: not read, by agreement.
+    #[serde(default)]
+    pub excluded_by_agreement: usize,
+    /// Files with a line longer than the room's read page: not read.
+    #[serde(default)]
+    pub long_line: usize,
+    /// Files that declare themselves generated: not read, billed or counted; the secret checks
+    /// searched each. The one stated exception to read equals billed.
+    #[serde(default)]
+    pub generated: usize,
+    /// Generated files the secret checks did NOT search (the floor was off, the file is over the
+    /// secret search ceiling or is not text): not read, billed or counted either.
+    #[serde(default)]
+    pub generated_unsearched: usize,
+    /// Hand-written files of a type the inspection does not read yet
+    /// (`onboard::files::NOT_INSPECTED_TYPES`): not read, billed or searched for secrets.
+    #[serde(default)]
+    pub not_inspected_type: usize,
+    /// The same, for the files the engine still opens to read their declared runtime or package
+    /// versions ([`SkipReason::NotInspectedVersionsOnly`]): not billed or searched for secrets.
+    #[serde(default)]
+    pub not_inspected_versions_only: usize,
+    /// Symbolic links: never followed, so what one points to is not read through it.
+    #[serde(default)]
+    pub symlink: usize,
+    /// Tracked files whose NAME is not UTF-8 text: the file is not read, and its contents were
+    /// never looked at.
+    #[serde(default)]
+    pub name_not_text: usize,
+    /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
+    /// files: each is counted once per run, however many repos it was recorded for.
+    #[serde(default)]
+    pub excluded_never_read: usize,
+    /// True when the deterministic floor ran its secret checks over the contents of files that
+    /// were not read for the inspection (over the file size limit, or with a long line). The
+    /// three counts below mean nothing when this is false. Not part of [`Self::total`].
+    #[serde(default)]
+    pub secret_search_ran: bool,
+    /// Files not read for the inspection whose contents were still searched for secrets.
+    #[serde(default)]
+    pub secret_searched: usize,
+    /// Files over the secret search ceiling (`onboard::files::MAX_SECRET_SCAN_BYTES`): file-name
+    /// checks only. These are also counted in `oversize`.
+    #[serde(default)]
+    pub secret_over_ceiling: usize,
+    /// Files over the file size limit and under the ceiling that are not text this scan can
+    /// decode: file-name checks only. These are also counted in `oversize`.
+    #[serde(default)]
+    pub secret_oversize_not_text: usize,
+    /// Files over the file size limit and under the ceiling that the run's total secret search
+    /// budget (`onboard::files::MAX_SECRET_SEARCH_TOTAL_BYTES`) left unsearched: file-name checks
+    /// only. These are also counted in `oversize`.
+    #[serde(default)]
+    pub secret_over_budget: usize,
 }
 
 impl SkippedTotals {
@@ -967,12 +1193,32 @@ impl SkippedTotals {
             SkipReason::Oversize => self.oversize,
             SkipReason::BeyondFileCap => self.beyond_file_cap,
             SkipReason::NotText => self.not_text,
+            SkipReason::ExcludedByAgreement => self.excluded_by_agreement,
+            SkipReason::LongLine => self.long_line,
+            SkipReason::Generated => self.generated,
+            SkipReason::GeneratedUnsearched => self.generated_unsearched,
+            SkipReason::NotInspectedType => self.not_inspected_type,
+            SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only,
+            SkipReason::ExcludedNeverRead => self.excluded_never_read,
+            SkipReason::Symlink => self.symlink,
+            SkipReason::NameNotText => self.name_not_text,
         }
     }
 
-    /// Files skipped for any reason.
+    /// Files skipped for any reason. Patterns that removed nothing (`excluded_never_read`) are
+    /// not files and are not in it.
     pub fn total(&self) -> usize {
-        self.oversize + self.beyond_file_cap + self.not_text
+        self.oversize
+            + self.beyond_file_cap
+            + self.not_text
+            + self.excluded_by_agreement
+            + self.long_line
+            + self.generated
+            + self.generated_unsearched
+            + self.not_inspected_type
+            + self.not_inspected_versions_only
+            + self.symlink
+            + self.name_not_text
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -980,6 +1226,15 @@ impl SkippedTotals {
             SkipReason::Oversize => self.oversize += 1,
             SkipReason::BeyondFileCap => self.beyond_file_cap += 1,
             SkipReason::NotText => self.not_text += 1,
+            SkipReason::ExcludedByAgreement => self.excluded_by_agreement += 1,
+            SkipReason::LongLine => self.long_line += 1,
+            SkipReason::Generated => self.generated += 1,
+            SkipReason::GeneratedUnsearched => self.generated_unsearched += 1,
+            SkipReason::NotInspectedType => self.not_inspected_type += 1,
+            SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only += 1,
+            SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
+            SkipReason::Symlink => self.symlink += 1,
+            SkipReason::NameNotText => self.name_not_text += 1,
         }
     }
 }
@@ -1120,6 +1375,8 @@ pub struct SkippedFileList {
     beyond_cap_total: usize,
     totals: SkippedTotals,
     file_cap_hits: Vec<FileCapHit>,
+    /// Never-read patterns already recorded, so a project-wide wildcard pattern is one row.
+    never_read_seen: std::collections::HashSet<String>,
 }
 
 /// What one repo's walk skipped, as the walk reports it (`onboard::files::ExtractedRepo`).
@@ -1130,6 +1387,27 @@ pub struct RepoSkips<'a> {
     pub beyond_cap: Vec<String>,
     /// Files that are not text this scan can decode.
     pub not_text: Vec<String>,
+    /// Files the project's exclusion list names (`onboard::scope`): not read, by agreement.
+    pub excluded_by_agreement: Vec<String>,
+    /// Files with a line longer than the room's read page.
+    pub long_line: Vec<String>,
+    /// Files that declare themselves generated (`onboard::files::declares_generated`) and whose
+    /// contents the secret checks searched.
+    pub generated: Vec<String>,
+    /// Files that declare themselves generated and were NOT searched for secrets (floor off, over
+    /// the secret search ceiling, or not text).
+    pub generated_unsearched: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet
+    /// (`onboard::files::NOT_INSPECTED_TYPES`).
+    pub not_inspected_type: Vec<String>,
+    /// Excluded by agreement patterns that match only files never read anyway: listed by the
+    /// pattern, so the client sees the exclusion removed nothing that would have been read.
+    pub excluded_never_read: Vec<String>,
+    /// Symbolic links (`onboard::files::symlink_label`): never followed, so never read through.
+    pub symlink: Vec<String>,
+    /// Tracked paths whose name is not UTF-8 text (`onboard::files::name_not_text_label`), shown
+    /// with each invalid byte as a hex escape: the file is not read.
+    pub name_not_text: Vec<String>,
     /// The size in bytes of each skipped file the walk could measure, by path.
     pub sizes: &'a std::collections::HashMap<String, u64>,
     /// The file limit the walk applied.
@@ -1165,12 +1443,30 @@ impl SkippedFileList {
     /// file limit. The one call the scan makes per repo.
     pub fn record_repo(&mut self, repo: &str, skips: RepoSkips<'_>) {
         let not_scanned = skips.beyond_cap.len();
+        // The files of a type not inspected yet that the engine still opens for declared
+        // versions carry their own reason: never plainly "not read".
+        let (not_inspected_plain, not_inspected_versions) =
+            crate::onboard::files::split_not_inspected(&skips.not_inspected_type);
         for (paths, reason) in [
             (skips.oversize, SkipReason::Oversize),
             (skips.beyond_cap, SkipReason::BeyondFileCap),
             (skips.not_text, SkipReason::NotText),
+            (skips.excluded_by_agreement, SkipReason::ExcludedByAgreement),
+            (skips.long_line, SkipReason::LongLine),
+            (skips.generated, SkipReason::Generated),
+            (skips.generated_unsearched, SkipReason::GeneratedUnsearched),
+            (not_inspected_plain, SkipReason::NotInspectedType),
+            (not_inspected_versions, SkipReason::NotInspectedVersionsOnly),
+            (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
+            (skips.symlink, SkipReason::Symlink),
+            (skips.name_not_text, SkipReason::NameNotText),
         ] {
             for path in paths {
+                if reason == SkipReason::ExcludedNeverRead
+                    && !self.never_read_seen.insert(path.clone())
+                {
+                    continue;
+                }
                 let bytes = skips.sizes.get(&path).copied();
                 self.push_sized(repo, path, reason, bytes);
             }
@@ -1187,6 +1483,23 @@ impl SkippedFileList {
     /// The count of every skipped file per reason. Read before [`Self::finish`].
     pub fn totals(&self) -> SkippedTotals {
         self.totals
+    }
+
+    /// Record what the secret checks did over the files not read for the inspection: `searched`
+    /// had their contents searched, `over_ceiling`, `not_text` and `over_budget` (over-limit files)
+    /// got file-name checks only. Called once per repo when the deterministic floor ran.
+    pub fn record_secret_search(
+        &mut self,
+        searched: usize,
+        over_ceiling: usize,
+        not_text: usize,
+        over_budget: usize,
+    ) {
+        self.totals.secret_over_budget += over_budget;
+        self.totals.secret_search_ran = true;
+        self.totals.secret_searched += searched;
+        self.totals.secret_over_ceiling += over_ceiling;
+        self.totals.secret_oversize_not_text += not_text;
     }
 
     /// The repos that reached the file limit. Read before [`Self::finish`].
@@ -1218,22 +1531,66 @@ pub struct SkippedFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
-    /// Larger than `onboard::files::MAX_FILE_BYTES` (400 KB).
+    /// Larger than `onboard::files::MAX_FILE_BYTES` (1 MB).
     Oversize,
     /// Past `onboard::files::HARD_CAP_FILES` (20,000 files) in its repo.
     BeyondFileCap,
     /// Not text this scan can decode: a binary key store, or a file in a legacy code page (H9).
     /// UTF-16 with a byte order mark is decoded and read, so it is not in this class.
     NotText,
+    /// Named by the project's exclusion list (`onboard::scope`): the client and the operator
+    /// agreed it is not part of the inspection, so it is not read, counted or billed.
+    ExcludedByAgreement,
+    /// A line longer than the room's read page: the file cannot be read in full.
+    LongLine,
+    /// The file declares itself generated in a comment near its top (a tool's own marker): it is
+    /// not read for the inspection, billed or counted, but the secret checks searched it.
+    Generated,
+    /// A generated file the secret checks did not search: the deterministic floor was off, the
+    /// file is over the secret search ceiling, or it is not text.
+    GeneratedUnsearched,
+    /// A hand-written file of a type the inspection does not read yet
+    /// (`onboard::files::NOT_INSPECTED_TYPES`, GitHub #338): never opened, so not read, billed or
+    /// searched for secrets. Listed so Coverage is never silent about a hand-written file.
+    NotInspectedType,
+    /// A file of a type not inspected yet that the engine still opens to read its declared runtime
+    /// or package versions (a project file, a `Gemfile`): not billed or searched for secrets, and
+    /// never called plainly not read.
+    NotInspectedVersionsOnly,
+    /// An Excluded by agreement pattern that matches only files Camerata never reads anyway: the
+    /// exclusion removed nothing that would have been read or billed.
+    ExcludedNeverRead,
+    /// A symbolic link: never followed, so the file or folder it points to (inside the repository,
+    /// outside it, or nothing) is not read, billed or counted through it.
+    Symlink,
+    /// A tracked file whose NAME is not UTF-8 text: the file is not read (its contents were
+    /// never looked at), and the name is shown with each invalid byte as a hex escape.
+    NameNotText,
 }
 
 impl SkipReason {
     /// The client-facing reason, as the Coverage section states it.
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            SkipReason::Oversize => "over the 400 KB file size limit",
-            SkipReason::BeyondFileCap => "beyond the 20,000-file limit",
-            SkipReason::NotText => "not UTF-8 text",
+            SkipReason::Oversize => format!(
+                "over the {} file size limit",
+                crate::onboard::files::max_file_label()
+            ),
+            SkipReason::BeyondFileCap => "beyond the 20,000-file limit".to_string(),
+            SkipReason::NotText => "not UTF-8 text".to_string(),
+            SkipReason::ExcludedByAgreement => "excluded by agreement".to_string(),
+            SkipReason::LongLine => crate::onboard::files::long_line_label(),
+            SkipReason::Generated => crate::onboard::files::generated_label(),
+            SkipReason::GeneratedUnsearched => crate::onboard::files::generated_unsearched_label(),
+            SkipReason::NotInspectedType => crate::onboard::files::not_inspected_label(),
+            SkipReason::NotInspectedVersionsOnly => {
+                crate::onboard::files::not_inspected_versions_label()
+            }
+            SkipReason::ExcludedNeverRead => {
+                "excluded by agreement; nothing here is read by default".to_string()
+            }
+            SkipReason::Symlink => crate::onboard::files::symlink_label(),
+            SkipReason::NameNotText => crate::onboard::files::name_not_text_label(),
         }
     }
 }
@@ -1488,9 +1845,29 @@ impl ScanLedger {
         self.outage.is_some()
     }
 
+    /// Add the dependency files one repo's audit was given.
+    pub fn record_audited_dependency_files(&mut self, files: Vec<AuditedDependencyFile>) {
+        self.audited_dependency_files.extend(files);
+    }
+
+    /// The dependency files the audit was given, across repos, in the order recorded.
+    pub fn audited_dependency_files(&self) -> &[AuditedDependencyFile] {
+        &self.audited_dependency_files
+    }
+
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.
     pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
         self.engagement = Some(record);
+    }
+
+    /// Record that this ledger came from a rerun of the deterministic stages (#588). Overwrites.
+    pub fn record_rerun(&mut self, rerun: crate::run_store::engine_pin::RerunRecord) {
+        self.rerun = Some(rerun);
+    }
+
+    /// The rerun this ledger came from, when it did.
+    pub fn rerun(&self) -> Option<&crate::run_store::engine_pin::RerunRecord> {
+        self.rerun.as_ref()
     }
 
     /// Add what one repository held: waiver comments and baseline entries that were not honoured.
@@ -1617,6 +1994,56 @@ impl ScanLedger {
     /// Record the place merge, replacing an earlier one (the tree is built again after an edit).
     pub fn record_place_merge(&mut self, block: crate::review_tree::PlaceMergeBlock) {
         self.place_merge = Some(block);
+    }
+
+    /// Record the convention accounting, replacing an earlier one.
+    pub fn record_conventions(&mut self, block: ConventionsBlock) {
+        self.conventions = Some(block);
+    }
+
+    /// Settle a clone-based rule's entry for `repo` after its clone check was redone on a saved
+    /// run (the recheck of an incomplete inspection): the rows the check emitted are added to the
+    /// entry's count, and when every candidate now has a verdict (`fully`) the rule is recorded
+    /// as having run, with the not-assessed disclosure taken off. Otherwise the entry keeps the
+    /// partial disclosure and `skip_reason` says what is left. Returns false when the ledger holds
+    /// no entry for the rule on that repo (nothing is changed then).
+    pub fn settle_clone_rule(
+        &mut self,
+        repo: &str,
+        rule_id: &str,
+        fully: bool,
+        skip_reason: Option<String>,
+        new_rows: usize,
+    ) -> bool {
+        let Some(entry) = self.rules.get_mut(&(rule_id.to_string(), repo.to_string())) else {
+            return false;
+        };
+        entry.findings_emitted += new_rows;
+        if fully {
+            entry.ran = true;
+            entry.skip_reason = None;
+            if entry
+                .coverage_note
+                .as_deref()
+                .is_some_and(|n| n == ADVISORY_PARTIAL_NOTE || n == ADVISORY_UNAVAILABLE_NOTE)
+            {
+                entry.coverage_note = None;
+            }
+        } else {
+            if !entry.ran {
+                entry.skip_reason = skip_reason;
+            }
+            entry.coverage_note = Some(ADVISORY_PARTIAL_NOTE.to_string());
+        }
+        self.advisory_partial_pending
+            .remove(&(repo.to_string(), rule_id.to_string()));
+        self.invalidate_merged();
+        true
+    }
+
+    /// The convention accounting of the run.
+    pub fn conventions(&self) -> Option<&ConventionsBlock> {
+        self.conventions.as_ref()
     }
 
     /// The place merge of the run, once the tree has been built.
@@ -2311,6 +2738,44 @@ pub fn record_addition_stage(
     ledger.record_stage(stage, rows_in, rows_out, acc);
 }
 
+/// The start of every pipeline integrity disclosure's pass name: the failed passes the final
+/// checks make, which a recheck of a saved run replaces with the current build's result of the
+/// same checks.
+pub const INTEGRITY_PASS_PREFIX: &str = "pipeline integrity (";
+
+/// The pass name of a pipeline integrity disclosure about `what` (a stage name, or `convention
+/// accounting`).
+pub fn integrity_pass_name(what: &str) -> String {
+    format!("{INTEGRITY_PASS_PREFIX}{what})")
+}
+
+/// The disclosure for finder rows the convention accounting lost (`lost`: rule id, path, line of
+/// each), or `None` when none was. One producer for the scan and for the recheck of a saved run, so
+/// the two can never word the same failure differently.
+pub fn convention_accounting_failure(
+    repo_label: &str,
+    lost: &[(String, String, usize)],
+) -> Option<crate::ai_audit::FailedPass> {
+    let first = lost.first()?;
+    Some(crate::ai_audit::FailedPass {
+        repo: repo_label.to_string(),
+        pass: integrity_pass_name("convention accounting"),
+        reason: format!(
+            "{} finder row(s) counted for rules with options are in neither the final rows nor \
+             the rows set aside (first: {} at {}:{})",
+            lost.len(),
+            first.0,
+            first.1,
+            first.2,
+        ),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    })
+}
+
 /// A runtime disclosure for one stage's integrity gap, or `None` when the stage reconciled
 /// cleanly. Rides the EXISTING `FailedPass` mechanism (`crate::ai_audit::FailedPass`) into
 /// the report's methodology/executive-summary disclosure list — never a refused export, never
@@ -2324,7 +2789,7 @@ pub fn stage_disclosure(
     }
     Some(crate::ai_audit::FailedPass {
         repo: repo_label.to_string(),
-        pass: format!("pipeline integrity ({})", stage.stage),
+        pass: integrity_pass_name(&stage.stage),
         reason: format!(
             "{} of {} row(s) entering this stage have no recorded disposition (rows_out={}, \
              merged={}, held={}, informational={}, deduped={})",
@@ -4268,5 +4733,74 @@ mod tests {
         let back: ScanLedger =
             serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
         assert_eq!(back.group_review_counts(), ledger.group_review_counts());
+    }
+
+    // ── Item 31: "excluded by agreement" is a skip reason like the others ───────────────────
+
+    #[test]
+    fn a_file_excluded_by_agreement_is_recorded_named_counted_and_worded() {
+        let mut list = SkippedFileList::default();
+        let sizes: std::collections::HashMap<String, u64> =
+            [("seeds/data.js".to_string(), 6_100_000u64)].into();
+        list.record_repo(
+            "acme/app",
+            RepoSkips {
+                oversize: Vec::new(),
+                beyond_cap: Vec::new(),
+                not_text: Vec::new(),
+                excluded_by_agreement: vec!["seeds/data.js".to_string()],
+                long_line: Vec::new(),
+                generated: Vec::new(),
+                generated_unsearched: Vec::new(),
+                not_inspected_type: Vec::new(),
+                excluded_never_read: Vec::new(),
+                symlink: Vec::new(),
+                name_not_text: Vec::new(),
+                sizes: &sizes,
+                file_cap: 20_000,
+            },
+        );
+        let totals = list.totals();
+        assert_eq!(totals.excluded_by_agreement, 1);
+        assert_eq!(totals.total(), 1);
+        assert_eq!(totals.of(SkipReason::ExcludedByAgreement), 1);
+        let (listed, more) = list.finish();
+        assert_eq!(more, 0);
+        assert_eq!(
+            listed,
+            [SkippedFile {
+                repo: "acme/app".to_string(),
+                path: "seeds/data.js".to_string(),
+                reason: SkipReason::ExcludedByAgreement,
+                bytes: Some(6_100_000),
+            }]
+        );
+        assert_eq!(
+            SkipReason::ExcludedByAgreement.label(),
+            "excluded by agreement"
+        );
+        assert_eq!(
+            serde_json::to_value(SkipReason::ExcludedByAgreement).unwrap(),
+            "excluded_by_agreement"
+        );
+    }
+
+    #[test]
+    fn an_older_ledger_without_the_new_total_still_loads() {
+        let old: SkippedTotals =
+            serde_json::from_str(r#"{"oversize":2,"beyond_file_cap":1,"not_text":0}"#).unwrap();
+        assert_eq!(old.excluded_by_agreement, 0);
+        assert_eq!(old.total(), 3);
+    }
+
+    #[test]
+    fn the_oversize_label_takes_its_number_from_the_read_limit() {
+        assert_eq!(
+            SkipReason::Oversize.label(),
+            format!(
+                "over the {} file size limit",
+                crate::onboard::files::max_file_label()
+            )
+        );
     }
 }

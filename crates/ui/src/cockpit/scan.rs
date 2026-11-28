@@ -40,7 +40,7 @@ pub(super) use camerata_ui_core::triage::{
 // about one (repo, rule) — and `RuleHubView` is already the flat owned props shape, so the
 // strip that renders it needs no second DTO. The conforming count comes through as two
 // integers deliberately: the conforming sites are not in the data, only the counts.
-pub(super) use camerata_ui_core::triage::{rule_hub, RuleHubView};
+pub(super) use camerata_ui_core::triage::RuleHubView;
 
 // Pass 2 step 2: the MANUAL column sort over the curated default. `severity_sort_value` is the
 // Severity column's cell value — the authored severity carrying its calibrated ladder position,
@@ -104,6 +104,7 @@ mod banners_panels;
 mod cost_panel;
 mod exports;
 mod findings_table;
+mod inspection_run;
 mod onboard;
 mod queue_table;
 mod repo_health;
@@ -115,6 +116,7 @@ pub use banners_panels::*;
 pub use cost_panel::*;
 pub use exports::*;
 pub use findings_table::*;
+pub(crate) use inspection_run::*;
 pub use onboard::*;
 pub use queue_table::*;
 pub use repo_health::*;
@@ -122,15 +124,25 @@ pub use rescan::*;
 pub use scan_results::*;
 pub(super) use wire::*;
 
-/// The export dialog offers the triage log as an unticked box (off by default).
+/// The export dialog has no triage log box (the log left the client package) and offers it in an
+/// operator files block instead.
 #[cfg(test)]
 mod export_dialog_triage_log_box;
+
+/// Held rows live in the triage table; the export panel keeps one line (work order E).
+#[cfg(test)]
+mod held_rows_tests;
 
 /// The inspection setup's client-name field follows the project it is shown for. The field keeps
 /// its own text while it is on screen, so without a key a switch from one project to another
 /// reuses the first project's text and the next save posts it under the second project's id.
 #[cfg(test)]
 mod client_name_setup_follows_the_project;
+
+/// The finding-detail modal's code context and recommended fix follow the finding they are given
+/// (a lone `key:` on a plain child does not remount it).
+#[cfg(test)]
+mod finding_detail_follows_the_finding;
 
 #[cfg(test)]
 mod tests;
@@ -150,6 +162,8 @@ mod render_tests;
 #[cfg(test)]
 mod pane_render_tests;
 
+#[cfg(test)]
+mod convention_click_tests;
 #[cfg(test)]
 mod rule_hub_tests;
 
@@ -190,3 +204,22 @@ mod order_preset_reload_tests;
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod order_preset_followup_tests;
+
+/// "Run what remains" after a scan run from the screen: every scan is a saved job, the saved id
+/// enables the button and a click fetches the plan.
+#[cfg(test)]
+mod resume_button_tests;
+
+/// The pre-start check: a file over the read limit is a warning and leaves Start on; a pattern
+/// that matches nothing holds Start until it is fixed or removed.
+#[cfg(test)]
+mod over_limit_start_tests;
+
+/// The Inspection screen tells the truth (work order C): per finder, the "This run" block, the
+/// estimate, the Inspect button and the help behind "?".
+#[cfg(test)]
+mod inspection_screen_tests;
+
+/// Loading the saved draft never turns an unreadable part into "nothing saved".
+#[cfg(test)]
+mod draft_load_tests;

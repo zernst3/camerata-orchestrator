@@ -16,7 +16,7 @@ const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// Remove the Anthropic API key from a `claude` subprocess's environment. Takes the std command
 /// so it works for both `std::process::Command` and, via `as_std_mut()`,
-/// `tokio::process::Command`, without this leaf crate depending on tokio.
+/// `tokio::process::Command`.
 pub fn scrub_anthropic_key_env(cmd: &mut std::process::Command) {
     cmd.env_remove(ANTHROPIC_API_KEY_ENV);
 }
@@ -130,6 +130,253 @@ pub fn isolate_room_call(cmd: &mut std::process::Command, room_dir: &std::path::
         .current_dir(room_dir);
 }
 
+/// Hand a prompt to a `claude` child on its standard input, then close the input so the CLI
+/// sees the end of the prompt.
+///
+/// `claude -p` reads its prompt from stdin when none is given as an argument. The prompt must
+/// not ride in the argument list: the OS caps the arguments and environment of one process (about
+/// 1 MB on macOS, `ARG_MAX`), and a prompt that carries whole documents is larger, so the spawn
+/// fails with "Argument list too long (os error 7)". Stdin has no such cap.
+pub async fn write_prompt<W>(mut stdin: W, prompt: Vec<u8>) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    stdin.write_all(&prompt).await?;
+    stdin.shutdown().await
+}
+
+/// A [`write_prompt`] running on its own task, so a child that answers before it has read
+/// everything cannot block both sides on full pipes.
+///
+/// Dropping it aborts the task, so a call that is killed, times out or is dropped leaves no
+/// writer behind. [`PromptWriter::finish`] reports how the write ended: any failure, a broken pipe
+/// from a child that exited early included, means the prompt did not reach the child whole, and the
+/// answer to a truncated prompt must not be taken as the answer.
+pub struct PromptWriter {
+    handle: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+}
+
+impl PromptWriter {
+    /// Start writing `prompt` to `stdin` on a new task. Needs a running tokio runtime.
+    pub fn start<W>(stdin: W, prompt: Vec<u8>) -> Self
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self {
+            handle: Some(tokio::spawn(write_prompt(stdin, prompt))),
+        }
+    }
+
+    /// Wait for the write to end, for at most [`PROMPT_WRITE_GRACE`]. Call it once the child has
+    /// exited: a writer still unfinished then is stuck (something else, such as a grandchild the
+    /// child left running, holds the pipe open) and is aborted rather than waited on forever.
+    ///
+    /// `Ok` when it completed. `Err` for any write failure (a broken pipe included: the child
+    /// closed its input early), and when the grace expires with the write unfinished (the child
+    /// has exited, so it cannot have read the whole prompt).
+    ///
+    /// Limit: a child that exits 0 without reading a prompt smaller than the pipe buffer (about
+    /// 64 KB on Linux) still succeeds, because the write completed into the buffer. The guarantee
+    /// holds only above that size; the real CLI reads its stdin to the end.
+    pub async fn finish(mut self) -> std::io::Result<()> {
+        let Some(mut handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(PROMPT_WRITE_GRACE, &mut handle).await {
+            // The child closed its input before the whole prompt was written, so it cannot have
+            // answered the whole prompt: the same failure as a writer stuck past the grace.
+            Ok(Ok(Err(e))) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                eprintln!(
+                    "[camerata] the claude CLI closed its input before the whole prompt was written: {e}"
+                );
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the prompt was not fully written before the CLI exited",
+                ))
+            }
+            Ok(Ok(Err(e))) => Err(e),
+            // Completed, or the task was cancelled (nothing was left to finish).
+            Ok(_) => Ok(()),
+            Err(_) => {
+                handle.abort();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the prompt was not fully written before the CLI exited",
+                ))
+            }
+        }
+    }
+}
+
+/// How long [`PromptWriter::finish`] waits for a writer that is still running after the child has
+/// exited.
+pub const PROMPT_WRITE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Drop for PromptWriter {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// The engine-owned folder the per-call system prompt files live in:
+/// `<Camerata state dir>/tmp/system-prompts/` ([`crate::state_dir::dir`]), never `$TMPDIR`.
+///
+/// Each call's file is client data (the chat's carries project layers), so it must not sit in a
+/// shared temp folder, and a quit that skips destructors (`process::exit`, SIGKILL, a crash) must
+/// not leave it behind for good: [`remove_live_system_prompts`] runs from the shutdown handler and
+/// [`sweep_leftover_system_prompts`] at server start.
+pub fn system_prompt_root() -> std::path::PathBuf {
+    crate::state_dir::dir().join("tmp").join("system-prompts")
+}
+
+/// The directories of the system prompt files whose calls are in flight in this process.
+fn live_system_prompts() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>
+{
+    static LIVE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+/// Create `dir` and its missing parents, private to the owner where the platform has modes.
+fn create_private_dir_all(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// Create the one directory `dir` (its parent must exist), private to the owner where the
+/// platform has modes. Fails if anything is already at that path.
+fn create_private_leaf(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// A private copy of a system prompt on disk, for `claude --system-prompt-file`.
+///
+/// A system prompt can be as large as the prompt (the chat's carries the whole manuals), and
+/// `--system-prompt <text>` puts it in the argument list, which the OS caps. The file is created
+/// in its own private directory (mode 0700) under [`system_prompt_root`], is readable by its owner
+/// alone (0600), is registered as live, and is removed with its directory when this value is
+/// dropped: on success, error, timeout or kill, whichever way the call ends. A quit that runs no
+/// destructors is covered by [`remove_live_system_prompts`] (shutdown) and
+/// [`sweep_leftover_system_prompts`] (start). It is a file and not stdin because the flag REPLACES
+/// the Claude Code scaffolding, which folding the text into the prompt would not do.
+pub struct SystemPromptFile {
+    dir: std::path::PathBuf,
+    file: std::path::PathBuf,
+}
+
+impl SystemPromptFile {
+    /// Write `text` to a new private file under [`system_prompt_root`].
+    pub fn create(text: &str) -> std::io::Result<Self> {
+        Self::create_in(&system_prompt_root(), text)
+    }
+
+    /// As [`Self::create`], under `root`.
+    pub fn create_in(root: &std::path::Path, text: &str) -> std::io::Result<Self> {
+        use std::io::Write;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        create_private_dir_all(root)?;
+        // `<pid>-<n>-<nanos>`: the leading pid is what the start-up sweep reads to tell a dead
+        // process's leftovers from a live one's.
+        let dir = root.join(format!(
+            "{}-{}-{nanos}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        // The leaf is created on its own, never recursively: it fails if the name exists (a
+        // planted directory or a symlink included) instead of using it.
+        create_private_leaf(&dir)?;
+        let file = dir.join("system-prompt.txt");
+        // Owned (and so registered and removed on drop) from here on, a failed write included.
+        let this = Self { dir, file };
+        if let Ok(mut live) = live_system_prompts().lock() {
+            live.insert(this.dir.clone());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options
+            .open(&this.file)
+            .and_then(|mut f| f.write_all(text.as_bytes()))?;
+        Ok(this)
+    }
+
+    /// The file's path, for `--system-prompt-file`.
+    pub fn path(&self) -> &std::path::Path {
+        &self.file
+    }
+}
+
+impl Drop for SystemPromptFile {
+    fn drop(&mut self) {
+        if let Ok(mut live) = live_system_prompts().lock() {
+            live.remove(&self.dir);
+        }
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// Remove the system prompt files of every call in flight in this process. For the shutdown
+/// handler, which ends the process with `process::exit` (no destructors run).
+pub fn remove_live_system_prompts() {
+    if let Ok(mut live) = live_system_prompts().lock() {
+        for dir in live.drain() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// At start, remove the system prompt directories under `root` left by a process that is gone
+/// (a SIGKILL, a crash, a power cut), and any of this process's own that are not in flight.
+/// A directory of ANOTHER live process (the CLI running beside the server) is left alone. Returns
+/// how many were removed.
+pub fn sweep_leftover_system_prompts_in(root: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let own = std::process::id();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let pid = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.split('-').next())
+            .and_then(|p| p.parse::<u32>().ok());
+        let stale = match pid {
+            Some(pid) if pid == own => !live_system_prompts()
+                .lock()
+                .is_ok_and(|live| live.contains(&path)),
+            Some(pid) => !crate::process_alive::is_alive(pid),
+            // Not a name this module made: not ours to judge.
+            None => false,
+        };
+        if stale && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// [`sweep_leftover_system_prompts_in`] over [`system_prompt_root`].
+pub fn sweep_leftover_system_prompts() -> usize {
+    sweep_leftover_system_prompts_in(&system_prompt_root())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +437,238 @@ mod tests {
         assert!(cmd
             .get_envs()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
+    }
+
+    /// A writer that fails every write with `kind`.
+    struct FailingWriter(std::io::ErrorKind);
+
+    impl tokio::io::AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(self.0)))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A writer that never accepts a byte: a child that does not read its stdin.
+    struct StalledWriter;
+
+    impl tokio::io::AsyncWrite for StalledWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn any_write_failure_other_than_a_broken_pipe_is_returned_as_it_is() {
+        let failed = PromptWriter::start(
+            FailingWriter(std::io::ErrorKind::PermissionDenied),
+            b"prompt".to_vec(),
+        )
+        .finish()
+        .await;
+        assert_eq!(
+            failed.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_pipe_means_the_prompt_was_not_fully_written() {
+        let result = PromptWriter::start(
+            FailingWriter(std::io::ErrorKind::BrokenPipe),
+            b"prompt".to_vec(),
+        )
+        .finish()
+        .await;
+        let err = result.expect_err("a child that closed its input early did not read it all");
+        assert!(err.to_string().contains("not fully written"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_complete_write_delivers_every_byte_and_closes_the_input() {
+        let (mut reader, writer) = tokio::io::duplex(64);
+        let sent: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let w = PromptWriter::start(writer, sent.clone());
+        let mut got = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut got)
+            .await
+            .unwrap();
+        assert!(w.finish().await.is_ok());
+        assert_eq!(got, sent);
+    }
+
+    /// A call that is killed or dropped leaves no writer behind.
+    #[tokio::test]
+    async fn dropping_the_writer_aborts_a_write_that_is_stuck() {
+        let writer = PromptWriter::start(StalledWriter, b"prompt".to_vec());
+        let handle = writer.handle.as_ref().unwrap().abort_handle();
+        drop(writer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stuck writer task was aborted");
+    }
+
+    /// The live-directory registry is process-wide, and the shutdown cleanup empties it: the tests
+    /// that create files hold this so one's cleanup never removes another's file mid-test.
+    fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A fresh private root for one test, removed when it drops.
+    struct Root(std::path::PathBuf);
+    impl Root {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "camerata-api-types-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            Self(p)
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_system_prompt_file_is_private_holds_the_text_and_goes_when_dropped() {
+        let _registry = registry_lock();
+        use std::os::unix::fs::PermissionsExt;
+        let root = Root::new("private");
+        let text = "line one\nline two\n".repeat(100_000);
+        let file = SystemPromptFile::create_in(&root.0, &text).unwrap();
+        let path = file.path().to_path_buf();
+        let dir = path.parent().unwrap().to_path_buf();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&root.0), 0o700);
+        drop(file);
+        assert!(!path.exists(), "the file is removed on drop");
+        assert!(!dir.exists(), "so is its private directory");
+    }
+
+    /// The per-call directory is created fresh: a name that already exists (a directory, or a
+    /// symlink someone planted) makes creation fail instead of being used.
+    #[cfg(unix)]
+    #[test]
+    fn a_leaf_name_that_already_exists_makes_creation_fail_and_is_left_alone() {
+        let _registry = registry_lock();
+        let root = Root::new("leaf");
+        std::fs::create_dir_all(&root.0).unwrap();
+        let existing = root.0.join("existing");
+        std::fs::create_dir_all(&existing).unwrap();
+        assert!(create_private_leaf(&existing).is_err());
+        let target = root.0.join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = root.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(create_private_leaf(&link).is_err());
+        assert!(target.exists(), "what the link points at is untouched");
+        assert!(create_private_leaf(&root.0.join("fresh")).is_ok());
+    }
+
+    #[test]
+    fn the_root_is_the_engine_state_folder_and_not_the_temp_folder() {
+        let root = system_prompt_root();
+        assert!(root.ends_with("tmp/system-prompts"), "{root:?}");
+        assert!(root.starts_with(crate::state_dir::dir()), "{root:?}");
+    }
+
+    /// A process that is gone leaves its directory behind; the next start removes it, and leaves
+    /// a live process's and this one's in-flight directories alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_directory_of_a_dead_process_is_removed_at_start() {
+        let _registry = registry_lock();
+        let root = Root::new("sweep");
+        std::fs::create_dir_all(&root.0).unwrap();
+        // A pid that is certainly gone: above any pid the OS hands out.
+        let dead = 3_999_999u32;
+        let leftover = root.0.join(format!("{dead}-0-1"));
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("system-prompt.txt"), "client data").unwrap();
+        // Another live process's (the parent shell of the test run is alive).
+        let live_other = root
+            .0
+            .join(format!("{}-0-1", std::os::unix::process::parent_id()));
+        std::fs::create_dir_all(&live_other).unwrap();
+        // This process, in flight.
+        let in_flight = SystemPromptFile::create_in(&root.0, "now").unwrap();
+        // This process, but no longer in flight (a previous life with the same pid).
+        let own_stale = root.0.join(format!("{}-999-1", std::process::id()));
+        std::fs::create_dir_all(&own_stale).unwrap();
+        // Not one of ours.
+        let foreign = root.0.join("notes");
+        std::fs::create_dir_all(&foreign).unwrap();
+
+        let removed = sweep_leftover_system_prompts_in(&root.0);
+        assert_eq!(removed, 2);
+        assert!(!leftover.exists(), "the dead process's directory is gone");
+        assert!(!own_stale.exists());
+        assert!(live_other.exists(), "a live process's is left alone");
+        assert!(
+            in_flight.path().exists(),
+            "an in-flight call's is left alone"
+        );
+        assert!(
+            foreign.exists(),
+            "a name this module did not make is left alone"
+        );
+    }
+
+    /// The shutdown handler ends the process without destructors: it removes what is in flight.
+    #[test]
+    fn the_shutdown_cleanup_removes_a_live_registered_directory() {
+        let _registry = registry_lock();
+        let root = Root::new("shutdown");
+        let file = SystemPromptFile::create_in(&root.0, "client data").unwrap();
+        let path = file.path().to_path_buf();
+        assert!(path.exists());
+        remove_live_system_prompts();
+        assert!(!path.exists(), "removed by the shutdown cleanup");
+        drop(file); // a later drop is a harmless no-op
     }
 }

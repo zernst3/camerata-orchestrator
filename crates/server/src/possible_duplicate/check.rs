@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{CandidatePair, DupIndex};
 use crate::ai_audit::stage_batch::{
-    run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings,
+    run_stage, ItemReject, StageCtx, StageFeedback, StageItems, StageMode, StageSettings,
 };
 use crate::ai_audit::{scaled_max_tokens, stage_model, UsageMeter};
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
@@ -342,7 +342,9 @@ pub async fn check_possible_duplicates(
     llm: &dyn LlmPort,
     controls: &crate::cost_cap::RunControls,
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) {
     let candidates = DupIndex::candidates(report.tree.as_ref(), &report.findings);
     if candidates.is_empty() {
@@ -369,8 +371,18 @@ pub async fn check_possible_duplicates(
         meter.seed_checkpoint_stop(stop);
     }
 
-    let (checks, note) =
-        run_check(report, llm, &meter, &model, &candidates, cli_backend, job).await;
+    let (checks, note) = run_check(
+        report,
+        llm,
+        &meter,
+        &model,
+        &candidates,
+        cli_backend,
+        batch,
+        job,
+        feedback,
+    )
+    .await;
 
     // What the stage spent joins the scan's usage, run notes and stage telemetry.
     if meter.snapshot().calls > 0 {
@@ -430,6 +442,7 @@ pub async fn check_possible_duplicates(
 
 /// Ask the model about `candidates` on `meter`, unless the spend limit or a cost checkpoint stops
 /// the stage first: every pair answered, or none (with the reason).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_check(
     report: &ScanReport,
     llm: &dyn LlmPort,
@@ -437,7 +450,9 @@ pub(crate) async fn run_check(
     model: &str,
     candidates: &[CandidatePair],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> (Vec<PairCheck>, Option<String>) {
     if meter.checkpoint_stopped() || meter.cap_reached() {
         let why = if meter.checkpoint_stopped() {
@@ -450,10 +465,22 @@ pub(crate) async fn run_check(
             Some(format!("the duplicate check did not run: {why}")),
         );
     }
-    send_calls(report, llm, meter, model, candidates, cli_backend, job).await
+    send_calls(
+        report,
+        llm,
+        meter,
+        model,
+        candidates,
+        cli_backend,
+        batch,
+        job,
+        feedback,
+    )
+    .await
 }
 
 /// Send the calls and collect the answers.
+#[allow(clippy::too_many_arguments)]
 async fn send_calls(
     report: &ScanReport,
     llm: &dyn LlmPort,
@@ -461,7 +488,9 @@ async fn send_calls(
     model: &str,
     candidates: &[CandidatePair],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> (Vec<PairCheck>, Option<String>) {
     let rows: HashMap<&str, &Finding> = report
         .findings
@@ -503,18 +532,32 @@ async fn send_calls(
     }
 
     let repo = report.repos.join(", ");
+    // The batch API is taken whenever the seam carries one, so a batch an earlier attempt
+    // submitted is fetched on a resume in any mode and never paid for twice. A Message Batch is
+    // what new calls use only in a batch run on the API backend; real time otherwise.
+    let (chosen, batch_api) =
+        crate::ai_audit::stage_batch::mode_and_api(llm, batch && !cli_backend, 1);
     let checkpoint = crate::checkpoint::stage_checkpoint(CHECKPOINT_NAME);
     let ctx = StageCtx {
         repo: &repo,
         model,
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter: Some(meter),
         job,
         checkpoint: checkpoint.as_ref(),
         settings: StageSettings::default(),
+        feedback: feedback.map(|(store, key)| StageFeedback {
+            store,
+            key,
+            name: "Duplicate check",
+        }),
     };
-    let mode = StageMode::parallel_default(cli_backend);
+    let mode = if matches!(chosen, StageMode::Batch) {
+        StageMode::Batch
+    } else {
+        StageMode::parallel_default(cli_backend)
+    };
     let ran = run_stage(Stage::DuplicateCheck, &mut items, mode, &ctx).await;
     if !ran.failed.is_empty() || ran.cancelled.is_some() {
         let first = ran

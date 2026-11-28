@@ -20,7 +20,7 @@
 //! Once, here, from data the run already holds, with no model call: [`FpIndex::of`]. The review
 //! view and the internal exports call it; none works a reason out itself. The flag reaches only
 //! the operator: the review UI, the internal workbook's technical band and an internal
-//! `findings.json`. A client package carries neither the flag nor its reasons.
+//! `json/inspection.json`. A client package carries neither the flag nor its reasons.
 
 use std::collections::HashSet;
 

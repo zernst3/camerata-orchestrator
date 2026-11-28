@@ -107,6 +107,7 @@ impl LlmPort for StubModel {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: answer(&req, canned_finding_json()),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -152,6 +153,7 @@ fn minimal_report(
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/payments".to_string()],

@@ -93,7 +93,8 @@ async fn scan_reports_the_unreferenced_file_and_lets_reference_text_keep_files_a
         "src/App.vue",
         "<script setup>\nimport { useThing } from './composables/useThing'\n</script>\n",
     );
-    // A secret-shaped literal in prose. Reference text is not secrets-floor input.
+    // A secret-shaped literal in prose. Markdown is inspected text since V1 item 32, so the
+    // secrets floor finds it, while the README's mentions still keep files alive.
     let readme = concat!(
         "Setup notes.\nAPI_KEY=\"Zq9Xk3Pm7Rt2",
         "Vw5Yb8Nc4Jd6Hf1Ga0\"\n"
@@ -122,9 +123,14 @@ async fn scan_reports_the_unreferenced_file_and_lets_reference_text_keep_files_a
         "the corpus `max_severity` ceiling clamps the live finding at scan time"
     );
     assert!(dead[0].preview_tool.as_deref() == Some(onboard::ARCH_PREVIEW_TOOL));
+    let readme: Vec<&onboard::Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.path == "README.md")
+        .collect();
     assert!(
-        report.findings.iter().all(|f| f.path != "README.md"),
-        "reference text is not secrets-floor input: {:?}",
+        !readme.is_empty() && readme.iter().all(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+        "Markdown is inspected: the README's planted key is a secret finding and nothing else: {:?}",
         report.findings
     );
     assert!(
@@ -136,9 +142,9 @@ async fn scan_reports_the_unreferenced_file_and_lets_reference_text_keep_files_a
         report.findings
     );
     assert_eq!(
-        report.files_scanned, 6,
-        "package.json, app.ts, wired.ts, orphan_widget.ts, useThing.ts and the Vue component \
-         (audited source since H8): other reference text is not counted as scanned code"
+        report.files_scanned, 7,
+        "package.json, app.ts, wired.ts, orphan_widget.ts, useThing.ts, the Vue component \
+         (audited source since H8) and README.md (inspected text since V1 item 32)"
     );
 
     let entry = report

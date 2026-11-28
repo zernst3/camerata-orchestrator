@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-REACTIVE-FORMS-1"
-version = 3
+version = 4
 title = "Angular form building: reactive forms (FormBuilder, FormGroup) or template-driven forms"
 domain = "javascript:angular"
 layer = "framework"
@@ -15,7 +15,7 @@ title = "Angular: Reactive forms guide"
 
 [decision]
 question = "How are Angular forms built: with reactive forms (FormBuilder, FormGroup) or template-driven forms (ngModel)?"
-why = "Both are first-class Angular form APIs, and the right one follows from a form's complexity, not from a presumed winner. Reactive forms model the form as an explicit data structure in the component class, with validators, dynamic fields, and state changes living in code; this makes the form testable without rendering, its validators composable, and its state auditable, which is the natural fit for complex forms (conditional fields, cross-field validation, dynamic controls). Template-driven forms bind controls with ngModel directly in the template, which is the lighter, more declarative shape and the fit for simple forms (a few fields, basic required/pattern validation) where the explicit data structure would be more machinery than the form needs. Choose by how much logic the form carries: simple and mostly-static favors template-driven; complex, dynamic, or heavily-validated favors reactive. Applying one consistently per form, rather than mixing the two within a single form, is what matters most."
+why = "Both are first-class Angular form APIs, and the right one follows from a form's complexity, not from a presumed winner. Reactive forms model the form as an explicit data structure in the component class, with validators, dynamic fields and state changes living in code; this makes the form testable without rendering, its validators composable, and its state auditable, which is the natural fit for complex forms (conditional fields, cross-field validation, dynamic controls). Template-driven forms bind controls with ngModel directly in the template, which is the lighter, more declarative shape and the fit for simple forms (a few fields, basic required/pattern validation) where the explicit data structure would be more machinery than the form needs. Choose by how much logic the form carries: simple and mostly-static favors template-driven; complex, dynamic or heavily-validated favors reactive. Applying one consistently per form, rather than mixing the two within a single form, is what matters most."
 
 [[option]]
 id = "complex-forms-use-reactive-forms-formbuilder-forma"
@@ -24,7 +24,7 @@ directive = "Forms are created with FormBuilder to build a FormGroup, with valid
 remediation = """
 Rebuild the form using FormBuilder to construct a FormGroup, moving validators and dynamic field logic into the component class, and bind the template to the FormGroup via formGroup/formControl directives instead of ngModel two-way bindings. Verify by confirming the form's validation state and value are readable from the component class's FormGroup, not only from the template.
 """
-why = "Represents the form as an explicit, code-level data structure, so its state is auditable, its validators are composable, and it can be unit-tested without rendering a template. The strongest fit for complex forms — conditional fields, cross-field or dynamic validation, programmatically added controls; its cost is more upfront wiring than a simple form needs."
+why = "Represents the form as an explicit, code-level data structure, so its state is auditable, its validators are composable, and it can be unit-tested without rendering a template. The strongest fit for complex forms: conditional fields, cross-field or dynamic validation, programmatically added controls; its cost is more upfront wiring than a simple form needs."
 
 [[option]]
 id = "all-forms-use-template-driven-two-way-bindings-wi"

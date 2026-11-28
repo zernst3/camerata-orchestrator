@@ -8,9 +8,11 @@
 //! Coverage is read from the tool trace only ([`super::coverage`]); nothing the model says about
 //! its own work changes a state.
 
+mod activity;
 mod conventions;
 mod joints;
 mod piece;
+mod plan;
 mod rating;
 #[cfg(test)]
 mod tests;
@@ -35,7 +37,10 @@ use crate::onboard::{Finding, ProposedRule};
 use crate::scan_ledger::{ScanLedger, StageAccounting, StageSample};
 use crate::scan_routing::AuditRule;
 use crate::stage_telemetry::Stage;
+pub use activity::FinderActivity;
+use camerata_api_types::audit::RuleConvention;
 use piece::{PieceReport, Shared, StoredPiece};
+pub use plan::{piece_figures, PieceFigures};
 
 /// Settings of one finder run that are not on [`RunControls`].
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +106,8 @@ pub struct FinderExtras {
     /// Every rule an accepted `problems` answer or a citation names, whichever rule the merged
     /// row of its problem ended up under. A rule here has a problem and never reads clean.
     pub rules_with_problems: Vec<String>,
+    /// One convention record for each rule with options the finder judged for this repo.
+    pub conventions: Vec<RuleConvention>,
 }
 
 impl FinderExtras {
@@ -198,18 +205,47 @@ pub fn refuse_unsupported_finder_settings(
     if controls.consensus {
         return Err(
             "--finder agent cannot be combined with --consensus. The agent finder reviews each part \
-             once; the consensus option repeats the scan passes it replaces."
+             once; the consensus option repeats the scan passes it replaces. Pass --finder engine \
+             to use --consensus."
                 .to_string(),
         );
     }
     if incremental {
         return Err(
             "--finder agent needs a full inspection; it cannot re-inspect only the files that \
-             changed. Pass --full to inspect everything."
+             changed. Pass --full to inspect everything. Pass --finder engine to re-inspect \
+             only the changed files."
                 .to_string(),
         );
     }
     Ok(())
+}
+
+/// Outside review Part 1 item 4: a rule file that did not parse never reaches the agent finder's
+/// checklist, so an agent finder run, client or internal, stops before any spend when one failed
+/// to load (a run with a rule silently missing would read as clean for that rule, and graded
+/// evidence must not come from a broken rule set). The message names each rule id and the file
+/// with the parser's reason, for the operator. The same failures are also recorded in the run's
+/// ledger, coverage notes and integrity gate by `record_corpus_load_failures`. `ai_review` is
+/// whether the AI review (and so the finder) runs at all: a deterministic-only scan is not stopped.
+pub fn refuse_unloadable_rules(
+    controls: &RunControls,
+    ai_review: bool,
+    failures: &[crate::CorpusLoadFailure],
+) -> Result<(), String> {
+    if controls.finder != super::FinderChoice::Agent || !ai_review || failures.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = failures
+        .iter()
+        .map(|f| format!("{} ({}: {})", f.rule_id, f.path.display(), f.error))
+        .collect();
+    Err(format!(
+        "{} rule file(s) did not load, so the agent finder would run without those rules and \
+         report nothing for them: {}. Fix the rule files and run again. Nothing was spent.",
+        failures.len(),
+        lines.join("; ")
+    ))
 }
 
 /// One unit of work: a piece to run, a piece to replay or a piece that cannot be tried again.
@@ -232,6 +268,11 @@ fn refused_key(key: &str) -> String {
     format!("{key}#refused")
 }
 
+/// The marker of a piece that ended on a stop that repeats (see `piece::splits_on_resume`).
+fn split_key(key: &str) -> String {
+    format!("{key}#split")
+}
+
 /// Expand a planned piece against the stored lines of an earlier attempt: a finished piece is
 /// replayed, a refused piece is run in two halves (by path order), and anything else runs.
 /// The stored line of each refused piece that was split into halves goes to `split_parents`: its
@@ -241,6 +282,7 @@ fn expand(
     lines: &HashMap<String, AbsorbedLine>,
     out: &mut Vec<Work>,
     split_parents: &mut Vec<AbsorbedLine>,
+    halves: &mut HashSet<String>,
 ) {
     if let Some(line) = lines.get(&piece.key) {
         if let Ok(stored) = serde_json::from_str::<StoredPiece>(&line.text) {
@@ -253,6 +295,7 @@ fn expand(
             split_parents.push(line.clone());
             let mid = piece.files.len() / 2;
             for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
+                halves.insert(format!("{}/{suffix}", piece.key));
                 expand(
                     Piece {
                         key: format!("{}/{suffix}", piece.key),
@@ -262,12 +305,36 @@ fn expand(
                     lines,
                     out,
                     split_parents,
+                    halves,
                 );
             }
         } else {
             out.push(Work::RefusedFinal(piece, line.clone()));
         }
         return;
+    }
+    if let Some(line) = lines.get(&split_key(&piece.key)) {
+        if piece.files.len() >= 2 {
+            split_parents.push(line.clone());
+            let mid = piece.files.len() / 2;
+            for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
+                halves.insert(format!("{}/{suffix}", piece.key));
+                expand(
+                    Piece {
+                        key: format!("{}/{suffix}", piece.key),
+                        unit: piece.unit.clone(),
+                        files: files.to_vec(),
+                    },
+                    lines,
+                    out,
+                    split_parents,
+                    halves,
+                );
+            }
+            return;
+        }
+        // One file cannot be halved: it runs again whole and, if it ends the same way, stays a
+        // named failed part.
     }
     out.push(Work::Fresh(piece));
 }
@@ -419,8 +486,12 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                 None => None,
             };
             let lines: usize = piece::lines_of(shared.files, &piece.files);
-            let limits =
-                super::PieceLimits::for_piece(piece.files.len(), piece::estimate_usd(lines));
+            let read_pages = piece::read_pages_of(shared.files, &piece.files);
+            let limits = super::PieceLimits::for_piece_reading(
+                piece.files.len(),
+                read_pages,
+                piece::estimate_usd(lines),
+            );
             let runs =
                 match piece::converse(shared, index, &piece, &room, &not_served, &list, &limits)
                     .await
@@ -445,6 +516,9 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
             if report.failures.is_empty() {
                 if let Some(m) = shared.meter {
                     let cost: f64 = report.usage.iter().filter_map(|u| u.cost_usd).sum();
+                    if shared.halves.contains(&piece.key) {
+                        m.half_finished();
+                    }
                     m.piece_finished(Some(cost), report.problems.len());
                 }
                 if let Ok(text) = serde_json::to_string(&StoredPiece {
@@ -461,6 +535,17 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                     for usage in &report.usage {
                         m.record_wasted(Stage::Finder, &piece::response_of(shared.options, usage));
                     }
+                }
+                if report.split_on_resume {
+                    store(
+                        shared,
+                        &checkpoint_line(
+                            shared.options,
+                            split_key(&piece.key),
+                            &report.usage,
+                            String::from("split"),
+                        ),
+                    );
                 }
                 if report.refused {
                     store(
@@ -479,21 +564,40 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
     }
 }
 
-/// Move each agent problem keyed by a rule with no convention off that rule: to the next rule it
-/// was cited to that has a convention, else to the `AI-` id of its own label. `findings` and
-/// `problems` are in the same order.
-fn rekey_no_convention(
+/// Whether a finder row keyed to `rule` is not a departure from the rule's standard, so it does
+/// not belong under the rule (convention model design, A1). A rule with no record keeps its
+/// rows, and so does a rule whose standard is its own named defect.
+fn leaves_rule(f: &Finding, rule: &str, records: &[RuleConvention]) -> bool {
+    let Some(c) = records
+        .iter()
+        .find(|c| c.rule_id.eq_ignore_ascii_case(rule))
+    else {
+        return false;
+    };
+    if let Some(id) = &c.standard.option_id {
+        if c.options.iter().any(|o| &o.option_id == id && o.violates) {
+            return false;
+        }
+    }
+    crate::conventions::row_status(c, &c.standard, f)
+        != camerata_api_types::audit::PlaceStatus::Departs
+}
+
+/// Move each agent problem that is not a departure from the standard of the rule it is keyed to
+/// off that rule: to the next rule it was cited to that it belongs under, else to the `AI-` id of
+/// its own label. A problem is never thrown out. `findings` and `problems` are in the same order.
+fn rekey_non_departing(
     findings: &mut [Finding],
     problems: &[Problem],
-    no_convention: &HashSet<String>,
+    records: &[RuleConvention],
     adopted: &HashSet<String>,
 ) {
-    if findings.len() != problems.len() {
+    if findings.len() != problems.len() || records.is_empty() {
         return;
     }
     for (f, p) in findings.iter_mut().zip(problems) {
         if !f.captures.contains_key(FINDER_PROBLEM_CAPTURE)
-            || !no_convention.contains(&f.rule_id.to_ascii_uppercase())
+            || !leaves_rule(f, &f.rule_id.to_ascii_uppercase(), records)
         {
             continue;
         }
@@ -503,7 +607,7 @@ fn rekey_no_convention(
             .into_iter()
             .flat_map(|c| c.split(','))
             .map(|r| r.trim().to_ascii_uppercase())
-            .find(|r| adopted.contains(r) && !no_convention.contains(r));
+            .find(|r| adopted.contains(r) && !leaves_rule(f, r, records));
         match next {
             Some(rule) => {
                 f.also_matches.retain(|r| *r != rule);
@@ -521,8 +625,13 @@ fn rekey_no_convention(
                 );
             }
         }
-        f.also_matches
-            .retain(|r| !no_convention.contains(&r.to_ascii_uppercase()));
+        let keep: Vec<String> = f
+            .also_matches
+            .iter()
+            .filter(|r| !leaves_rule(f, &r.to_ascii_uppercase(), records))
+            .cloned()
+            .collect();
+        f.also_matches = keep;
     }
 }
 
@@ -648,8 +757,15 @@ pub async fn find_repo(
             .unwrap_or_default();
     let mut works: Vec<Work> = Vec::new();
     let mut split_parents: Vec<AbsorbedLine> = Vec::new();
+    let mut halves: HashSet<String> = HashSet::new();
     for p in planned {
-        expand(p, &stored_lines, &mut works, &mut split_parents);
+        expand(
+            p,
+            &stored_lines,
+            &mut works,
+            &mut split_parents,
+            &mut halves,
+        );
     }
     if let Some(m) = meter {
         for line in &split_parents {
@@ -665,6 +781,15 @@ pub async fn find_repo(
             .filter(|w| !matches!(w, Work::Fresh(_)))
             .count();
         m.begin_pieces(works.len(), held);
+        // The halves among the works, and the ones a stored attempt holds.
+        let is_half = |w: &Work| halves.contains(&w.piece().key);
+        m.begin_halves(
+            works.iter().filter(|w| is_half(w)).count(),
+            works
+                .iter()
+                .filter(|w| is_half(w) && !matches!(w, Work::Fresh(_)))
+                .count(),
+        );
     }
     let shared = Shared {
         agent,
@@ -675,6 +800,8 @@ pub async fn find_repo(
         options,
         meter,
         n_pieces: works.len(),
+        halves,
+        activity: FINDER_ACTIVITY.try_with(Clone::clone).ok(),
     };
 
     // Run the pieces, a few at a time, keeping their order.
@@ -742,7 +869,10 @@ pub async fn find_repo(
                             repo: repo.to_string(),
                             pass: "agent finder, joints between parts".to_string(),
                             reason: if outage {
-                                "NOT RUN: the run stopped because the model provider could not be reached before the joints between the parts were reviewed. This inspection is incomplete.".to_string()
+                                format!(
+                                    "NOT RUN: the run stopped because {} before the joints between the parts were reviewed. This inspection is incomplete.",
+                                    meter.map_or(crate::run_health::STOP_PHRASE_UNREACHABLE, |m| m.stop_phrase())
+                                )
                             } else {
                                 format!("NOT RUN: {cause} before the joints between the parts were reviewed. This inspection is incomplete.")
                             },
@@ -887,30 +1017,18 @@ pub async fn find_repo(
         extras.notes.push(format!("{repo}: {note}"));
     }
 
-    // A problem cited to a rule with no convention is never thrown out: it moves to the next rule
-    // it was cited to that has one, else to its own label.
-    let no_convention_rules: HashSet<String> = conv
-        .recommendations
-        .iter()
-        .filter(|r| r.no_convention)
-        .map(|r| r.rule_id.to_ascii_uppercase())
-        .collect();
-    if !no_convention_rules.is_empty() {
-        for r in &mut reports {
-            rekey_no_convention(
-                &mut r.findings,
-                &r.problems,
-                &no_convention_rules,
-                &adopted_all,
-            );
-        }
-        rekey_no_convention(
-            &mut joints_findings,
-            &joints_problems,
-            &no_convention_rules,
-            &adopted_all,
-        );
+    // A problem that is not a departure from the standard of the rule it was cited to is never
+    // thrown out: it moves to the next rule it was cited to that it belongs under, else to its
+    // own label. It stays listed on the rule's conforming places.
+    for r in &mut reports {
+        rekey_non_departing(&mut r.findings, &r.problems, &conv.records, &adopted_all);
     }
+    rekey_non_departing(
+        &mut joints_findings,
+        &joints_problems,
+        &conv.records,
+        &adopted_all,
+    );
 
     // Every further place of a problem is a sibling row of it, from the model's own `places` (a
     // cited rule's option places are census only). No producer writes
@@ -944,8 +1062,30 @@ pub async fn find_repo(
         .count();
     rows.extend(siblings);
     rows.extend(unresolved);
-    rows.extend(conv.departures);
-    rows.extend(conv.undecided);
+    let (departures, held_places, place_notes) =
+        conventions::departure_and_held_rows(&conv.records, &rows, corpus);
+    extras.notes.extend(place_notes);
+    rows.extend(departures);
+    rows.extend(held_places);
+    // The deterministic backstop: a reviewer-addressed phrase in the code is a row of its own, so
+    // the plant is seen even when the model obeyed it and reported nothing (the same checker the
+    // floor runs when the rule is armed; the combined set collapses the same place later).
+    let planted = crate::onboard::audit_architectural(
+        repo,
+        &model_files,
+        &HashSet::from([
+            camerata_checks::ai_reviewer_injection_checker::RULE_AI_REVIEWER_INSTRUCTIONS,
+        ]),
+    );
+    for row in planted {
+        let already = rows.iter().any(|f| {
+            f.rule_id.eq_ignore_ascii_case(&row.rule_id)
+                && (f.path.as_str(), f.line) == (row.path.as_str(), row.line)
+        });
+        if !already {
+            rows.push(row);
+        }
+    }
     let mut seen = HashSet::new();
     proposed.retain(|p| seen.insert(p.id.clone()));
 
@@ -1053,7 +1193,9 @@ pub async fn find_repo(
         }
     }
     // Kinds, then the three information rows, as the engine writes them.
-    crate::ai_audit::assign_deviation_kinds(&mut verified, &recs, &alternatives);
+    let mut records = conv.records;
+    crate::conventions::tag(&mut verified, &mut records);
+    extras.conventions = records;
     let mut skipped_rules: Vec<(String, String)> = Vec::new();
     {
         let plan =
@@ -1142,7 +1284,42 @@ pub async fn find_repo(
 }
 
 tokio::task_local! {
+    static FINDER_ACTIVITY: FinderActivity;
+}
+
+/// Run `fut` with the finder's model calls shown in Agent activity when `activity` is `Some`,
+/// carried with the future like the finder setup: never global.
+pub async fn with_finder_activity<F: std::future::Future>(
+    activity: Option<FinderActivity>,
+    fut: F,
+) -> F::Output {
+    match activity {
+        Some(a) => FINDER_ACTIVITY.scope(a, fut).await,
+        None => fut.await,
+    }
+}
+
+tokio::task_local! {
     static AGENT_OVERRIDE: std::sync::Arc<dyn PieceAgent>;
+}
+
+tokio::task_local! {
+    /// Set for a rerun of a saved run's deterministic stages (#588): the run's list of model
+    /// replies it needed and did not hold. While it is set no agent is ever built or asked.
+    static STORE_ONLY: crate::run_store::store_only::StoreOnlyMisses;
+}
+
+/// Run `fut` as a rerun's finder when `misses` is set: every piece is answered from the run's
+/// stored lines or is a miss, whatever agent the run would have built or a test handed in.
+/// Carried with the future like the finder's setup: never global.
+pub async fn with_optional_store_only<F: std::future::Future>(
+    misses: Option<crate::run_store::store_only::StoreOnlyMisses>,
+    fut: F,
+) -> F::Output {
+    match misses {
+        Some(m) => STORE_ONLY.scope(m, fut).await,
+        None => fut.await,
+    }
 }
 
 /// Run `fut` with `agent` standing in for the run's piece agent. The one test seam of the finder,
@@ -1158,7 +1335,35 @@ pub async fn with_agent_override<F: std::future::Future>(
 
 /// Whether a test agent stands in for the run's piece agent (see [`with_agent_override`]).
 pub fn agent_override_is_set() -> bool {
+    #[cfg(feature = "test-support")]
+    {
+        if AGENT_FACTORY_OVERRIDE.try_with(|_| ()).is_ok() {
+            return true;
+        }
+    }
     AGENT_OVERRIDE.try_with(|_| ()).is_ok()
+}
+
+/// Builds a test agent from the run's shared meter (`test-support` only).
+#[cfg(feature = "test-support")]
+pub type AgentFactoryOverride = std::sync::Arc<
+    dyn Fn(std::sync::Arc<UsageMeter>) -> std::sync::Arc<dyn PieceAgent> + Send + Sync,
+>;
+
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static AGENT_FACTORY_OVERRIDE: AgentFactoryOverride;
+}
+
+/// Run `fut` with a test agent that is built, once for each repository, from the run's own
+/// shared meter: the seam that lets a test put the real API transport over a scripted wire, with
+/// every turn counted on the run's meter. Carried with the future like [`with_agent_override`].
+#[cfg(feature = "test-support")]
+pub async fn with_agent_factory_override<F: std::future::Future>(
+    factory: AgentFactoryOverride,
+    fut: F,
+) -> F::Output {
+    AGENT_FACTORY_OVERRIDE.scope(factory, fut).await
 }
 
 pub use super::cli_agent::EngagementKind;
@@ -1381,6 +1586,30 @@ pub(crate) async fn find_repo_for_run_with(
     };
     let empty = camerata_rules::RuleSet::default();
     let corpus = corpus.unwrap_or(&empty);
+    // A rerun of the deterministic stages never asks a model (#588): whatever agent would have
+    // been built or handed in, the pieces are answered from the run's stored lines or they are a
+    // miss. Decided before anything else, so no seam below can reach a real or scripted agent.
+    // A rerun that lost its store-only twin refuses; it never falls through to a real agent.
+    if STORE_ONLY.try_with(|_| ()).is_err() && crate::checkpoint::in_rerun_scope() {
+        anyhow::bail!(
+            "this is a rerun of the deterministic stages and no store-only finder is in place, \
+             so no agent is built and nothing was sent"
+        );
+    }
+    if let Ok(misses) = STORE_ONLY.try_with(Clone::clone) {
+        let agent = crate::run_store::store_only::StoreOnlyAgent::new(misses.clone());
+        return find_repo(
+            &agent,
+            repo,
+            files,
+            selected,
+            corpus,
+            controls,
+            &options,
+            meter.map(|m| &**m),
+        )
+        .await;
+    }
     if let Ok(agent) = AGENT_OVERRIDE.try_with(std::sync::Arc::clone) {
         return find_repo(
             &*agent,
@@ -1393,6 +1622,27 @@ pub(crate) async fn find_repo_for_run_with(
             meter.map(|m| &**m),
         )
         .await;
+    }
+    #[cfg(feature = "test-support")]
+    {
+        if let Ok(factory) = AGENT_FACTORY_OVERRIDE.try_with(std::sync::Arc::clone) {
+            let shared_meter = meter.map_or_else(
+                || std::sync::Arc::new(UsageMeter::with_controls(controls.clone())),
+                std::sync::Arc::clone,
+            );
+            let agent = factory(shared_meter);
+            return find_repo(
+                &*agent,
+                repo,
+                files,
+                selected,
+                corpus,
+                controls,
+                &options,
+                meter.map(|m| &**m),
+            )
+            .await;
+        }
     }
     let setup = FINDER_SETUP.try_with(std::sync::Arc::clone).ok();
     let llm_key = llm

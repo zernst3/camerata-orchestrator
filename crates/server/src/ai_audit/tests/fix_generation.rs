@@ -283,6 +283,54 @@ fn the_fix_prompt_and_the_checker_agree_on_snippets() {
     );
 }
 
+#[test]
+fn the_fix_prompt_tells_the_model_how_to_write_code_that_holds_backticks() {
+    let prompt = fix_specific_system_prompt();
+    assert!(prompt.contains("LONGER run of backticks"), "{prompt}");
+    assert!(prompt.contains("`` echo `date` ``"), "{prompt}");
+    assert!(
+        prompt.contains("sql`select id from posts limit 30`"),
+        "{prompt}"
+    );
+}
+
+/// M4: the grounding check reads code spans with the one parser, so a fix that wraps code in a
+/// longer run of backticks is grounded like any other. The old single-backtick regex paired the
+/// backticks of `` echo `date` `` wrongly and read the name after it as prose.
+#[test]
+fn find_ungrounded_identifier_reads_double_backtick_code_with_the_one_parser() {
+    let fix = "Run `` echo `date` `` and then `real_one`.";
+    assert_eq!(
+        find_ungrounded_identifier(fix, "x"),
+        Some("real_one".to_string())
+    );
+    // The same name in the evidence is grounded.
+    assert_eq!(find_ungrounded_identifier(fix, "real_one"), None);
+    // A tagged template is code: its table is checked, and a grounded one passes.
+    let tagged = "Use sql`select id from ghost_table limit 30` here.";
+    assert_eq!(
+        find_ungrounded_identifier(tagged, "x"),
+        Some("ghost_table".to_string())
+    );
+    assert_eq!(find_ungrounded_identifier(tagged, "ghost_table"), None);
+}
+
+/// The grounding check reads code spans with the one parser. When the parser calls a text
+/// ambiguous (ONE literal prose run), the check must still treat the backtick-delimited regions
+/// as code: a platform name in a snippet (`req.json()`) must not be read as a file name in prose.
+#[test]
+fn a_literal_text_is_still_grounded_by_its_backtick_regions() {
+    // "helper`x`" is ambiguous (a backtick glued to a word), so the parser keeps the whole text
+    // as prose. `await req.json()` is code and must not reach the file-name scan.
+    let fix = "Call the helper`x` and then `await req.json()` first.";
+    assert_eq!(find_ungrounded_identifier(fix, "x"), None);
+    // A name that is not in the evidence is still found inside such a text.
+    assert_eq!(
+        find_ungrounded_identifier("Call the helper`x` and then `ghost_name` first.", "x"),
+        Some("ghost_name".to_string())
+    );
+}
+
 // ── fix_contradicts_detail (pure, rule-based) ───────────────────────────────────────
 
 #[test]
@@ -392,6 +440,7 @@ impl LlmPort for SequencedCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -559,6 +608,8 @@ fn convention_row(path: &str) -> Finding {
     f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "monolith".to_string(),
         convention_label: "Monolith first".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     f
 }
@@ -737,6 +788,43 @@ async fn generate_fix_specifics_includes_deterministic_floor_findings_not_just_a
         out[0].fix_specific.is_some(),
         "a deterministic floor finding must be included in the fix-generation pass, not \
              silently skipped alongside dependency-audit findings"
+    );
+}
+
+#[tokio::test]
+async fn the_fix_round_shows_a_fix_row_in_agent_activity() {
+    let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+    let f = fx(
+        "SEC-NO-SECRET-FILE-1",
+        ".env",
+        0,
+        "SEC-NO-SECRET-FILE-1: path `.env` is a secret-bearing file type",
+        ".env",
+    );
+    let completer = SequencedCompleter::new(&[
+        r#"{"fixes":[{"index":0,"fix":"Remove .env from the repository and its git history, and rotate the exposed credential."}]}"#,
+    ]);
+    let store = crate::transcript::TranscriptStore::new();
+    let _ = crate::ai_audit::fix_stage::generate_fix_specifics_in(
+        &completer,
+        "o/r",
+        vec![f],
+        &files,
+        None,
+        None,
+        None,
+        crate::ai_audit::stage_batch::StageRoute {
+            batch: false,
+            job: None,
+            feedback: Some((&store, "scan-key")),
+        },
+    )
+    .await;
+    let rows = store.get("scan-key");
+    assert!(
+        rows.iter()
+            .any(|r| r.role == "Fix (o/r)" && r.status == "done"),
+        "{rows:#?}"
     );
 }
 
@@ -1176,6 +1264,7 @@ impl LlmPort for AnswersOnceThenFails {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -1549,6 +1638,7 @@ impl LlmPort for CountingFixCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: super::reply_schemas::check::address_by_id(&req.prompt, &self.canned),
             model: "stub".to_string(),
             backend: "stub".to_string(),

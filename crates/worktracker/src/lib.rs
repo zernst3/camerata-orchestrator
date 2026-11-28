@@ -798,6 +798,11 @@ pub trait StoryStore: Send + Sync {
     where
         'life0: 'async_trait,
         Self: 'async_trait;
+    /// Remove the stories with these ids and persist; returns how many were removed. When the
+    /// write fails nothing is removed and the error is returned. The default removes nothing.
+    fn remove_many(&self, _ids: &[String]) -> std::io::Result<usize> {
+        Ok(0)
+    }
 }
 
 /// In-memory [`StoryStore`] for local/desktop runs and tests. The cloud build
@@ -915,6 +920,28 @@ impl StoryStore for InMemoryStoryStore {
         }
         self.flush(&guard);
         Ok(())
+    }
+
+    fn remove_many(&self, ids: &[String]) -> std::io::Result<usize> {
+        let mut guard = self
+            .stories
+            .lock()
+            .map_err(|_| std::io::Error::other("story store mutex poisoned"))?;
+        let kept: Vec<CanonicalStory> = guard
+            .iter()
+            .filter(|s| !ids.iter().any(|i| i == &s.id))
+            .cloned()
+            .collect();
+        let removed = guard.len() - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        if let Some(p) = &self.path {
+            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(p, json)?;
+        }
+        *guard = kept;
+        Ok(removed)
     }
 }
 

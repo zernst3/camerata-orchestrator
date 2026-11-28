@@ -80,6 +80,7 @@ impl LlmPort for StubModel {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -142,6 +143,7 @@ fn report(
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/webhooks".to_string()],
@@ -180,6 +182,7 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
     };
     // The default switches: `terse_output` is on.
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

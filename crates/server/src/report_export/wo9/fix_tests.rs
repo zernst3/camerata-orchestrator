@@ -72,6 +72,12 @@ fn reviewed_of(
     apply_overlay(sealed, records, &[], &[])
 }
 
+/// [`reviewed_of`] for a test that releases the package: the rows the gate wants decided in person
+/// (critical or unsure) carry a decision, which the other tests leave out so a place stays open.
+fn reviewed_for_release(sealed: &SealedReport) -> ReviewedReport {
+    reviewed_of(sealed, &with_critical_and_unsure_decided(sealed, &[]))
+}
+
 fn options() -> ReportOptions {
     client_options()
 }
@@ -351,7 +357,7 @@ fn a_fix_decision_writes_one_record_per_member_and_the_merge_gate_accepts_it() {
 // ---- the release gate's one-fix-per-row check ------------------------------------------------
 
 fn released_secret_entries() -> std::collections::BTreeMap<String, Vec<u8>> {
-    let reviewed = reviewed_of(&secret_report(), &[]);
+    let reviewed = reviewed_for_release(&secret_report());
     released_entries(&reviewed, &options())
 }
 
@@ -375,10 +381,10 @@ fn every_open_row_has_a_fix_and_every_fix_member_exists() {
 
     // A row naming a Fix that is not in the list is refused.
     let mut tampered = entries.clone();
-    let mut findings = json_of(&entries, "findings.json");
+    let mut findings = json_of(&entries, "json/inspection.json");
     findings["findings"][0]["fix_id"] = serde_json::json!("not-a-fix");
     tampered.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = crate::release_gate::fix_archive_problems(&tampered);
@@ -388,10 +394,10 @@ fn every_open_row_has_a_fix_and_every_fix_member_exists() {
     );
 
     // A row of a rule group with no Fix id is refused.
-    let mut findings = json_of(&entries, "findings.json");
+    let mut findings = json_of(&entries, "json/inspection.json");
     findings["findings"][0]["fix_id"] = serde_json::json!("");
     tampered.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = crate::release_gate::fix_archive_problems(&tampered);
@@ -401,10 +407,10 @@ fn every_open_row_has_a_fix_and_every_fix_member_exists() {
     );
 
     // A Fix naming a rule group the tree does not have is refused.
-    let mut findings = json_of(&entries, "findings.json");
+    let mut findings = json_of(&entries, "json/inspection.json");
     findings["fixes"][0]["members"] = serde_json::json!(["sub:nowhere/0"]);
     tampered.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = crate::release_gate::fix_archive_problems(&tampered);
@@ -452,7 +458,7 @@ fn tickets_equal_plan_rows_equal_fixes_with_open_places() {
 
 #[test]
 fn escalation_entries_equal_slots_and_top_three_fix_ids_are_distinct() {
-    let reviewed = reviewed_of(&secret_report(), &[]);
+    let reviewed = reviewed_for_release(&secret_report());
     let package = package_of(&reviewed, &options());
     let clean =
         crate::release_gate::fix_report_problems(&package.report_json, &package.findings_export);

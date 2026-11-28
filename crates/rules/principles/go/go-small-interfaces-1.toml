@@ -1,5 +1,5 @@
 id = "GO-SMALL-INTERFACES-1"
-version = 3
+version = 4
 title = "Interfaces are small and cohesive; an interface has one responsibility, not a god-interface with every method a package might need"
 domain = "go"
 layer = "architecture"
@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "Small, focused interfaces are easier to implement, mock, and reason about. A large interface that requires many methods (e.g., Database with 50 methods) forces implementers to implement all 50 even if they only use 5, creates surface-area for mocking, and couples callers to a large contract."
+qualifies = "Small, focused interfaces are easier to implement, mock and reason about. A large interface that requires many methods (e.g., Database with 50 methods) forces implementers to implement all 50 even if they only use 5, creates surface-area for mocking, and couples callers to a large contract."
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#interfaces_and_types"
@@ -31,7 +31,7 @@ directive = "Each interface has a single responsibility and defines the minimal 
 remediation = """
 Split the large interface into smaller, single-responsibility interfaces with only the methods a given caller actually needs and change the caller's parameter type to the smaller interface instead of the god-interface. Compose larger interfaces from the smaller ones via embedding where a consumer genuinely needs more than one capability. Verify by confirming a caller can be satisfied with a minimal stub implementing only the methods it uses, rather than the full original interface.
 """
-why = "Small interfaces are easy to implement, mock, and test; they compose well."
+why = "Small interfaces are easy to implement, mock and test; they compose well."
 
 [[option]]
 id = "god-interfaces"

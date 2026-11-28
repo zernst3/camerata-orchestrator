@@ -66,3 +66,21 @@ not a real dependency, a real dependency is missing from the full graph or the c
 either doc is stale. The same test holds the README's "over 500,000 lines" and "10,000+ tests"
 to the code, so they can only be floors the code meets. Regenerate the diagram when you add a
 crate or a dependency between workspace crates.
+
+## Keeping the build for a long inspection
+
+The build that starts an inspection must finish it, and the rule library is read from the
+checkout folder at run time, so a copied binary alone is not a kept build. Before a multi-day
+inspection, commit everything, pass the full gate, then run `scripts/keep-scan-build.sh <name>`
+(add `--dry-run` first to see the steps). It refuses on a dirty tree, creates the local tag
+`scan-build/<name>`, adds a worktree at `camerata-scan-<name>` next to the main checkout, and
+builds server, app and CLI there. Start the inspection from that folder and do not pull, edit or
+rebuild in it until the inspection is complete. The script never pushes a tag or a branch and
+never deletes anything; the tag stays as the record after the folder is removed by hand.
+
+Client inspections start only from that kept folder: the build records whether it has uncommitted
+changes, a client inspection will not start on a dirty build, and the build flag is refreshed
+whenever a source file under `crates/` changes. The app uses one fixed port, so only one build's
+app can be open at a time, and the running inspection owns it: do not open another build's app
+until the inspection is complete. If the script fails after creating the tag, it says so and
+leaves the tag alone; remove it yourself when you are sure.

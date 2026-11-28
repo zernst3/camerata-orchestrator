@@ -1,0 +1,424 @@
+//! The build a run was started on, saved with the run, and the rule that the build that starts an
+//! inspection finishes it (V1 item 39; design in camerata-internal docs/plans/2026-11-23).
+//!
+//! Everything here is read from the RUNNING binary and the rule library it actually loaded: the
+//! commit, dirty flag and version compiled in by `build.rs`, the two prompt schema numbers, and
+//! the digest of the loaded rules. Nothing is read from the folder the binary runs in, so a kept
+//! worktree today and a sealed executable with the rules built in later record exactly the same
+//! identity.
+
+use serde::{Deserialize, Serialize};
+
+/// What is known about a build at compile time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildId {
+    /// The crate version.
+    pub version: String,
+    /// The full git commit the binary was built from; `None` outside a git checkout.
+    pub commit: Option<String>,
+    /// Whether the tree had uncommitted changes when the build script last ran.
+    pub dirty: bool,
+    /// [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`].
+    pub prompt_schema: u32,
+    /// The clone advisory's prompt schema number.
+    pub clone_prompt_schema: u32,
+}
+
+impl BuildId {
+    /// The running binary's own identity. The one place the build is read.
+    #[cfg(not(test))]
+    pub fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: crate::ENGINE_COMMIT.map(str::to_string),
+            dirty: crate::ENGINE_DIRTY,
+            prompt_schema: crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+            clone_prompt_schema: crate::onboard::clone_advisory::cache::PROMPT_SCHEMA_VERSION,
+        }
+    }
+
+    /// In this crate's own tests the build is a fixed clean commit, so a test result does not
+    /// depend on the state of the checkout; a test can replace it with [`test_build::set`].
+    #[cfg(test)]
+    pub fn current() -> Self {
+        test_build::get().unwrap_or_else(Self::clean_test_build)
+    }
+
+    #[cfg(test)]
+    pub fn clean_test_build() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: Some("a".repeat(40)),
+            dirty: false,
+            prompt_schema: crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+            clone_prompt_schema: crate::onboard::clone_advisory::cache::PROMPT_SCHEMA_VERSION,
+        }
+    }
+
+    /// The first 12 characters of the commit, for messages.
+    pub fn short_commit(&self) -> Option<String> {
+        self.commit.as_deref().map(short)
+    }
+}
+
+#[cfg(test)]
+pub mod test_build {
+    use super::BuildId;
+    use std::sync::Mutex;
+    static OVERRIDE: Mutex<Option<BuildId>> = Mutex::new(None);
+    pub fn get() -> Option<BuildId> {
+        OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    /// Replace the build for the tests that hold `serial(process_env)` (the one shared key); `None` restores it.
+    pub fn set(build: Option<BuildId>) {
+        *OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = build;
+    }
+}
+
+fn short(commit: &str) -> String {
+    commit.chars().take(12).collect()
+}
+
+/// The identity saved with a run: the build, the rule library and the clone judge model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnginePin {
+    pub build: BuildId,
+    /// [`camerata_rules::corpus_version`] of the rule library this run loaded; empty when none
+    /// loaded.
+    pub corpus_version: String,
+    /// The clone judge's resolved model id, kept for the life of the run.
+    pub clone_judge_model: String,
+}
+
+impl EnginePin {
+    /// Computed once per start, from the running binary, the rules it loaded and the run controls.
+    pub fn for_run(
+        corpus: Option<&camerata_rules::RuleSet>,
+        controls: &crate::cost_cap::RunControls,
+    ) -> Self {
+        Self {
+            build: BuildId::current(),
+            corpus_version: corpus
+                .map(camerata_rules::corpus_version)
+                .unwrap_or_default(),
+            clone_judge_model: controls.clone_judge_model_for(),
+        }
+    }
+
+    /// A resume keeps the clone judge model the inspection started on, whatever the project or the
+    /// command line names now (the stored clone verdicts came from it, and a mid-inspection
+    /// settings change must not strand the run). Returns a note when the pick had to be put back.
+    pub fn hold_clone_judge_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Option<String> {
+        let saved = self.clone_judge_model.trim();
+        if saved.is_empty() {
+            return None;
+        }
+        let asked = controls
+            .clone_judge_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        if asked == Some(saved) {
+            return None;
+        }
+        let was = asked.map(str::to_string);
+        controls.clone_judge_model = Some(saved.to_string());
+        Some(match was {
+            Some(pick) => format!(
+                "The clone check stays on {saved}, the model this inspection started with \
+                 (not {pick})."
+            ),
+            None => {
+                format!("The clone check stays on {saved}, the model this inspection started with.")
+            }
+        })
+    }
+}
+
+/// The refusal when a saved run cannot continue on this build, in plain words; `Ok` when it can.
+/// `corpus_version` is the digest of the rule library now loaded, or `None` when it is not known
+/// yet (the app's preview), in which case the rule library is checked when the resume starts.
+pub fn check_pin(
+    saved: Option<&EnginePin>,
+    now: &BuildId,
+    corpus_version: Option<&str>,
+) -> Result<(), String> {
+    let Some(saved) = saved else {
+        return Err(
+            "This inspection was started before Camerata recorded which build ran it, so \
+                    it cannot be continued. Start it again."
+                .to_string(),
+        );
+    };
+    let saved_short = saved.build.short_commit();
+    let Some(now_commit) = &now.commit else {
+        return Err(format!(
+            "This copy of Camerata does not know which build it is, so it cannot continue a saved \
+             inspection. Open build {} to run what remains, or start the inspection again.",
+            saved_short.as_deref().unwrap_or("(unknown)")
+        ));
+    };
+    if saved.build.commit.is_none() {
+        return Err(
+            "This inspection was started on a build that did not record its commit, so it \
+             cannot be continued. Start it again."
+                .to_string(),
+        );
+    }
+    if saved.build.commit.as_ref() != Some(now_commit) {
+        return Err(format!(
+            "This inspection was started on build {} and cannot be continued on this build ({}). \
+             The build that starts an inspection must finish it. Open build {} to run what remains, \
+             or start the inspection again on this build.",
+            saved_short.as_deref().unwrap_or("(unknown)"),
+            short(now_commit),
+            saved_short.as_deref().unwrap_or("(unknown)"),
+        ));
+    }
+    if !saved.build.dirty && now.dirty {
+        return Err(format!(
+            "This inspection was started on a clean build and this copy has changes that are \
+             not committed, so it cannot be continued here. Open build {} to run what remains, \
+             or start the inspection again.",
+            saved_short.as_deref().unwrap_or("(unknown)")
+        ));
+    }
+    if saved.build.prompt_schema != now.prompt_schema
+        || saved.build.clone_prompt_schema != now.clone_prompt_schema
+    {
+        return Err(
+            "The questions Camerata asks the model changed since this inspection started, \
+                    so it cannot be continued. Start it again."
+                .to_string(),
+        );
+    }
+    if let Some(now_corpus) = corpus_version {
+        if saved.corpus_version != now_corpus {
+            return Err(format!(
+                "The rule library changed since this inspection started, so it cannot be \
+                 continued. Put the rule library back as it was on build {}, or start the \
+                 inspection again.",
+                saved_short.as_deref().unwrap_or("(unknown)")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The refusal when a saved run's deterministic stages cannot be rerun on this build, in plain
+/// words; `Ok` when they can (#588). A rerun never asks a model, so the build that made the model
+/// work may differ from this one, but everything a stored reply answers must be what it was: the
+/// questions the model is asked (the two prompt schema numbers) and the rule library the finder
+/// and the group reviewer read (its digest). The run's own rule snapshot (#560) will replace the
+/// digest comparison when a run carries one; until then the live digest must equal the pinned one.
+pub fn check_pin_for_rerun(
+    saved: Option<&EnginePin>,
+    now: &BuildId,
+    corpus_version: &str,
+) -> Result<(), String> {
+    let Some(saved) = saved else {
+        return Err(
+            "This inspection was started before Camerata recorded which build ran it, so its \
+             deterministic checks cannot be rerun. Start it again."
+                .to_string(),
+        );
+    };
+    let Some(saved_commit) = &saved.build.commit else {
+        return Err(
+            "This inspection was started on a build that did not record its commit, so its \
+             deterministic checks cannot be rerun. Start it again."
+                .to_string(),
+        );
+    };
+    if now.commit.is_none() {
+        return Err(
+            "This copy of Camerata does not know which build it is, so it cannot rerun the \
+             deterministic checks of a saved inspection: the rerun records the build it ran on. \
+             Build it from a git checkout."
+                .to_string(),
+        );
+    }
+    if saved.build.prompt_schema != now.prompt_schema
+        || saved.build.clone_prompt_schema != now.clone_prompt_schema
+    {
+        return Err(format!(
+            "The questions Camerata asks the model changed between build {} and this build, so \
+             the stored replies would answer different questions and the model work would have \
+             to be done again. A rerun never asks a model. Start the inspection again on this \
+             build.",
+            short(saved_commit)
+        ));
+    }
+    if saved.corpus_version != corpus_version {
+        return Err(format!(
+            "The rule library changed since this inspection started on build {}, and the finder \
+             and the group reviewer read it, so their prompts would differ from the ones the \
+             stored replies answer. A rerun never asks a model. Put the rule library back as it \
+             was on that build, or start the inspection again.",
+            short(saved_commit)
+        ));
+    }
+    Ok(())
+}
+
+/// One rerun of a saved run's deterministic stages: the build that made the model work and the
+/// build the deterministic stages ran on (#588). Kept in the run, in the ledger, and named in the
+/// report's "How this was done".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RerunRecord {
+    /// The build the run started on: the finder, the group review, the fix text and the clone and
+    /// duplicate checks are its results, from the stored replies.
+    pub model_build: BuildId,
+    /// The build that ran the deterministic stages this time.
+    pub deterministic_build: BuildId,
+    /// When the rerun started (RFC 3339 UTC).
+    pub at: String,
+    /// Set when this is a recheck of a saved, incomplete run (`camerata inspect --recheck-saved`):
+    /// what ran again on `deterministic_build`, and the clone check parts that were redone. `None`
+    /// for a rerun of every deterministic stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recheck: Option<RecheckDetail>,
+}
+
+/// How a clone check part that failed on the first build was redone by a recheck.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RedoHow {
+    /// Its stored model reply was read again, by the current reader. No call was made.
+    ReadStored,
+    /// Its stored reply could not be read, so it was asked once more, on the model the inspection
+    /// started with (the model is named here).
+    AskedAgain { model: String },
+}
+
+/// One clone check part a recheck redid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedonePart {
+    pub repo: String,
+    /// The clone rule the part was about.
+    pub rule: String,
+    /// How many candidate pairs the part judged.
+    #[serde(default)]
+    pub candidates: u32,
+    /// How many batches of candidates the part had.
+    pub batches: usize,
+    /// How many of them were asked again (the rest were read from their stored replies).
+    pub asked_again: usize,
+    pub how: RedoHow,
+}
+
+/// What a recheck ran again, in the order it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RecheckDetail {
+    /// The clone check parts redone; empty when the first build's only failure was a check.
+    pub clone_parts: Vec<RedonePart>,
+}
+
+impl RerunRecord {
+    pub fn new(model_build: &BuildId, deterministic_build: &BuildId) -> Self {
+        Self {
+            model_build: model_build.clone(),
+            deterministic_build: deterministic_build.clone(),
+            at: super::now(),
+            recheck: None,
+        }
+    }
+
+    /// A recheck of a saved, incomplete run (see [`RecheckDetail`]).
+    pub fn for_recheck(
+        model_build: &BuildId,
+        deterministic_build: &BuildId,
+        detail: RecheckDetail,
+    ) -> Self {
+        Self {
+            recheck: Some(detail),
+            ..Self::new(model_build, deterministic_build)
+        }
+    }
+
+    /// The sentence the report's "How this was done" carries, in the client's words: no dashes,
+    /// no serial commas, American English.
+    pub fn report_sentence(&self) -> String {
+        let name = |b: &BuildId| b.short_commit().unwrap_or_else(|| "(unnamed)".to_string());
+        if let Some(detail) = &self.recheck {
+            return detail.sentence(&name(&self.model_build), &name(&self.deterministic_build));
+        }
+        format!(
+            "The findings, fix text and reviews in this inspection come from Camerata build {}. The \
+             final consistency checks were run again on Camerata build {}, using those saved \
+             results unchanged and with no new model calls.",
+            name(&self.model_build),
+            name(&self.deterministic_build)
+        )
+    }
+}
+
+/// The note for a resume on the same commit when the saved build carried uncommitted changes (a
+/// clean saved build is never continued on a dirty one, see [`check_pin`]).
+pub fn dirty_note(saved: Option<&EnginePin>, now: &BuildId) -> Option<String> {
+    let saved = saved?;
+    (saved.build.commit == now.commit && saved.build.dirty && now.dirty)
+        .then(|| "Continued on a build with uncommitted changes.".to_string())
+}
+
+/// The refusal to START an inspection for a client on a build that cannot be named exactly: one
+/// with uncommitted changes or no commit. Internal runs are not refused.
+pub fn client_start_refusal(client_engagement: bool, build: &BuildId) -> Option<String> {
+    if !client_engagement {
+        return None;
+    }
+    if build.commit.is_none() {
+        return Some(
+            "This copy of Camerata does not know which build it is, so it cannot start an \
+             inspection for a client. Build it from a git checkout, or run it as an internal \
+             inspection."
+                .to_string(),
+        );
+    }
+    if build.dirty {
+        return Some(
+            "This copy of Camerata was built with changes that are not committed, so it cannot \
+             start an inspection for a client. Commit the changes and build again, or run it as \
+             an internal inspection."
+                .to_string(),
+        );
+    }
+    None
+}
+
+impl RecheckDetail {
+    /// "How this was done" for a recheck: both builds, what ran again and what did not. Client
+    /// words: no dashes, no serial commas, American English.
+    pub fn sentence(&self, model_build: &str, checks_build: &str) -> String {
+        let mut out = format!(
+            "The findings, fix text and reviews in this inspection come from Camerata build \
+             {model_build}. The final consistency checks and the export were run again on \
+             Camerata build {checks_build}, using those saved results unchanged."
+        );
+        for part in &self.clone_parts {
+            let pairs = if part.candidates == 1 {
+                "1 candidate pair".to_string()
+            } else {
+                format!("{} candidate pairs", part.candidates)
+            };
+            let how = match &part.how {
+                RedoHow::ReadStored => "by reading the model's saved answer again".to_string(),
+                RedoHow::AskedAgain { model } => format!("by asking {model} once more"),
+            };
+            out.push_str(&format!(
+                " The duplicated code check for {pairs} in {} was completed on build \
+                 {checks_build}, {how}.",
+                part.repo
+            ));
+        }
+        if !self.clone_parts.is_empty() {
+            out.push_str(
+                " Any duplicated code it confirmed carries the rule's standard fix and is not included in \
+                 Patterns across services.",
+            );
+        }
+        out
+    }
+}

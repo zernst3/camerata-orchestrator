@@ -321,8 +321,9 @@ impl Default for ClaudeRefinementReviewer {
 
 impl ClaudeRefinementReviewer {
     /// The `claude -p` command for one review call (everything except the spawn), so the exact
-    /// argument list is testable without a `claude` binary.
-    fn build_command(&self, prompt: &str) -> tokio::process::Command {
+    /// argument list is testable without a `claude` binary. The prompt is not in it: it goes to
+    /// the child on stdin (see [`crate::engine::output_with_prompt`]).
+    fn build_command(&self) -> tokio::process::Command {
         // READ-ONLY, ungoverned review call: no MCP gateway, no write tools. THE INVARIANT:
         // when a repo clone is bound, run WITH it as cwd + `--add-dir` and the read-only
         // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
@@ -333,9 +334,8 @@ impl ClaudeRefinementReviewer {
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
-        // carries a raw secret, and the prompt reaches `claude -p` as an argument.
+        // carries a raw secret, and the prompt reaches `claude -p` on stdin.
         cmd.arg("-p")
-            .arg(camerata_secrets::model_input::redact_for_model(prompt).as_ref())
             .arg("--model")
             .arg(&self.model)
             .arg("--allowedTools")
@@ -362,6 +362,12 @@ impl ClaudeRefinementReviewer {
             }
         }
         cmd
+    }
+
+    /// Run the review call to completion with `prompt` on the child's stdin (redacted on the way,
+    /// see [`crate::engine::output_with_prompt`]).
+    async fn run_claude(&self, prompt: &str) -> std::io::Result<std::process::Output> {
+        crate::engine::output_with_prompt(self.build_command(), prompt).await
     }
 
     /// Construct on the built-in [`DEFAULT_REVIEWER_MODEL`]; the environment is never read. Use
@@ -527,8 +533,7 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
         let prompt = Self::build_prompt(session, form, self.grounding.as_deref());
-        let mut cmd = self.build_command(&prompt);
-        let out = cmd.output().await.map_err(ReviewError::Spawn)?;
+        let out = self.run_claude(&prompt).await.map_err(ReviewError::Spawn)?;
         if !out.status.success() {
             return Err(ReviewError::NonZeroExit {
                 status: out.status.to_string(),
@@ -693,18 +698,16 @@ mod tests {
         IntakeForm::sample_app()
     }
 
-    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` as an
-    /// argument, so it is redacted on its way into the argv.
     #[test]
     fn the_review_call_is_isolated_from_the_launcher() {
-        let bare = ClaudeRefinementReviewer::new().build_command("review");
+        let bare = ClaudeRefinementReviewer::new().build_command();
         assert_eq!(
             bare.as_std().get_current_dir(),
             Some(camerata_api_types::claude_cli::engine_empty_cwd().as_path())
         );
         let bound = ClaudeRefinementReviewer::new()
             .with_repo_dir("/Users/auditor/clients/acme")
-            .build_command("review");
+            .build_command();
         assert_eq!(
             bound.as_std().get_current_dir(),
             Some(std::path::Path::new("/Users/auditor/clients/acme"))
@@ -724,25 +727,29 @@ mod tests {
         }
     }
 
+    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` on stdin, so
+    /// it is redacted on its way there, and it is not in the argv at all.
     #[test]
     fn the_prompt_handed_to_claude_carries_no_raw_secret() {
         let planted =
             camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
-        let cmd = ClaudeRefinementReviewer::new()
-            .build_command(&format!("Review this. The config says {}.", planted.text));
+        let cmd = ClaudeRefinementReviewer::new().build_command();
         let argv: Vec<String> = cmd
             .as_std()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !argv.iter().any(|a| a.contains(&planted.value)),
-            "a secret value reached the claude argv"
+            !argv.iter().any(|a| a.starts_with("Review this.")),
+            "the prompt must not ride in the claude argv: {argv:?}"
         );
+        let prompt =
+            crate::engine::stdin_prompt(&format!("Review this. The config says {}.", planted.text));
         assert!(
-            argv.iter().any(|a| a.starts_with("Review this.")),
-            "{argv:?}"
+            !prompt.contains(&planted.value),
+            "a secret value reached the claude stdin"
         );
+        assert!(prompt.starts_with("Review this."), "{prompt:?}");
     }
 
     #[test]

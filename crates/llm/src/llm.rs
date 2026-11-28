@@ -151,8 +151,20 @@ pub(crate) fn nul_safe(s: &str) -> String {
 }
 
 /// Build the `claude -p` command for one completion (everything except the spawn), so the exact
-/// argument list is testable without a `claude` binary.
-fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::process::Command {
+/// argument list is testable without a `claude` binary. Neither the prompt nor the system prompt is
+/// in the argument list, which the OS caps (macOS `ARG_MAX`, about 1 MB) and which text carrying
+/// whole documents exceeds ("Argument list too long (os error 7)"): the prompt goes to stdin and
+/// the system prompt to a private file named by `--system-prompt-file`. Use [`spawn_cli`] to start
+/// the call with the prompt fed; the [`CliCall`] must outlive the child (it owns that file).
+struct CliCall {
+    cmd: tokio::process::Command,
+    /// The prompt to write to the child's stdin.
+    prompt: String,
+    /// The system prompt's file, removed when this drops.
+    system_file: Option<camerata_api_types::claude_cli::SystemPromptFile>,
+}
+
+fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> std::io::Result<CliCall> {
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
@@ -164,19 +176,16 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     };
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
-    // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
-    // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
-    // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
-    // nothing (shell tests were fast only because their stdin was a TTY/closed).
-    // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
-    // and responds at once.
+    // stdin(piped): the prompt goes in on stdin (`claude -p` with no prompt argument reads it
+    // until EOF), and `spawn_cli` closes it after the last byte. It must never be inherited:
+    // `claude -p` blocks until EOF on its stdin, and the desktop app's inherited stdin is an
+    // open pipe that never EOFs, so the audit once hung for minutes producing nothing.
     // The Cli backend is the SUBSCRIPTION path: it must never silently bill the API because an
     // `ANTHROPIC_API_KEY` from `.env` was inherited into this subprocess.
     camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
     cmd.kill_on_drop(true)
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
         .arg("-p")
-        .arg(nul_safe(&req.prompt))
         .arg("--model")
         .arg(model)
         .arg("--output-format")
@@ -188,7 +197,50 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     harden_completion(&mut cmd, req);
-    cmd
+    // The system prompt REPLACES the Claude Code scaffolding (`--system-prompt-file`, the file
+    // form of `--system-prompt`, listed in `claude --help`). `req` is already the redacted copy.
+    let system_file = match &req.system {
+        Some(system) => {
+            // Not the OS error as it comes: a missing temp directory is `NotFound`, which the
+            // caller would report as a missing `claude`.
+            let file = camerata_api_types::claude_cli::SystemPromptFile::create(&nul_safe(system))
+                .map_err(|e| {
+                    std::io::Error::other(format!("could not write the system prompt file: {e}"))
+                })?;
+            cmd.arg("--system-prompt-file").arg(file.path());
+            Some(file)
+        }
+        None => None,
+    };
+    Ok(CliCall {
+        cmd,
+        prompt: nul_safe(&req.prompt),
+        system_file,
+    })
+}
+
+/// Start a call built by [`build_cli_command`] and feed it the prompt on stdin. The write runs
+/// on its own task (see [`camerata_api_types::claude_cli::PromptWriter`]); the caller reads how it
+/// ended, and dropping it aborts it.
+fn spawn_cli(
+    call: CliCall,
+) -> std::io::Result<(
+    tokio::process::Child,
+    camerata_api_types::claude_cli::PromptWriter,
+    Option<camerata_api_types::claude_cli::SystemPromptFile>,
+)> {
+    let CliCall {
+        mut cmd,
+        prompt,
+        system_file,
+    } = call;
+    let mut child = cmd.spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("the claude CLI has no stdin pipe"))?;
+    let writer = camerata_api_types::claude_cli::PromptWriter::start(stdin, prompt.into_bytes());
+    Ok((child, writer, system_file))
 }
 
 /// The directory a `claude -p` call runs in (and whose Claude Code session folder holds its
@@ -262,9 +314,6 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         None => {
             cmd.arg("--tools").arg("");
         }
-    }
-    if let Some(system) = &req.system {
-        cmd.arg("--system-prompt").arg(nul_safe(system));
     }
     // A clean-room call (see [`RoomOutput`]): no instruction file is read, and the tools that
     // could run code, reach the web or hand the work to another agent are denied by name. The
@@ -374,6 +423,9 @@ pub fn kill_inflight_claude() {
             kill_pid(Some(pid));
         }
     }
+    // The shutdown path ends the process with `process::exit`, which runs no destructors: the
+    // in-flight calls' system prompt files (client data) are removed here, not by their guards.
+    camerata_api_types::claude_cli::remove_live_system_prompts();
 }
 
 /// Best-effort SIGKILL by pid. Shared by every "the subprocess must not be leaked" path:
@@ -551,9 +603,10 @@ fn cli_failure(
 /// specific message: a Finder/Dock-launched app inherits a minimal PATH that typically
 /// omits Homebrew's `/opt/homebrew/bin`, so the raw OS error ("No such file or
 /// directory") gives no hint that the fix is a PATH problem, not a missing install.
-/// Every other spawn error keeps the original generic wording, verbatim, so this only
-/// ever narrows the message, never changes behavior for other failure kinds. Pure and
-/// unit-testable in isolation (no process spawn required).
+/// Every other spawn error names the real OS error and does not blame PATH or the install
+/// (a prompt too large for the OS, a permission problem and a missing interpreter all
+/// land here, and none of them is fixed by reinstalling). Pure and unit-testable in
+/// isolation (no process spawn required).
 fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         anyhow::anyhow!(
@@ -563,7 +616,7 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
              Backend to API and add an Anthropic API key."
         )
     } else {
-        anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
+        anyhow::anyhow!("failed to spawn `claude` CLI: {e}")
     }
 }
 
@@ -851,6 +904,7 @@ async fn read_cli_stream_capturing(
     Ok(LlmResponse {
         reported_model,
         cli_cost_usd: cost,
+        elapsed_ms: None,
         text: full,
         model: model.to_string(),
         backend: "cli".to_string(),
@@ -1097,6 +1151,13 @@ pub struct LlmRequest {
     /// [`RoomOutput`] and [`LlmRequest::with_room_output`]). `None` = today's read-only grant,
     /// byte for byte. Ignored by the API backend and by a request with no repo-read folder.
     pub room_output: Option<RoomOutput>,
+    /// The prompt-cache time-to-live this request's cache marks ask for on the real-time API
+    /// path. `None` = the transport's own choice ([`CacheTtl::from_env`]), byte for byte what it
+    /// always was. A caller that must match the TTL of a Message Batch item (the batch runner's
+    /// warm call) sets it with [`LlmRequest::with_cache_ttl`]. Not part of the request's
+    /// identity: the run store's request key does not read it. Ignored by the CLI backend, by
+    /// non-Anthropic vendors and by a request with no cache mark.
+    pub cache_ttl: Option<CacheTtl>,
 }
 
 /// The one write a clean-room call may make: files under `<room_dir>/_camerata/out/`, nowhere
@@ -1127,7 +1188,15 @@ impl LlmRequest {
             temperature: None,
             response_schema: None,
             room_output: None,
+            cache_ttl: None,
         }
+    }
+
+    /// Ask for `ttl` on this request's cache marks instead of the transport's own choice.
+    #[must_use]
+    pub fn with_cache_ttl(mut self, ttl: CacheTtl) -> Self {
+        self.cache_ttl = Some(ttl);
+        self
     }
 
     /// Let the CLI-backend model write into `room_dir/_camerata/out/` and nowhere else, run
@@ -1334,6 +1403,7 @@ fn messages_response(
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text,
         model: model.to_string(),
         backend: backend.to_string(),
@@ -2161,13 +2231,17 @@ impl Llm {
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req)?;
+        let started = std::time::Instant::now();
         // CHOKEPOINT: every streaming call records into the cumulative ledger (success folds
         // usage + clears the rate-limit flag; failure runs the rate-limit detector). The `_`
         // arm delegates to `complete`, which records there — so guard against double-counting
         // by only recording the directly-served arms here.
         let result = match (self.vendor, self.backend) {
             (Vendor::Anthropic, Backend::Cli) => {
-                let r = self.complete_cli_streaming(&req, &model, on_delta).await;
+                let r = stamp_elapsed(
+                    self.complete_cli_streaming(&req, &model, on_delta).await,
+                    started,
+                );
                 if let Ok(resp) = &r {
                     self.ledger_record(resp);
                 }
@@ -2176,9 +2250,11 @@ impl Llm {
             (Vendor::Anthropic, Backend::Api) => {
                 // Streamed end to end: each text delta reaches `on_delta` as it arrives, so the
                 // listener is never handed the whole reply at once at the end.
-                let r = self
-                    .complete_api_streaming(self.messages_url(), &req, &model, on_delta)
-                    .await;
+                let r = stamp_elapsed(
+                    self.complete_api_streaming(self.messages_url(), &req, &model, on_delta)
+                        .await,
+                    started,
+                );
                 if let Ok(resp) = &r {
                     self.ledger_record(resp);
                 }
@@ -2202,6 +2278,7 @@ impl Llm {
     /// request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req)?;
+        let started = std::time::Instant::now();
         // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
         // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
         let result = match self.vendor {
@@ -2230,6 +2307,7 @@ impl Llm {
                 self.vendor.label()
             ),
         };
+        let result = stamp_elapsed(result, started);
         match &result {
             Ok(resp) => self.ledger_record(resp),
             Err(e) => self.ledger_note_failure(&e.to_string()),
@@ -2313,25 +2391,27 @@ impl Llm {
                 created_at: now_rfc3339(),
             });
         }
-        let mut cmd = build_cli_command(req, model, &session_id);
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                // A missing binary means no provider can be reached at all, so it stops the run;
-                // any other spawn failure is local.
-                let class = if e.kind() == std::io::ErrorKind::NotFound {
-                    crate::failure::FailureClass::AuthOrBilling
-                } else {
-                    crate::failure::FailureClass::Io
-                };
-                let message = map_spawn_error(e).to_string();
-                let err = cli_failure(model, class, false, message, None, "");
-                let record = crate::failure::call_failure_of(&err)
-                    .and_then(|f| f.attempts.first().cloned())
-                    .unwrap_or_default();
-                return Step::Stop { record, last: err };
-            }
-        };
+        // Held to the end of this attempt (success, error, timeout, kill): the system prompt's
+        // file goes with it, and so does the stdin writer if the call ends before it does.
+        let (child, writer, _system_file) =
+            match build_cli_command(req, model, &session_id).and_then(spawn_cli) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    // A missing binary means no provider can be reached at all, so it stops the run;
+                    // any other spawn failure is local.
+                    let class = if e.kind() == std::io::ErrorKind::NotFound {
+                        crate::failure::FailureClass::AuthOrBilling
+                    } else {
+                        crate::failure::FailureClass::Io
+                    };
+                    let message = map_spawn_error(e).to_string();
+                    let err = cli_failure(model, class, false, message, None, "");
+                    let record = crate::failure::call_failure_of(&err)
+                        .and_then(|f| f.attempts.first().cloned())
+                        .unwrap_or_default();
+                    return Step::Stop { record, last: err };
+                }
+            };
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
 
@@ -2366,7 +2446,28 @@ impl Llm {
         match read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, capture)
             .await
         {
-            Ok(resp) => Step::Done(resp),
+            Ok(resp) => {
+                // The answer to a prompt that did not reach the child whole is not the answer: a
+                // write failure, a broken pipe (the child closing its input early) included,
+                // fails the call, and is logged.
+                if let Err(e) = writer.finish().await {
+                    tracing::warn!("writing the prompt to the claude CLI failed: {e}");
+                    let message = format!("writing the prompt to the claude CLI failed: {e}");
+                    let err = cli_failure(
+                        model,
+                        crate::failure::FailureClass::Io,
+                        false,
+                        message,
+                        None,
+                        "",
+                    );
+                    let record = crate::failure::call_failure_of(&err)
+                        .and_then(|f| f.attempts.first().cloned())
+                        .unwrap_or_default();
+                    return Step::Stop { record, last: err };
+                }
+                Step::Done(resp)
+            }
             Err(e) => {
                 let Some(failure) = crate::failure::call_failure_of(&e) else {
                     // A refusal or an error nobody typed: not worth another run.
@@ -2460,8 +2561,9 @@ impl Llm {
             )
         })?;
 
-        let basis = PriceBasis::realtime();
-        let mut body = messages_request_body(req, model, basis.cache_ttl);
+        let (mut body, cache_ttl) = realtime_body(req, model);
+        let mut basis = PriceBasis::realtime();
+        basis.cache_ttl = cache_ttl;
         body["stream"] = serde_json::json!(true);
         let max_tokens = body["max_tokens"].as_u64().unwrap_or(0);
         let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
@@ -2825,6 +2927,32 @@ pub fn build_batch_item(
     }
 }
 
+/// The body a real-time call sends, and the cache TTL it asks for. A request with no
+/// [`LlmRequest::cache_ttl`] is the ordinary real-time body ([`messages_request_body`]). One that
+/// has it is a WARM call for a Message Batch item: its body is exactly that item's `params`
+/// ([`build_batch_item`]), so the provider, which keys the cache on the model, the system text,
+/// the messages, the cache marks and every other setting, writes the entry the batch items read.
+/// The real-time extras (`thinking` display) are left out for that reason: equality is the rule.
+fn realtime_body(req: &LlmRequest, model: &str) -> (serde_json::Value, CacheTtl) {
+    match req.cache_ttl {
+        None => {
+            let ttl = CacheTtl::from_env();
+            (messages_request_body(req, model, ttl), ttl)
+        }
+        Some(ttl) => (batch_params_body(req, model, ttl), ttl),
+    }
+}
+
+/// The `params` of the batch item `req` would be, as a `/v1/messages` body (absent fields left out).
+fn batch_params_body(req: &LlmRequest, model: &str, ttl: CacheTtl) -> serde_json::Value {
+    let item = build_batch_item("warm", req, model, ttl);
+    let mut body = serde_json::to_value(&item.params).unwrap_or_default();
+    if let Some(fields) = body.as_object_mut() {
+        fields.retain(|_, v| !v.is_null());
+    }
+    body
+}
+
 /// The body of a batch upload: the items, as the Batches API takes them.
 fn batch_submit_body(items: &[BatchItem]) -> serde_json::Value {
     let mut body = serde_json::json!({ "requests": items });
@@ -3180,10 +3308,7 @@ pub fn parse_batch_results_jsonl(
                 billed: None,
             });
         } else {
-            let error_msg = v["result"]["error"]["message"]
-                .as_str()
-                .unwrap_or(result_type)
-                .to_string();
+            let error_msg = batch_error_text(&v["result"]["error"], result_type);
             rows.push(BatchResultRow {
                 custom_id,
                 response: None,
@@ -3193,6 +3318,21 @@ pub fn parse_batch_results_jsonl(
         }
     }
     Ok(rows)
+}
+
+/// The text of an errored batch row. The Message Batches API nests it:
+/// `error: {type: "error", error: {type: "<kind>", message: "..."}}`. The inner kind is kept in
+/// the text (`<kind>: <message>`) so the failure classifier sees `billing_error` and the like. A
+/// flat `error.message` still reads; otherwise the result type stands in.
+fn batch_error_text(error: &serde_json::Value, result_type: &str) -> String {
+    let inner = &error["error"];
+    if let Some(msg) = inner["message"].as_str() {
+        return match inner["type"].as_str() {
+            Some(kind) => format!("{kind}: {msg}"),
+            None => msg.to_string(),
+        };
+    }
+    error["message"].as_str().unwrap_or(result_type).to_string()
 }
 
 /// The batch results keyed by `custom_id`: the answers, and the per-item reason for every
@@ -3471,6 +3611,7 @@ impl OpenRouterCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: output,
             model: model_returned,
             backend: "openrouter/api".to_string(),
@@ -3485,6 +3626,26 @@ impl OpenRouterCompleter {
     }
 }
 
+/// Stamp a finished backend call with how long it took. Called once where each backend call
+/// returns (`Llm::complete`, `Llm::complete_streaming`, `OpenRouterCompleter::complete`), so
+/// every response the engine meters carries `elapsed_ms`. A failed call has no response to stamp.
+fn stamp_elapsed(
+    mut result: anyhow::Result<LlmResponse>,
+    started: std::time::Instant,
+) -> anyhow::Result<LlmResponse> {
+    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &mut result {
+        Ok(resp) => resp.elapsed_ms = Some(elapsed),
+        // A failed call still waited: a typed transport failure carries how long.
+        Err(e) => {
+            if let Some(failure) = e.downcast_mut::<crate::failure::LlmCallFailure>() {
+                failure.elapsed_ms = Some(elapsed);
+            }
+        }
+    }
+    result
+}
+
 #[async_trait::async_trait]
 impl LlmPort for OpenRouterCompleter {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
@@ -3495,7 +3656,8 @@ impl LlmPort for OpenRouterCompleter {
         } else {
             req.model.clone()
         };
-        self.call_api(&req, &model).await
+        let started = std::time::Instant::now();
+        stamp_elapsed(self.call_api(&req, &model).await, started)
     }
 
     async fn complete_streaming(
@@ -3806,6 +3968,10 @@ mod cli_isolation_tests;
 #[cfg(test)]
 mod cli_pricing_tests;
 #[cfg(test)]
+mod cli_stdin_tests;
+#[cfg(test)]
+mod cli_system_prompt_tests;
+#[cfg(test)]
 mod model_input_tests;
 #[cfg(test)]
 mod room_output_tests;
@@ -3980,6 +4146,50 @@ mod tests {
         assert_eq!(r.model, "claude-opus-5");
         assert_eq!(r.max_tokens, 100);
         assert!(r.cache_breakpoints.is_empty(), "caching off by default");
+    }
+
+    /// A warm call's body is the batch item's `params`, field for field.
+    #[test]
+    fn a_warm_calls_body_is_the_batch_items_params_field_for_field() {
+        for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"] {
+            let req = LlmRequest::new("SHARED PREFIX. the tail")
+                .with_system("the system text")
+                .with_model(model)
+                .with_max_tokens(1024)
+                .with_effort("low")
+                .with_response_schema(two_field_schema())
+                .with_cache_prefix_len("SHARED PREFIX. ".len());
+            let ttl = CacheTtl::OneHour;
+            let item = build_batch_item("x", &req, model, ttl);
+            let want = serde_json::to_value(&item.params).unwrap();
+            let warm = req.clone().with_cache_ttl(ttl);
+            let (body, got_ttl) = realtime_body(&warm, model);
+            assert_eq!(got_ttl, ttl);
+            for field in ["model", "max_tokens", "system", "messages", "output_config"] {
+                assert_eq!(body[field], want[field], "{model}: field {field}");
+            }
+            assert_eq!(
+                body["messages"][0]["content"][0]["cache_control"]["ttl"],
+                "1h"
+            );
+            // Nothing else: no `thinking`, nothing the batch item does not carry.
+            let mut keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
+            let mut want_keys: Vec<_> = want
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.sort();
+            want_keys.sort();
+            assert_eq!(keys, want_keys, "{model}");
+            // The ordinary real-time body is a different thing (it asks for thinking).
+            let (plain, _) = realtime_body(&req, model);
+            if crate::model_registry::accepts_effort(model) {
+                assert!(plain.get("thinking").is_some(), "{model}");
+            }
+        }
     }
 
     #[test]
@@ -4436,6 +4646,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -4906,6 +5117,75 @@ mod tests {
         assert_eq!(v["params"]["output_config"]["effort"], "high", "{v}");
     }
 
+    /// The error text of the single errored row in `jsonl`.
+    fn errored_row_text(jsonl: &str) -> String {
+        let rows = parse_batch_results_jsonl(jsonl, BATCH_CACHE_TTL).expect("parse");
+        assert_eq!(rows.len(), 1, "one row");
+        rows[0].error.clone().expect("an errored row carries text")
+    }
+
+    /// The Message Batches API nests an errored row's text one level deeper than a flat error:
+    /// `result.error.error.message`. A credit row must classify as a billing stop.
+    #[test]
+    fn batch_errored_row_nested_credit_message_classes_auth_or_billing() {
+        let text = errored_row_text(
+            r#"{"custom_id":"x","result":{"type":"errored","error":{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}}}"#,
+        );
+        assert!(text.contains("credit balance is too low"), "{text}");
+        assert_eq!(
+            crate::failure::classify_text(&text).0,
+            crate::failure::FailureClass::AuthOrBilling,
+            "{text}"
+        );
+        let text = errored_row_text(
+            r#"{"custom_id":"x","result":{"type":"errored","error":{"type":"error","error":{"type":"billing_error","message":"Payment issue"}}}}"#,
+        );
+        assert_eq!(
+            crate::failure::classify_text(&text).0,
+            crate::failure::FailureClass::AuthOrBilling,
+            "{text}"
+        );
+        for etype in ["authentication_error", "permission_error"] {
+            let line = format!(
+                r#"{{"custom_id":"x","result":{{"type":"errored","error":{{"type":"error","error":{{"type":"{etype}","message":"nope"}}}}}}}}"#
+            );
+            let text = errored_row_text(&line);
+            assert_eq!(
+                crate::failure::classify_text(&text).0,
+                crate::failure::FailureClass::AuthOrBilling,
+                "{text}"
+            );
+        }
+    }
+
+    /// Transient nested rows are not billing stops and may be tried again.
+    #[test]
+    fn batch_errored_row_nested_transient_is_not_auth_or_billing() {
+        for (etype, msg) in [
+            ("overloaded_error", "Overloaded"),
+            ("rate_limit_error", "Number of requests exceeded"),
+            ("api_error", "Internal server error"),
+        ] {
+            let line = format!(
+                r#"{{"custom_id":"x","result":{{"type":"errored","error":{{"type":"error","error":{{"type":"{etype}","message":"{msg}"}}}}}}}}"#
+            );
+            let text = errored_row_text(&line);
+            let (class, retry) = crate::failure::classify_text(&text);
+            assert_ne!(class, crate::failure::FailureClass::AuthOrBilling, "{text}");
+            assert_ne!(class, crate::failure::FailureClass::Content, "{text}");
+            assert!(retry, "{text}");
+        }
+    }
+
+    /// The old flat fixture still parses to its message.
+    #[test]
+    fn batch_errored_row_flat_message_still_parses() {
+        let text = errored_row_text(
+            r#"{"custom_id":"c1-b0","result":{"type":"errored","error":{"message":"token limit exceeded"}}}"#,
+        );
+        assert_eq!(text, "token limit exceeded");
+    }
+
     /// `parse_batch_results_jsonl` extracts succeeded rows, maps error rows, and skips
     /// malformed lines — the fundamental parse + reassemble contract.
     #[test]
@@ -4955,6 +5235,7 @@ malformed line, not json
                 response: Some(LlmResponse {
                     reported_model: None,
                     cli_cost_usd: None,
+                    elapsed_ms: None,
                     text: "text A".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -4980,6 +5261,7 @@ malformed line, not json
                 response: Some(LlmResponse {
                     reported_model: None,
                     cli_cost_usd: None,
+                    elapsed_ms: None,
                     text: "text B".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -6152,11 +6434,13 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
     #[test]
     fn cli_command_is_tagged_with_the_given_session_id() {
         let req = LlmRequest::new("hello");
-        let cmd = build_cli_command(
+        let call = build_cli_command(
             &req,
             "claude-haiku-4-5",
             "11111111-2222-4333-8444-555555555555",
-        );
+        )
+        .unwrap();
+        let (cmd, prompt) = (call.cmd, call.prompt);
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -6167,15 +6451,17 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             .position(|a| a == "--session-id")
             .expect("--session-id is on the command line");
         assert_eq!(args[at + 1], "11111111-2222-4333-8444-555555555555");
-        // The prompt rides in the same command, so the id really does name its session.
-        assert!(args.iter().any(|a| a == "hello"));
+        // The prompt goes to the same child on stdin, so the id really does name its session.
+        assert_eq!(prompt, "hello");
+        assert!(!args.iter().any(|a| a == "hello"));
     }
 
     /// The Cli (subscription) backend must never inherit the Anthropic API key: a `.env` key in
     /// the parent would otherwise silently make `claude -p` bill the API.
     #[test]
     fn cli_command_removes_the_inherited_anthropic_key_from_the_child_env() {
-        let cmd = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
+        let call = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid").unwrap();
+        let (cmd, _prompt) = (call.cmd, call.prompt);
         let removed = cmd
             .as_std()
             .get_envs()
@@ -6195,6 +6481,7 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             "sink-ok",
             r#"#!/bin/sh
 printf '%s\n' "$@" > "$(dirname "$0")/args.txt"
+cat > /dev/null
 printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
 "#,
         );
@@ -6232,6 +6519,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let fake = FakeClaude::new(
             "capture-ok",
             r#"#!/bin/sh
+cat > /dev/null
 printf '%s\n' '{"type":"system","subtype":"init"}'
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}'
 printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}]}}'
@@ -6292,6 +6580,7 @@ exit 1
         let fake = FakeClaude::new(
             "sink-repo",
             r#"#!/bin/sh
+cat > /dev/null
 printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
 "#,
         );
@@ -6349,6 +6638,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let fake = FakeClaude::new(
             "live",
             r#"#!/bin/sh
+cat > /dev/null
 i=0
 while [ $i -lt 14 ]; do
   printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tok "}}}'
@@ -6467,7 +6757,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     /// answer. A counter file in the fake's folder counts the runs.
     fn flaky_claude(tag: &str, failures: u32, failure_body: &str) -> FakeClaude {
         let script = format!(
-            "#!/bin/sh\nc=\"`dirname \"$0\"`/count\"\nn=`cat \"$c\" 2>/dev/null || echo 0`\nn=`expr $n + 1`\necho $n > \"$c\"\nif [ $n -le {failures} ]; then\n{failure_body}\nfi\n{OK_RESULT}\n"
+            "#!/bin/sh\nc=\"`dirname \"$0\"`/count\"\nn=`cat \"$c\" 2>/dev/null || echo 0`\nn=`expr $n + 1`\necho $n > \"$c\"\nif [ $n -le {failures} ]; then\n{failure_body}\nfi\ncat > /dev/null\n{OK_RESULT}\n"
         );
         FakeClaude::new(tag, &script)
     }

@@ -47,6 +47,26 @@ impl SubgroupAllocator {
         Self::default()
     }
 
+    /// An allocator that carries on after the sub-groups `nodes` already hold, so rows grouped
+    /// later (the recheck of a saved run) never take an id a saved node has.
+    pub fn continuing_after(nodes: &[TreeNode]) -> Self {
+        let mut alloc = Self::default();
+        for node in nodes {
+            let Some((rule, ordinal)) = node
+                .id
+                .strip_prefix("sub:")
+                .and_then(|rest| rest.rsplit_once('/'))
+            else {
+                continue;
+            };
+            if let Ok(n) = ordinal.parse::<u32>() {
+                let slot = alloc.next.entry(format!("rule:{rule}")).or_insert(0);
+                *slot = (*slot).max(n);
+            }
+        }
+        alloc
+    }
+
     /// The next sub-group id under `rule_node_id` (`rule:SEC-RLS-1` gives `sub:SEC-RLS-1/1`,
     /// then `/2`).
     pub fn next_id(&mut self, rule_node_id: &str) -> String {

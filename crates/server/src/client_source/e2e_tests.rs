@@ -102,6 +102,8 @@ fn rig() -> Rig {
     fx.state
         .projects
         .update(&fx.project_id, |p| {
+            // The fake `claude` plays the engine's scan passes; a new project runs the agent finder.
+            p.review.finder = camerata_api_types::project::ProjectFinder::Engine;
             p.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: RULE.to_string(),
                 chosen_option: None,
@@ -343,7 +345,7 @@ async fn purge_completeness_no_client_file_remains_in_any_known_location() {
     let before_finding = files_containing(&fx.root, &fx.root, SENTINEL_FINDING, &skip);
     for expected in [
         "data/scan-cache.json",
-        "data/onboarding-draft.json",
+        "data/onboarding-draft-",
         "cli-state/camerata",
     ] {
         assert!(
@@ -409,7 +411,7 @@ async fn purge_completeness_no_client_file_remains_in_any_known_location() {
     let kept: Vec<&String> = after_finding.iter().collect();
     assert!(
         kept.iter().all(|p| {
-            p.as_str() == "data/onboarding-draft.json" || p.starts_with("data/inspections/")
+            p.starts_with("data/onboarding-draft-") || p.starts_with("data/inspections/")
         }),
         "SENTINEL_FINDING may remain only in the draft and the inspection, found in {after_finding:?}"
     );
@@ -422,7 +424,7 @@ async fn purge_completeness_no_client_file_remains_in_any_known_location() {
     assert!(
         after_finding
             .iter()
-            .any(|p| p == "data/onboarding-draft.json"),
+            .any(|p| p.starts_with("data/onboarding-draft-")),
         "the draft keeps the excerpt: {after_finding:?}"
     );
 
@@ -461,7 +463,7 @@ async fn a_synchronous_audit_blocks_deletion_while_it_runs() {
     let fx = &rig.fx;
     let pid = fx.project_id.clone();
     // A model that takes its time, so the request is observably in flight.
-    let slow = "#!/bin/sh\n[ \"$*\" = --version ] && { echo '2.1.321 (Claude Code)'; exit 0; }\nsleep 2\ncat \"$(dirname \"$0\")/empty.json\"\n";
+    let slow = "#!/bin/sh\n[ \"$*\" = --version ] && { echo '2.1.321 (Claude Code)'; exit 0; }\ncat > /dev/null\nsleep 2\ncat \"$(dirname \"$0\")/empty.json\"\n";
     let claude = rig.tools.path().join("claude");
     std::fs::write(&claude, slow).unwrap();
 
@@ -908,9 +910,9 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     let before = unzip(&before_zip);
     let before_findings = before
         .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
+        .find(|(name, _)| name.ends_with("json/inspection.json"))
         .map(|(_, bytes)| bytes.clone())
-        .expect("the package carries findings.json");
+        .expect("the package carries json/inspection.json");
     assert!(String::from_utf8_lossy(&before_findings).contains("src/leak.ts"));
 
     delete_over_http(fx).await;
@@ -933,9 +935,9 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     let after = unzip(&after_zip);
     let after_findings = after
         .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
+        .find(|(name, _)| name.ends_with("json/inspection.json"))
         .map(|(_, bytes)| bytes.clone())
-        .expect("the regenerated package carries findings.json");
+        .expect("the regenerated package carries json/inspection.json");
     let strip_clock = |bytes: &[u8]| -> serde_json::Value {
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         if let Some(map) = value.as_object_mut() {
@@ -957,4 +959,279 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&pdf));
     assert!(pdf.starts_with(b"%PDF"));
+}
+
+/// A finished run reaches the project's onboarding draft even when no screen was open to receive
+/// it: the draft is saved with the scan only (as the screen does right after the scan), the run
+/// finishes, and the draft read back holds the run's review. (The job path is the same for both
+/// finders; the fake `claude` plays the engine's passes.)
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_finished_run_lands_in_the_onboarding_draft_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    fx.state
+        .draft
+        .save(&pid, serde_json::json!({ "scan": scan, "audit": null }));
+
+    inspect(fx).await;
+
+    // Read the draft store itself, before any GET (a GET adopts on its own): it is the run's
+    // end that must have put the review there.
+    let draft = fx.state.draft.load(&pid).expect("the draft is still saved");
+    assert!(
+        draft["audit"]["findings"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f["path"] == "src/leak.ts")),
+        "the draft's audit holds the run's findings: {draft}"
+    );
+}
+
+/// A draft saved with no review, next to a saved inspection of the same repos (the run's results
+/// never reached the draft): reading the draft for "Continue where you left off" restores the
+/// review from the inspection, and a draft of other repos is left alone.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn continue_restores_the_review_from_the_saved_inspection_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+    // What the app held before the fix: a draft with the scan and no review.
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    fx.state.draft.save(
+        &pid,
+        serde_json::json!({ "scan": scan.clone(), "audit": null, "dispositions": {} }),
+    );
+    // A restart: nothing in memory but the files.
+    let state = fx.restarted();
+    state.projects.set_active(&pid);
+
+    let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    let draft = json(&body);
+    assert!(
+        draft["audit"]["findings"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f["path"] == "src/leak.ts")),
+        "the review came back from the saved inspection: {draft}"
+    );
+    assert_eq!(draft["scan"], scan, "the rest of the draft is untouched");
+
+    // A draft of other repos is not given this inspection's review.
+    let other = serde_json::to_value(crate::onboard::ScanReport::gated(&[
+        "acme/other".to_string()
+    ]))
+    .unwrap();
+    state
+        .draft
+        .save(&pid, serde_json::json!({ "scan": other, "audit": null }));
+    let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert!(
+        json(&body)["audit"].is_null(),
+        "another scan's draft keeps no audit"
+    );
+}
+
+/// Reading the draft never replaces a review the draft already holds, even when a saved
+/// inspection of the same repos exists: the operator's own saved review wins.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn continue_never_replaces_a_review_the_draft_already_holds_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    let mine = serde_json::json!({ "repos": [REPO], "findings": [], "marker": "the operator's own review" });
+    fx.state.draft.save(
+        &pid,
+        serde_json::json!({ "scan": scan, "audit": mine.clone() }),
+    );
+
+    let (_, body) = call(
+        &fx.state,
+        "GET",
+        "/api/onboard/draft",
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(
+        json(&body)["audit"],
+        mine,
+        "the held review is not replaced"
+    );
+}
+
+/// A draft file the app cannot read is set aside untouched, and the operator is told once on the
+/// next read of the draft (the screen shows the message). The 409 is not a dead end: the next
+/// read is a normal answer, and a save works.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn an_unreadable_draft_file_is_reported_once_and_is_not_a_dead_end_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let dir = rig.fx.root.join("data");
+    let file = dir.join("onboarding-draft.json");
+    let torn = r#"{"p1": {"scan": {"repos": ["a/b"]}, "audit": {"findings": ["#;
+    std::fs::write(&file, torn).unwrap();
+    let state = fx.restarted();
+    state.projects.set_active(&fx.project_id);
+
+    let (status, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let message = json(&body)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(message.contains("could not be read"), "{message}");
+    assert!(
+        message.contains("onboarding-draft.json.unreadable-"),
+        "{message}"
+    );
+    assert!(
+        message.contains("onboarding-draft.json.bak"),
+        "names the recovery copy: {message}"
+    );
+    let aside: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("onboarding-draft.json.unreadable-")
+        })
+        .collect();
+    assert_eq!(aside.len(), 1, "one set-aside copy");
+    assert_eq!(std::fs::read_to_string(aside[0].path()).unwrap(), torn);
+
+    // Told once: the next read is an ordinary "no draft", and a save goes through.
+    let (status, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(json(&body).is_null());
+    let (status, _) = call(
+        &state,
+        "POST",
+        "/api/onboard/draft",
+        serde_json::json!({"scan": {"repos": ["acme/app"]}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body)["scan"]["repos"][0], "acme/app");
+}
+
+/// Reading the draft while a re-inspection of the project is running does not hand the screen
+/// the PREVIOUS inspection's review (the screen has cleared its review to take the new run's);
+/// and when the new run finishes, its result replaces a review that was itself adopted earlier.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_rerun_is_not_shadowed_by_the_previous_inspection_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    fx.state
+        .draft
+        .save(&pid, serde_json::json!({ "scan": scan, "audit": null }));
+
+    // A re-inspection is running: a read of the draft adopts nothing.
+    let running = fx.state.jobs.create("rerun", Some(pid.clone()));
+    let (_, body) = call(
+        &fx.state,
+        "GET",
+        "/api/onboard/draft",
+        serde_json::json!(null),
+    )
+    .await;
+    assert!(
+        json(&body)["audit"].is_null(),
+        "no adoption mid-run: {}",
+        json(&body)
+    );
+    fx.state.jobs.fail(&running, "stopped by the test");
+
+    // Not running any more: the read adopts the first inspection's review.
+    let (_, body) = call(
+        &fx.state,
+        "GET",
+        "/api/onboard/draft",
+        serde_json::json!(null),
+    )
+    .await;
+    let first = json(&body)["audit"]["provenance"]["finished_at"].clone();
+    assert!(first.is_string(), "adopted: {}", json(&body));
+
+    // A second inspection finishes with no screen mounted: its review replaces the adopted one.
+    inspect(fx).await;
+    let draft = fx.state.draft.load(&pid).unwrap();
+    let second = draft["audit"]["provenance"]["finished_at"].clone();
+    assert_ne!(first, second, "the newer run replaced the adopted review");
+    let latest = fx.state.inspections.latest(&pid).unwrap().finished_at;
+    assert_eq!(second, serde_json::json!(latest));
+}
+
+/// An inspection that finished before the architect started over is not that project's next
+/// draft: reading the new draft does not bring the discarded review back. A draft with no discard
+/// stamp (saved before stamps existed) still adopts, and so does one started after the discard.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn start_over_is_not_undone_by_the_old_inspection_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    let blank = serde_json::json!({ "scan": scan, "audit": null });
+
+    // Start over (the real route), then a new scan saves a draft with no review.
+    fx.state.draft.save(&pid, blank.clone());
+    let (status, _) = call(
+        &fx.state,
+        "POST",
+        "/api/onboard/draft/clear",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    fx.state.draft.save(&pid, blank.clone());
+    let (_, body) = call(
+        &fx.state,
+        "GET",
+        "/api/onboard/draft",
+        serde_json::json!(null),
+    )
+    .await;
+    assert!(
+        json(&body)["audit"].is_null(),
+        "the discarded review stays discarded: {}",
+        json(&body)
+    );
+
+    // The stamp survives a restart.
+    let state = fx.restarted();
+    state.projects.set_active(&pid);
+    let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert!(json(&body)["audit"].is_null(), "after a restart too");
+
+    // A discard long before the run: the run belongs to the new draft.
+    state.draft.clear_at(&pid, "2000-01-01T00:00:00Z");
+    state.draft.save(&pid, blank);
+    let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert!(json(&body)["audit"]["findings"]
+        .as_array()
+        .is_some_and(|f| !f.is_empty()));
 }

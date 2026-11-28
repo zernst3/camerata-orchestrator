@@ -1,5 +1,5 @@
 id = "SEC-NO-KNOWN-VULNERABLE-RUNTIME-1"
-version = 2
+version = 3
 title = "The runtime version the code declares has no publicly known vulnerabilities"
 domain = "universal"
 layer = "universal"
@@ -35,7 +35,7 @@ A runtime sits under every line of the application, so a flaw in it is a flaw in
 runs on it. Runtime vulnerabilities are published in the NVD with a severity score, and some are
 actively exploited in the wild (CISA tracks those). Maintainers fix them in patch releases within
 the same release line, which makes staying current inexpensive: a patch upgrade seldom changes
-behaviour. A repository that pins an older patch release carries every flaw fixed since, and
+behavior. A repository that pins an older patch release carries every flaw fixed since, and
 anyone can look the version up and read the list. The dependency audit sees packages in a
 lockfile but not the runtime they run on, so the runtime needs its own check.
 """
@@ -48,7 +48,7 @@ remediation = """
 Upgrade <runtime> to the latest patch release of its line, or to a supported release line, and update `<path>` and every other place the version is declared (the Dockerfile, the version file and the CI configuration). Rebuild the images and run the test suite. Verify by rescanning: the version no longer appears under this rule.
 """
 effort = "low"
-why = "Patch releases carry the fixes for published vulnerabilities and rarely change behaviour, so taking them promptly closes known holes for little work."
+why = "Patch releases carry the fixes for published vulnerabilities and rarely change behavior, so taking them promptly closes known holes for little work."
 
 [[option]]
 id = "pin-runtime-and-never-patch"

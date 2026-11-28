@@ -66,6 +66,7 @@ impl LlmPort for Recorder {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),
@@ -262,7 +263,7 @@ fn the_shared_resolvers_ignore_every_removed_variable() {
     );
     assert_eq!(
         camerata_server::ai_audit::group_review::resolve_group_review_model(None),
-        "claude-fable-5-2"
+        "claude-opus-5-5"
     );
     assert_eq!(
         camerata_server::ai_audit::resolve_calibration_model(Some("picked"), "scan-model"),

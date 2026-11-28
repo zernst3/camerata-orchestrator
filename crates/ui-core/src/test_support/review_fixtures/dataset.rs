@@ -1773,6 +1773,7 @@ fn assemble(
             .map(held_row)
             .collect(),
         node_decisions_missing_members: gaps.into_values().collect(),
+        split_rules: Vec::new(),
     };
 
     // The Engine Check lane.

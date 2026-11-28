@@ -17,9 +17,6 @@ pub struct ProductExportOptions {
     pub prepared_by: String,
     /// Replaces the generated executive summary verbatim when `Some`.
     pub executive_summary_override: Option<String>,
-    /// Also export the triage log: per rule, what the AI pass proposed, what review kept and
-    /// threw out, and why. A workbook sheet plus `csv/triage-log.csv`. Off by default.
-    pub triage_log: bool,
     /// Changes the review screen has made that the decision store does not hold yet. The
     /// server's release gate refuses the export while there are any, naming each site.
     pub unsynced_changes: Vec<camerata_api_types::decisions::UnsyncedChange>,
@@ -37,7 +34,6 @@ pub fn request_body<D: Serialize>(
             "project_title": options.project_title,
             "prepared_by": options.prepared_by,
             "executive_summary_override": options.executive_summary_override,
-            "triage_log": options.triage_log,
             "unsynced_changes": options.unsynced_changes,
         },
     })
@@ -53,10 +49,11 @@ mod tests {
         request_body(&dispositions, options)
     }
 
+    /// The triage log left the client package: the request has no key for it.
     #[test]
-    fn the_triage_log_is_off_unless_the_box_is_ticked() {
+    fn the_request_has_no_triage_log_key() {
         let value = body(&ProductExportOptions::default());
-        assert_eq!(value["options"]["triage_log"], serde_json::json!(false));
+        assert!(value["options"].get("triage_log").is_none(), "{value}");
     }
 
     #[test]
@@ -80,15 +77,6 @@ mod tests {
     }
 
     #[test]
-    fn a_ticked_triage_log_box_reaches_the_request() {
-        let value = body(&ProductExportOptions {
-            triage_log: true,
-            ..ProductExportOptions::default()
-        });
-        assert_eq!(value["options"]["triage_log"], serde_json::json!(true));
-    }
-
-    #[test]
     fn the_other_options_and_the_dispositions_ride_along_and_no_client_name_is_sent() {
         let mut dispositions = HashMap::new();
         dispositions.insert("k".to_string(), "v".to_string());
@@ -98,7 +86,6 @@ mod tests {
                 project_title: "T".to_string(),
                 prepared_by: "P".to_string(),
                 executive_summary_override: Some("S".to_string()),
-                triage_log: false,
                 unsynced_changes: Vec::new(),
             },
         );
@@ -122,7 +109,6 @@ mod tests {
                 project_title: "T".to_string(),
                 prepared_by: "P".to_string(),
                 executive_summary_override: Some("S".to_string()),
-                triage_log: true,
                 unsynced_changes: Vec::new(),
             },
         );
@@ -139,7 +125,6 @@ mod tests {
                 "executive_summary_override",
                 "prepared_by",
                 "project_title",
-                "triage_log",
                 "unsynced_changes"
             ]
         );

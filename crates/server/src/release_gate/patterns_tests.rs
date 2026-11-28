@@ -66,7 +66,7 @@ fn a_multi_repo_package_with_a_patterns_section_clears_the_gate() {
         "anti-vacuity: the section has its one row"
     );
     assert!(patterns_section_problems(&entries, &report).is_empty());
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert_eq!(
         findings["patterns_across_services"]["rows"]
             .as_array()
@@ -82,20 +82,20 @@ fn a_one_repo_package_has_no_patterns_key_and_the_gate_is_clean() {
     let (entries, report) = entries_of(package_for(scan_report()));
     assert!(report.patterns_across_services.is_none());
     assert!(patterns_section_problems(&entries, &report).is_empty());
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert!(findings.get("patterns_across_services").is_none());
 }
 
 #[test]
 fn the_gate_flags_a_pattern_row_counted_among_the_findings() {
     let (mut entries, report) = entries_of(package_for(two_repo_report()));
-    let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let mut findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     findings["findings"]
         .as_array_mut()
         .unwrap()
         .push(json!({"rule_id": RULE, "statement": "x", "cells": []}));
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = patterns_section_problems(&entries, &report);
@@ -110,13 +110,13 @@ fn the_gate_flags_a_pattern_row_counted_among_the_findings() {
 #[test]
 fn the_gate_flags_a_severity_inside_the_section_and_a_missing_or_extra_key() {
     let (mut entries, report) = entries_of(package_for(two_repo_report()));
-    let original: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let original: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
 
     // A severity on a pattern row.
     let mut with_severity = original.clone();
     with_severity["patterns_across_services"]["rows"][0]["severity"] = json!("high");
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&with_severity).unwrap(),
     );
     assert!(
@@ -133,7 +133,7 @@ fn the_gate_flags_a_severity_inside_the_section_and_a_missing_or_extra_key() {
         .unwrap()
         .remove("patterns_across_services");
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&without_key).unwrap(),
     );
     assert!(
@@ -147,7 +147,7 @@ fn the_gate_flags_a_severity_inside_the_section_and_a_missing_or_extra_key() {
     let mut one_repo = report.clone();
     one_repo.patterns_across_services = None;
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&original).unwrap(),
     );
     assert!(
@@ -172,9 +172,9 @@ fn the_gate_flags_a_workbook_sheet_the_report_does_not_have() {
     );
 }
 
-/// `findings.json` with the patterns cell of `repo` for the one pattern row set to clean.
+/// `json/inspection.json` with the patterns cell of `repo` for the one pattern row set to clean.
 fn plant_clean_cell(entries: &mut BTreeMap<String, Vec<u8>>, repo: &str) {
-    let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let mut findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let cells = findings["patterns_across_services"]["rows"][0]["cells"]
         .as_array_mut()
         .unwrap();
@@ -184,7 +184,7 @@ fn plant_clean_cell(entries: &mut BTreeMap<String, Vec<u8>>, repo: &str) {
         .expect("the row has a cell for the repo");
     *cell = json!({"repo": repo, "state": "clean", "label": "Clean"});
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&findings).unwrap(),
     );
 }
@@ -196,11 +196,11 @@ fn the_gate_refuses_a_patterns_cell_that_says_clean_beside_an_open_problem() {
         patterns_section_problems(&entries, &report).is_empty(),
         "anti-vacuity: the package as built is consistent"
     );
-    // acme/portal has an open problem under the rule in findings.json; its cell now says clean.
+    // acme/portal has an open problem under the rule in json/inspection.json; its cell now says clean.
     plant_clean_cell(&mut entries, "acme/portal");
     let problems = patterns_section_problems(&entries, &report);
     assert!(
-        problems.iter().any(|p| p.file == "findings.json"
+        problems.iter().any(|p| p.file == "json/inspection.json"
             && p.message.contains("acme/portal")
             && p.message.contains(RULE)
             && p.message.contains("clean")),
@@ -214,7 +214,7 @@ fn the_gate_refuses_a_patterns_cell_that_says_clean_beside_an_open_problem() {
     assert!(
         problems
             .iter()
-            .any(|p| p.file == "findings.json" && p.message == expected),
+            .any(|p| p.file == "json/inspection.json" && p.message == expected),
         "{problems:?}"
     );
 }
@@ -368,7 +368,7 @@ fn package_with_ruled_out_host_absorbing_another_rules_site(
 #[test]
 fn a_clean_cell_beside_a_site_a_ruled_out_row_absorbed_for_another_rule_is_refused() {
     let (mut entries, report) = package_with_ruled_out_host_absorbing_another_rules_site();
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert_eq!(
         findings["findings"].as_array().unwrap().len(),
         1,
@@ -397,7 +397,7 @@ fn a_clean_cell_beside_a_site_a_ruled_out_row_absorbed_for_another_rule_is_refus
     plant_clean_cell(&mut entries, "acme/web");
     let problems = patterns_section_problems(&entries, &report);
     assert!(
-        problems.iter().any(|p| p.file == "findings.json"
+        problems.iter().any(|p| p.file == "json/inspection.json"
             && p.message.contains("acme/web")
             && p.message.contains(RULE_B)
             && p.message.contains("clean")),
@@ -447,7 +447,7 @@ fn package_with_ruled_out_host_also_matching_another_rule(
 #[test]
 fn a_clean_cell_beside_a_rule_a_ruled_out_row_also_matches_is_refused() {
     let (mut entries, report) = package_with_ruled_out_host_also_matching_another_rule();
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert_eq!(
         findings["findings"].as_array().unwrap().len(),
         1,
@@ -467,7 +467,7 @@ fn a_clean_cell_beside_a_rule_a_ruled_out_row_also_matches_is_refused() {
     plant_clean_cell(&mut entries, "acme/portal");
     let problems = patterns_section_problems(&entries, &report);
     assert!(
-        problems.iter().any(|p| p.file == "findings.json"
+        problems.iter().any(|p| p.file == "json/inspection.json"
             && p.message.contains("acme/portal")
             && p.message.contains(RULE_B)
             && p.message.contains("clean")),
@@ -484,16 +484,16 @@ fn the_gate_refuses_a_package_whose_open_beside_ruled_out_is_not_empty() {
         patterns_section_problems(&entries, &report).is_empty(),
         "anti-vacuity: the package as built is consistent"
     );
-    let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let mut findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     findings["open_beside_ruled_out"] =
         json!([{"repo": "acme/web", "rule_id": RULE_B, "path": "src/query.rs", "line": 7}]);
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = patterns_section_problems(&entries, &report);
     assert!(
-        problems.iter().any(|p| p.file == "findings.json"
+        problems.iter().any(|p| p.file == "json/inspection.json"
             && p.message.contains("src/query.rs")
             && p.message.contains(RULE_B)
             && p.message.contains("ruled-out row")),
@@ -504,10 +504,10 @@ fn the_gate_refuses_a_package_whose_open_beside_ruled_out_is_not_empty() {
 #[test]
 fn findings_json_omits_open_beside_ruled_out_when_there_is_nothing_to_list() {
     let (entries, _report) = entries_of(package_for(two_repo_report()));
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert!(
         findings.get("findings").is_some(),
-        "anti-vacuity: findings.json parsed with its findings"
+        "anti-vacuity: json/inspection.json parsed with its findings"
     );
     assert!(
         findings.get("open_beside_ruled_out").is_none(),
@@ -515,18 +515,18 @@ fn findings_json_omits_open_beside_ruled_out_when_there_is_nothing_to_list() {
     );
 }
 
-/// The package as built, with `findings.json`'s rows replaced by `rows` and the patterns row's
+/// The package as built, with `json/inspection.json`'s rows replaced by `rows` and the patterns row's
 /// title by `title`, and the portal's cell planted clean.
 fn gate_problems_with_rows(rows: Value, title: Option<&str>) -> Vec<Problem> {
     let (mut entries, report) = entries_of(package_for(two_repo_report()));
     plant_clean_cell(&mut entries, "acme/portal");
-    let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let mut findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     findings["findings"] = rows;
     if let Some(title) = title {
         findings["patterns_across_services"]["rows"][0]["title"] = json!(title);
     }
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec(&findings).unwrap(),
     );
     // The PDF side is not under test: it keeps the section as built.
@@ -537,7 +537,7 @@ fn gate_problems_with_rows(rows: Value, title: Option<&str>) -> Vec<Problem> {
 
 fn refuses_portal(problems: &[Problem]) -> bool {
     problems.iter().any(|p| {
-        p.file == "findings.json"
+        p.file == "json/inspection.json"
             && p.message.contains("acme/portal")
             && p.message.contains("clean")
     })

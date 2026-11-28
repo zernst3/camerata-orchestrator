@@ -129,13 +129,13 @@ enum Command {
     },
 
     /// Headless brownfield inspection: runs the full cockpit scan pipeline over `--repo` and
-    /// writes the SAME product-export ZIP (PDF + xlsx + findings.json + README.txt) the UI's
+    /// writes the SAME product-export ZIP (the PDF, the workbook, the JSON and CSV files and the README) the UI's
     /// export button produces to `--export`. No BFF, no UI — see
     /// `camerata::inspect_cmd`'s module doc comment.
     Inspect {
         /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
         /// project (one scan, one report, one cache); each then needs a `--repo-name`.
-        #[arg(long, required_unless_present = "resume")]
+        #[arg(long, required_unless_present_any = ["resume", "rerun_deterministic", "recheck_saved"])]
         repo: Vec<PathBuf>,
         /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
         /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
@@ -144,7 +144,7 @@ enum Command {
         repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         /// With `--resume`, defaults to where the saved run was to write it.
-        #[arg(long, required_unless_present = "resume")]
+        #[arg(long, required_unless_present_any = ["resume", "rerun_deterministic", "recheck_saved"])]
         export: Option<PathBuf>,
         /// `api` (the Anthropic Messages API; uses the key saved in the app, or
         /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
@@ -176,7 +176,7 @@ enum Command {
         #[arg(long = "clone-judge-model")]
         clone_judge_model: Option<String>,
         /// Model for the group reviewer (stage 2), the architect's first reader of each rule
-        /// group. Unset: the built-in default, Fable 5.2. Set only here or in a project's
+        /// group. Unset: the built-in default, Opus 5.5. Set only here or in a project's
         /// settings, never by the environment.
         #[arg(long = "group-review-model")]
         group_review_model: Option<String>,
@@ -222,13 +222,14 @@ enum Command {
         /// `--efficiency warm_schedule=off`. Repeatable; wins over `CAMERATA_EFFICIENCY`. Every
         /// measure is on by default; the run states which were on. Measures: warm_schedule,
         /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter,
-        /// fix_on_haiku, terse_output, batch_default, applies_to_routing, candidates_prefilter.
+        /// fix_on_haiku, terse_output, batch_default, applies_to_routing,
+        /// candidates_prefilter, batch_warm.
         #[arg(long = "efficiency", value_name = "NAME=on|off")]
         efficiency: Vec<String>,
         /// Who the inspection is for. Printed in the export's confidentiality line ("Confidential,
         /// prepared for <client> on <date>") on every PDF page and workbook sheet. Required: it
         /// is checked before anything is read or spent.
-        #[arg(long, value_name = "NAME", required_unless_present = "resume")]
+        #[arg(long, value_name = "NAME", required_unless_present_any = ["resume", "rerun_deterministic", "recheck_saved"])]
         client: Option<String>,
         /// Not a client engagement: the maintainer's own development. Without this flag every
         /// inspection is a client engagement, which runs only on the Anthropic API with
@@ -247,14 +248,22 @@ enum Command {
         /// dropped.
         #[arg(long)]
         consensus: bool,
-        /// Which finder reviews the code: `engine` (the default: the scan passes, then the
-        /// calibration stage) or `agent` (one review agent for each piece of code, with the rules
-        /// as its checklist; the files it read come from its tool trace). The agent finder
+        /// A file the client and the operator agreed is not part of the inspection (repeat for
+        /// more). A glob matched against `<repo name>/<path within the repo>`, for example
+        /// `acme-field-data/seeds/**`. An excluded file is not read, counted or billed;
+        /// the report lists it as excluded by agreement. A file over the 1 MB read limit stops
+        /// the run until it is excluded here.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// Which finder reviews the code: `agent` (the default: one review agent for each piece
+        /// of code, with the rules as its checklist; the files it read come from its tool trace)
+        /// or `engine` (the scan passes, then the calibration stage). The agent finder
         /// needs a full inspection (it cannot be combined with `--consensus`, and it needs
-        /// `--full` when an earlier inspection of the same code exists).
-        #[arg(long, default_value = "engine", value_parser = camerata::inspect_cmd::finder::parse_finder)]
+        /// `--full` when an earlier inspection of the same code exists); pass `--finder engine`
+        /// for either.
+        #[arg(long, default_value = "agent", value_parser = camerata::inspect_cmd::finder::parse_finder)]
         finder: camerata_server::ai_audit::agent_finder::FinderChoice,
-        /// The agent finder's model. Unset: the built-in default (Fable 5.2). Set only here or in
+        /// The agent finder's model. Unset: the built-in default (Opus 5.5). Set only here or in
         /// a project's settings, never by the environment.
         #[arg(long = "finder-model")]
         finder_model: Option<String>,
@@ -278,6 +287,80 @@ enum Command {
         /// else is the saved run's. A run that is already complete says so and does nothing.
         #[arg(long, value_name = "RUN-ID|latest")]
         resume: Option<String>,
+        /// Rerun the deterministic stages of a saved run on THIS build, with no model calls:
+        /// `--rerun-deterministic <RUN-ID>` or `--rerun-deterministic latest`. For a saved run
+        /// whose bookkeeping (the tool previews and their merges, the convention accounting, the
+        /// ledger and integrity checks, the collapse, the export) was wrong on the build that made
+        /// it and is fixed on this one. Every model reply comes from the run's store; the finder,
+        /// the group review, the fix text and the clone and duplicate checks keep the original
+        /// build's results and models. A reply the run does not hold refuses the whole rerun,
+        /// listing every missing one, and nothing is sent. Refuses if the models, the rules, the
+        /// questions asked of the model or the rule library differ from the saved run (a normal
+        /// `--resume` on another build is still refused). Records both builds in the run, the
+        /// ledger and the report's "How this was done". No key is needed. `--export` may be given
+        /// again; everything else is the saved run's.
+        #[arg(
+            long = "rerun-deterministic",
+            value_name = "RUN-ID|latest",
+            conflicts_with = "resume"
+        )]
+        rerun_deterministic: Option<String>,
+        /// Finish a saved, INCOMPLETE inspection on THIS build by re-checking and re-exporting from
+        /// its saved report, using every saved model result as it was saved:
+        /// `--recheck-saved <RUN-ID>` or `--recheck-saved latest`. Only what this build changed
+        /// runs: the final checks (the convention accounting, the pipeline integrity checks and
+        /// the release gate) and the export, and the one clone check (duplicate code) part per
+        /// repo that failed because the judge's reply could not be read, which is read again from
+        /// its stored reply with no model call. No tool preview, dependency audit, finder, fix
+        /// stage or group review is run. Refuses, naming the cause, if the saved report or ledger
+        /// is missing or unreadable, if the run is already complete, if the repository is not
+        /// the tree the run read, if the rules or the questions asked of the model differ, or (for
+        /// a client run) if this build has uncommitted changes. If the release gate refuses, the
+        /// command stops with its refusal and writes no export. Records both builds in the run,
+        /// the ledger and the report's "How this was done". `--export` and `--max-cost-usd` may
+        /// be given again; everything else is the saved run's. No key is needed unless
+        /// `--reask-failed-judge` makes a call.
+        #[arg(
+            long = "recheck-saved",
+            value_name = "RUN-ID|latest",
+            conflicts_with_all = ["resume", "rerun_deterministic", "plan_only"]
+        )]
+        recheck_saved: Option<String>,
+        /// With `--recheck-saved`: when a failed clone check part's stored reply cannot be read
+        /// by the current reader, ask exactly that part once more, on this build and on the clone
+        /// check model the inspection started with (from the run's record, never a default). The
+        /// parts are listed, with their count, before any call; at most 5 (or the number given as
+        /// `--reask-failed-judge=<COUNT>`) are asked, one call each, and a spend limit the calls
+        /// could pass refuses first. Without this flag a part that still cannot be settled
+        /// refuses the recheck, naming it, with nothing sent. The calls are recorded in the run,
+        /// the ledger and the report's "How this was done".
+        #[arg(
+            long = "reask-failed-judge",
+            value_name = "COUNT",
+            num_args = 0..=1,
+            default_missing_value = REASK_DEFAULT_COUNT,
+            require_equals = true,
+            requires = "recheck_saved"
+        )]
+        reask_failed_judge: Option<usize>,
+        /// With `--recheck-saved`: print what the recheck would do, then stop. Makes no model
+        /// call, reads no credential and writes nothing (no run, report, ledger or export). Prints
+        /// counts only: per failed clone check part the clone rows, candidates and other rows of
+        /// the rule ignored, the batches rebuilt, saved and failed, and whether it would read
+        /// again, ask again with the flag, or refuse.
+        #[arg(long = "dry-run", requires = "recheck_saved")]
+        dry_run: bool,
+        /// Print what this run would take on, then stop: per repo the files, lines and bytes
+        /// admitted and the files left out by reason; per piece its files, bytes, context and
+        /// checklist bytes, first request size and turn limit; the pre-flight cost projection
+        /// (projected, API prices) and the spend limit it would run under; every warning. Makes
+        /// no model call and no network call, reads no credential and saves nothing (no run, no
+        /// ledger, no rooms). Its figures use relative paths and never file text. Give the
+        /// same flags as the real run. Exits 0 when a real run would start, non-zero with the
+        /// reason when it would refuse (a spend limit under the projection, a build with
+        /// uncommitted changes on a client run).
+        #[arg(long = "plan-only", conflicts_with_all = ["resume", "rerun_deterministic", "recheck_saved"])]
+        plan_only: bool,
     },
 
     /// Measure run-to-run drift: run the full AI pass twice over `--repo` with every answer
@@ -371,11 +454,30 @@ enum Command {
     /// plus what the noise filter excluded. No model, no network. This is the number a quote is
     /// priced on. See `camerata::count_cmd`'s module doc comment.
     Count {
-        /// The repo (or folder) to count.
-        repo: PathBuf,
+        /// The repo (or folder) to count; give several paths for a project of several repos
+        /// (with --estimate: a line per repo and the total).
+        #[arg(required = true)]
+        repo: Vec<PathBuf>,
         /// Print JSON instead of the plain-text table.
         #[arg(long)]
         json: bool,
+        /// A file agreed to be outside the inspection (repeat for more): a glob matched against
+        /// `<repo name>/<path within the repo>`, the repo name being the folder's name. Counted
+        /// as excluded by agreement, not billed. Same patterns as `camerata inspect --exclude`.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// The repo's name as OWNER/REPO, the same flag `camerata inspect` takes, so a pattern
+        /// means the same files in both. Without it the folder's own name.
+        #[arg(long = "repo-name")]
+        repo_name: Option<String>,
+        /// Add the full-scan cost estimate: counted lines / 1,000 x dollars per 1,000 counted
+        /// lines. Without --cost-per-1k-usd the documented measured constant is used.
+        #[arg(long)]
+        estimate: bool,
+        /// Dollars per 1,000 counted lines from your own earlier run (the figure the stage table
+        /// of `camerata inspect` prints). Implies --estimate.
+        #[arg(long = "cost-per-1k-usd")]
+        cost_per_1k_usd: Option<f64>,
     },
 
     /// Compare two inspections of the SAME fixture: exit 1 when cost per 1K counted lines rose
@@ -394,10 +496,60 @@ enum Command {
         threshold_pct: f64,
     },
 
+    /// The diagnostic bundle: when a client run fails, write a sanitized JSON of engine facts
+    /// (counts, enums, rule ids, hashed paths, word-skeleton messages) that a developer can fix
+    /// the bug from without seeing client code. Writes local files only; sends nothing.
+    Diagnose {
+        #[command(subcommand)]
+        action: DiagnoseAction,
+    },
+
     /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
     Corpus {
         #[command(subcommand)]
         action: CorpusAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DiagnoseAction {
+    /// Write a diagnostic bundle for a run and print its preview. Reads three operator files
+    /// only: the run's `run.json`, the integrity ledger and the failure report. Every field is
+    /// re-typed (no text is copied), every path is hashed with a salt that is never written,
+    /// and a leak check refuses the write (exit 3) if anything client-shaped got through.
+    ///
+    /// LIMIT: the ledger and the failure report are files only `camerata inspect` writes, side
+    /// by side in the state directory, and they are found from the run's repo folders. A
+    /// cockpit run keeps both inside its saved inspection instead, so for a cockpit run the
+    /// bundle holds the run record alone unless `--ledger` and `--failures` name the files.
+    Bundle {
+        /// The run: its id (as `camerata inspect` printed it), or `latest` for the newest saved
+        /// run of any state, started anywhere.
+        #[arg(long, value_name = "ID|latest")]
+        run: String,
+        /// The integrity ledger (`<key>.ledger.json`). Default: the one `camerata inspect`
+        /// keeps for the run's repo folders.
+        #[arg(long, value_name = "PATH")]
+        ledger: Option<PathBuf>,
+        /// The failure report. Default: `<key>.failures.json` next to the ledger.
+        #[arg(long, value_name = "PATH")]
+        failures: Option<PathBuf>,
+        /// Where to write the bundle and its preview. Default: `<data dir>/camerata/diagnostics`
+        /// (created private to you).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Show real repo-relative paths instead of tokens. Secrets and code are still
+        /// stripped; send such a bundle only where the client's file names may go.
+        #[arg(long)]
+        named_paths: bool,
+        /// Do not measure the files of the failed parts (line endings, sizes, encoding).
+        #[arg(long)]
+        no_shapes: bool,
+    },
+    /// Print the preview of a written bundle again, from its JSON.
+    Preview {
+        /// The bundle (`camerata-diagnostic-<id>.json`).
+        bundle: PathBuf,
     },
 }
 
@@ -571,19 +723,51 @@ async fn main() -> anyhow::Result<()> {
             internal,
             run_client_tooling,
             consensus,
+            exclude,
             finder,
             finder_model,
             finder_force_pieces,
             compare_with,
             resume,
+            rerun_deterministic,
+            recheck_saved,
+            reask_failed_judge,
+            dry_run,
+            plan_only,
         } => {
+            if let (Some(run), true) = (&recheck_saved, dry_run) {
+                return match inspect_cmd::plan_saved_inspect(run, &repo, reask_failed_judge).await {
+                    Ok(text) => {
+                        print!("{text}");
+                        Ok(())
+                    }
+                    Err(e) => report_inspect_result(Err(e)),
+                };
+            }
+            if let Some(run) = recheck_saved {
+                return report_inspect_result(
+                    inspect_cmd::run_recheck_saved(
+                        &run,
+                        &repo,
+                        export,
+                        max_cost_usd,
+                        reask_failed_judge,
+                    )
+                    .await,
+                );
+            }
+            if let Some(run) = rerun_deterministic {
+                return report_inspect_result(
+                    inspect_cmd::run_rerun_deterministic(&run, &repo, export).await,
+                );
+            }
             if let Some(run) = resume {
                 return run_resume_cmd(&run, &repo, export, max_cost_usd).await;
             }
             let mut repos = repo.into_iter();
             // Without `--resume`, clap guarantees at least one repo, an export and a client.
             let first = repos.next().unwrap_or_default();
-            run_inspect_cmd(InspectArgs {
+            let args = InspectArgs {
                 repo: first,
                 also_repos: repos.collect(),
                 repo_names: repo_name,
@@ -613,8 +797,12 @@ async fn main() -> anyhow::Result<()> {
                     force_pieces: finder_force_pieces,
                     compare_with,
                 },
-            })
-            .await
+                exclude,
+            };
+            if plan_only {
+                return run_plan_only_cmd(args).await;
+            }
+            run_inspect_cmd(args).await
         }
         Command::Repeatability {
             repo,
@@ -656,10 +844,29 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
-        Command::Count { repo, json } => {
+        Command::Count {
+            repo,
+            json,
+            exclude,
+            repo_name,
+            estimate,
+            cost_per_1k_usd,
+        } => {
             println!(
                 "{}",
-                camerata::count_cmd::run_count(&CountArgs { repo, json })?
+                camerata::count_cmd::run_count_many(
+                    &repo,
+                    &CountArgs {
+                        repo: repo[0].clone(),
+                        json,
+                        exclude,
+                        repo_name,
+                    },
+                    camerata::count_cmd::EstimateArgs {
+                        estimate,
+                        cost_per_1k_usd,
+                    }
+                )?
             );
             Ok(())
         }
@@ -672,6 +879,48 @@ async fn main() -> anyhow::Result<()> {
             current,
             threshold_pct,
         }),
+        Command::Diagnose { action } => match action {
+            DiagnoseAction::Bundle {
+                run,
+                ledger,
+                failures,
+                out,
+                named_paths,
+                no_shapes,
+            } => {
+                let args = camerata::diagnose_cmd::BundleArgs {
+                    run,
+                    ledger,
+                    failures,
+                    out,
+                    named_paths,
+                    no_shapes,
+                };
+                match camerata::diagnose_cmd::run_bundle(&args).await {
+                    Ok(outcome) => {
+                        print!("{}", outcome.render_preview());
+                        eprint!("\n{}", outcome.render_local());
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("camerata diagnose bundle: {e}");
+                        std::process::exit(e.exit_code());
+                    }
+                }
+            }
+            DiagnoseAction::Preview { bundle } => {
+                match camerata::diagnose_cmd::run_preview(&bundle) {
+                    Ok(text) => {
+                        print!("{text}");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("camerata diagnose preview: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
         Command::Corpus { action } => match action {
             CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
             CorpusAction::Confirm { domain, date } => {
@@ -805,6 +1054,18 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
     report_inspect_result(inspect_cmd::run_inspect(args).await)
 }
 
+/// `inspect --plan-only`'s handler: print the figures and exit 0, or say why a real run would
+/// refuse and exit with that refusal's code. Nothing is run, saved or sent.
+async fn run_plan_only_cmd(args: InspectArgs) -> anyhow::Result<()> {
+    match inspect_cmd::plan_only::run_plan_only(args).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("camerata inspect --plan-only: {e}");
+            std::process::exit(e.exit_code());
+        }
+    }
+}
+
 /// `inspect --resume`'s handler: the same report and exit codes as a run.
 async fn run_resume_cmd(
     run: &str,
@@ -816,6 +1077,10 @@ async fn run_resume_cmd(
 }
 
 /// Print what a run (or a resume) came to and exit with its code.
+/// The count `--reask-failed-judge` takes when none is given: the server's one default, as text
+/// (a test holds the two equal).
+const REASK_DEFAULT_COUNT: &str = "5";
+
 fn report_inspect_result(
     result: Result<inspect_cmd::InspectOutcome, inspect_cmd::InspectError>,
 ) -> anyhow::Result<()> {
@@ -1238,6 +1503,54 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn plan_only_parses_with_a_run_and_never_with_resume() {
+        let run = [
+            "camerata",
+            "inspect",
+            "--plan-only",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+        ];
+        match Cli::try_parse_from(run).expect("must parse").command {
+            Command::Inspect { plan_only, .. } => assert!(plan_only),
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["camerata", "inspect", "--plan-only", "--resume", "latest"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_reask_default_is_the_servers_one_constant() {
+        assert_eq!(
+            REASK_DEFAULT_COUNT.parse::<usize>().unwrap(),
+            camerata_server::run_store::recheck::DEFAULT_MAX_REASKED_PARTS
+        );
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--recheck-saved",
+            "latest",
+            "--reask-failed-judge",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Inspect {
+                reask_failed_judge, ..
+            } => assert_eq!(
+                reask_failed_judge,
+                Some(camerata_server::run_store::recheck::DEFAULT_MAX_REASKED_PARTS)
+            ),
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+    }
+
+    #[test]
     fn inspect_takes_repeated_repos_with_one_name_each() {
         let cli = Cli::try_parse_from([
             "camerata",
@@ -1323,17 +1636,28 @@ mod cli_parse_tests {
                 internal,
                 run_client_tooling,
                 consensus,
+                exclude,
                 finder,
                 finder_model,
                 finder_force_pieces,
                 compare_with,
                 resume,
+                rerun_deterministic,
+                recheck_saved,
+                reask_failed_judge,
+                dry_run,
+                plan_only,
             } => {
+                assert!(!dry_run);
+                assert!(rerun_deterministic.is_none());
+                assert!(recheck_saved.is_none() && reask_failed_judge.is_none());
+                assert!(!plan_only, "a real run unless --plan-only is given");
+                assert!(exclude.is_empty(), "nothing is excluded unless agreed");
                 assert!(resume.is_none(), "a new run unless --resume is given");
                 assert_eq!(
                     finder,
-                    camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
-                    "the scan passes unless the agent finder is asked for"
+                    camerata_server::ai_audit::agent_finder::FinderChoice::Agent,
+                    "the agent finder unless the engine is asked for"
                 );
                 assert!(finder_model.is_none() && finder_force_pieces.is_none());
                 assert!(compare_with.is_none());
@@ -1392,6 +1716,37 @@ mod cli_parse_tests {
                 ..
             }
         ));
+    }
+
+    /// Outside review Part 1 item 3: a bare `camerata inspect` runs the agent finder; the flag
+    /// still wins; the finder and group review models default to Opus 5.5.
+    #[test]
+    fn inspect_defaults_to_the_agent_finder_on_opus_5_5() {
+        let parse = |extra: &[&str]| {
+            let mut v = vec![
+                "camerata",
+                "inspect",
+                "--repo",
+                "/tmp/r",
+                "--export",
+                "/tmp/o.zip",
+                "--client",
+                "Example Client Ltd",
+            ];
+            v.extend_from_slice(extra);
+            match Cli::try_parse_from(v).expect("must parse").command {
+                Command::Inspect { finder, .. } => finder,
+                _ => panic!("expected inspect"),
+            }
+        };
+        let agent = camerata_server::ai_audit::agent_finder::FinderChoice::Agent;
+        let engine = camerata_server::ai_audit::agent_finder::FinderChoice::Engine;
+        assert_eq!(parse(&[]), agent);
+        assert_eq!(parse(&["--finder", "engine"]), engine);
+        assert_eq!(parse(&["--finder", "agent"]), agent);
+        let controls = camerata_server::cost_cap::RunControls::default();
+        assert_eq!(controls.finder_model_for(), "claude-opus-5-5");
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
     }
 
     /// The finder flags parse: `--finder agent`, its model, the forced pieces and the comparison.

@@ -113,12 +113,17 @@ fn a_deviation_group_and_a_convention_with_thousands_of_sites_do_not_abort() {
         assessed_sites: Some(5_000),
         convention_option_id: None,
         convention_label: "URI-versioned endpoints".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     dev.also_locations = (0..3_999).map(site).collect();
     let mut conv = finding("ARCH-PAGINATION-1", "src/api/list.rs", 7, "info");
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "cursor".to_string(),
         convention_label: "Cursor pagination".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     conv.also_locations = (0..4_000).map(site).collect();
 
@@ -175,7 +180,7 @@ fn any_other_oversized_text_cell_is_cut_with_a_pointer_instead_of_aborting() {
     let detail = cell_by_header(&bytes, "All problems", "More detail", 1);
     assert!(detail.chars().count() < EXCEL_CELL_LIMIT);
     assert!(
-        detail.contains("full text is in findings.json"),
+        detail.contains("full text is in json/inspection.json"),
         "the cut must say where the full text is"
     );
 }

@@ -58,6 +58,7 @@ impl LlmPort for Stub {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),
@@ -113,6 +114,7 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls(cap: Option<f64>) -> RunControls {
     RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

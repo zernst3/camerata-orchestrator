@@ -85,6 +85,9 @@ fn deviation(sites: usize, assessed: Option<usize>, label: &str) -> FindingKind 
         assessed_sites: assessed,
         convention_option_id: Some("opt".to_string()),
         convention_label: label.to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     })
 }
 
@@ -154,6 +157,8 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
         FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: "cursor".to_string(),
             convention_label: "Cursor pagination".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }),
     );
     let no_convention = kinded(
@@ -171,6 +176,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
                     sites: None,
                 },
             ],
+            left_to_client: false,
         }),
     );
 
@@ -283,6 +289,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],

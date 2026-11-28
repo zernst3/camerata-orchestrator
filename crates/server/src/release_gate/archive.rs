@@ -55,14 +55,108 @@ fn part_text(xlsx: &[u8], name: &str) -> Result<String, String> {
     Ok(text)
 }
 
-/// Decode the five XML entities. `&amp;` last, so `&amp;lt;` stays `&lt;`.
+/// Decode the XML entities: the five named ones and numeric character references (`&#65;`,
+/// `&#x41;`). One pass, so `&amp;#65;` stays `&#65;` and `&amp;lt;` stays `&lt;`. A reference
+/// that names no character stays as written.
 fn unescape(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let decoded = tail.find(';').filter(|end| *end <= 12).and_then(|end| {
+            let name = &tail[1..end];
+            let c = match name {
+                "lt" => '<',
+                "gt" => '>',
+                "quot" => '"',
+                "apos" => '\'',
+                "amp" => '&',
+                _ => {
+                    let number = name.strip_prefix('#')?;
+                    let code = match number.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => number.parse::<u32>().ok()?,
+                    };
+                    char::from_u32(code)?
+                }
+            };
+            Some((c, end + 1))
+        });
+        match decoded {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &tail[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The text of an XML part: entities decoded, tags removed. `joined` closes the gap where a tag
+/// was (the runs of one string read as one); `apart` puts a newline there (neighbouring fields
+/// stay apart).
+fn xml_text(xml: &str) -> (String, String) {
+    let (mut joined, mut apart) = (String::new(), String::new());
+    let mut rest = xml;
+    while let Some(open) = rest.find('<') {
+        let (text, after) = rest.split_at(open);
+        joined.push_str(&unescape(text));
+        apart.push_str(&unescape(text));
+        match after.find('>') {
+            Some(close) => {
+                apart.push('\n');
+                rest = &after[close + 1..];
+            }
+            None => {
+                rest = "";
+            }
+        }
+    }
+    let tail = unescape(rest);
+    joined.push_str(&tail);
+    apart.push_str(&tail);
+    (joined, apart)
+}
+
+/// The text of every workbook part that is neither a worksheet, the shared strings nor the
+/// workbook index: cell comments, threaded comments, drawings, charts, custom XML and the
+/// document properties. `(part name, text with runs joined, text with runs apart)`. Attribute
+/// values are part of the tags and are not read here.
+pub fn xlsx_extra_texts(xlsx: &[u8]) -> Result<Vec<(String, String, String)>, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(xlsx))
+        .map_err(|e| format!("the workbook is not a zip: {e}"))?;
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| name.ok().map(std::borrow::Cow::into_owned))
+        .collect();
+    let mut out = Vec::new();
+    for name in names {
+        let wanted = name.starts_with("docProps/")
+            || name.starts_with("xl/comments")
+            || name.starts_with("xl/threadedComments/")
+            || name.starts_with("xl/persons/")
+            || name.starts_with("xl/drawings/")
+            || name.starts_with("xl/charts/")
+            || name.starts_with("customXml/");
+        if !wanted || name.ends_with(".rels") {
+            continue;
+        }
+        let mut file = archive
+            .by_name(&name)
+            .map_err(|e| format!("the workbook part {name} could not be opened: {e}"))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|e| format!("the workbook part {name} could not be read: {e}"))?;
+        let (joined, apart) = xml_text(&String::from_utf8_lossy(&bytes));
+        out.push((name, joined, apart));
+    }
+    Ok(out)
 }
 
 /// Every string of `xl/sharedStrings.xml`, in pool order: the text of each `<si>`'s `<t>` runs,

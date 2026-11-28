@@ -174,7 +174,7 @@ fn sanitize_finding_text_strips_zero_width_from_path_snippet_detail_and_captures
 }
 
 /// `build_report_json` must sanitize BEFORE anything downstream reads `path` — the
-/// JSON this builds is what both the Typst template and `findings.json` ultimately render,
+/// JSON this builds is what both the Typst template and `json/inspection.json` ultimately render,
 /// so a zero-width space planted in a scanned repo's own file name (adversarial or just an
 /// odd encoding) must never reach either artifact.
 #[test]
@@ -197,7 +197,7 @@ fn build_report_json_strips_zero_width_characters_from_finding_paths() {
     assert!(serialized.contains("apps/web/a.ts"));
 }
 
-/// Same invariant, the xlsx/`findings.json` path (`xlsx_export::partition_rows`, exercised
+/// Same invariant, the xlsx/`json/inspection.json` path (`xlsx_export::partition_rows`, exercised
 /// here via `build_findings_export`) — a separate implementation from `build_report_json`,
 /// so it needs its own regression rather than relying on the PDF-JSON test above.
 #[test]
@@ -273,7 +273,7 @@ fn assert_no_corruption_in_finding_fields(obj: &serde_json::Value, artifact: &st
             );
         }
     }
-    // `findings.json`'s `FindingRow` names the primary-fix column `fix_specific`, not
+    // `json/inspection.json`'s `FindingRow` names the primary-fix column `fix_specific`, not
     // `fix_for_this_finding` — same field shape, different wire name.
     if let Some(s) = json_str_field(obj, "fix_specific") {
         assert!(
@@ -287,7 +287,7 @@ fn assert_no_corruption_in_finding_fields(obj: &serde_json::Value, artifact: &st
 
 /// REG-5 golden-export gate: no client-facing per-finding text field (headline, detail,
 /// snippet, fix/fix_specific) in ANY of the three artifacts (the PDF/JSON's
-/// `AuditReportJson`, and `findings.json`/the xlsx's `FindingsExport`) may ever contain the
+/// `AuditReportJson`, and `json/inspection.json`/the xlsx's `FindingsExport`) may ever contain the
 /// period-space corruption pattern — scoped to the FINDING fields specifically (never the
 /// static narrative/methodology/disclaimer prose, which legitimately contains sentences
 /// that start with a digit — "...produced 1 candidate finding. 1 is curated for action..."
@@ -401,7 +401,7 @@ fn no_export_artifact_ever_contains_a_space_inserted_inside_an_identifier_or_abb
     }
     assert!(
         checked_any_rows,
-        "the fixture finding must reach findings.json/the xlsx export for this gate to mean \
+        "the fixture finding must reach json/inspection.json/the xlsx export for this gate to mean \
              anything"
     );
     let findings_serialized = serde_json::to_string(&findings_export).unwrap();
@@ -689,6 +689,9 @@ fn deviation_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> 
         assessed_sites: Some(47),
         convention_option_id: Some("default".to_string()),
         convention_label: "Default".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     f
 }
@@ -1117,6 +1120,8 @@ fn req_w8_the_floor_never_applies_to_an_informational_kind() {
     observed.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "default".to_string(),
         convention_label: "Default".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     assert_eq!(
         raise_to_rule_min_severity("info".to_string(), &observed, Some(&corpus)),

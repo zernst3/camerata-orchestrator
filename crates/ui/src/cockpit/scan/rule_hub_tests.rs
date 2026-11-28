@@ -441,3 +441,174 @@ fn req_pass2_12_the_hub_builds_exactly_one_navigation_and_no_link_graph() {
         }
     }
 }
+
+// ── the convention model on the strip (design 2026-11-20, section 11, tests 22 to 24, 28) ──
+
+fn convention_record(places_recorded: bool) -> camerata_api_types::audit::RuleConvention {
+    use camerata_api_types::audit::{
+        CensusPlace, FinderRowRef, OptionBasis, OptionCensus, PlaceStatus, RuleConvention,
+        StandardSource, StandardState,
+    };
+    let place = |path: &str, line: usize, status: PlaceStatus| CensusPlace {
+        path: path.into(),
+        line,
+        text: format!("code at {path}"),
+        checked: true,
+        status,
+    };
+    RuleConvention {
+        repo: "me/api".into(),
+        rule_id: "ARCH-PAR-1".into(),
+        default_option_id: Some("par".into()),
+        judged_option_id: Some("par".into()),
+        observed_option_id: Some("seq".into()),
+        assessed_places: Some(5),
+        places_recorded,
+        options: vec![
+            OptionCensus {
+                option_id: "par".into(),
+                label: "Run in parallel".into(),
+                count: Some(1),
+                places: vec![place("src/p.ts", 3, PlaceStatus::FollowsRuleDefault)],
+                ..OptionCensus::default()
+            },
+            OptionCensus {
+                option_id: "seq".into(),
+                label: "Sequential".into(),
+                count: Some(4),
+                places: vec![place("src/s.ts", 7, PlaceStatus::Conforms)],
+                ..OptionCensus::default()
+            },
+        ],
+        standard: StandardState {
+            option_id: Some("seq".into()),
+            source: StandardSource::Observed,
+            differs_from_default: Some("Run in parallel".into()),
+            ..StandardState::default()
+        },
+        finder_rows: vec![FinderRowRef {
+            path: "src/f.ts".into(),
+            line: 9,
+            note: "N+1 queries".into(),
+            option_basis: OptionBasis::OnlyOther,
+            option_id: Some("seq".into()),
+            status: PlaceStatus::Conforms,
+            ..FinderRowRef::default()
+        }],
+    }
+}
+
+fn model_html(record: camerata_api_types::audit::RuleConvention, rulings: bool) -> String {
+    #[component]
+    fn Harness(hub: RuleHubView, rulings: bool) -> Element {
+        let on_ruling: Option<Callback<RulingAction>> =
+            rulings.then(|| Callback::new(|_: RulingAction| {}));
+        rsx! {
+            RuleHubStrip { hub, on_jump: Callback::new(|_: KindSurface| {}), on_ruling }
+        }
+    }
+    let hub = camerata_ui_core::triage::rule_hub_with_conventions(
+        &[],
+        std::slice::from_ref(&record),
+        "me/api",
+        "ARCH-PAR-1",
+    )
+    .expect("a rule with a record has a hub");
+    let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { hub, rulings });
+    vdom.rebuild_in_place();
+    dioxus_ssr::render(&vdom)
+}
+
+/// Test 22: the overlay lists the places by status and each one is a control that opens it; the
+/// finder's note is shown; the standard's origin is never "AI recommended" (test 25).
+#[test]
+fn the_hub_lists_conforming_places_and_each_is_an_open_control() {
+    let html = model_html(convention_record(true), false);
+    assert!(html.contains("Observed: 4 of 5 places follow"), "{html}");
+    assert!(html.contains("Standard: observed in the code"), "{html}");
+    assert!(
+        html.contains("Differs from the rule&#39;s default: Run in parallel")
+            || html.contains("Differs from the rule's default: Run in parallel"),
+        "{html}"
+    );
+    for place in ["src/s.ts:7", "src/p.ts:3", "src/f.ts:9"] {
+        assert!(html.contains(place), "{place}: {html}");
+    }
+    assert!(html.contains("N+1 queries"), "{html}");
+    assert!(
+        html.contains("Follows the standard") && html.contains("Follows the rule"),
+        "{html}"
+    );
+    // The jump, plus one open link for each of the three places: no ruling controls without a
+    // handler.
+    assert_eq!(html.matches("<button").count(), 1 + 3, "{html}");
+    assert!(!html.contains("AI recommended"), "{html}");
+    assert!(!html.contains("The places were not recorded"), "{html}");
+}
+
+/// Tests 23 and 24: Accept, the other options, "No recommendation, leave it to the client" with
+/// its effect text, and Withdraw once a ruling is live.
+#[test]
+fn the_hub_offers_accept_the_other_options_and_leave_it_to_the_client() {
+    let html = model_html(convention_record(true), true);
+    assert!(html.contains("Accept: Sequential"), "{html}");
+    assert!(
+        html.contains("Choose another option") && html.contains("Run in parallel"),
+        "{html}"
+    );
+    assert!(
+        html.contains("Sets this option as the convention for this inspection."),
+        "{html}"
+    );
+    assert!(
+        html.contains("No recommendation, leave it to the client"),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            "The report lists the options and the places that follow each, with none suggested."
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("Leave as reported"), "{html}");
+    assert!(!html.contains("Withdraw"), "{html}");
+    let mut live = convention_record(true);
+    live.standard.source = camerata_api_types::audit::StandardSource::Reviewer;
+    live.standard.ruling_id = Some("std-000001".into());
+    let html = model_html(live, true);
+    assert!(html.contains("Withdraw"), "{html}");
+    assert!(html.contains("Standard: set by you"), "{html}");
+    assert!(!html.contains("Accept: Sequential"), "{html}");
+}
+
+/// Test 28: a report with no recorded places says so.
+#[test]
+fn the_hub_of_an_old_report_says_the_places_were_not_recorded() {
+    let html = model_html(convention_record(false), false);
+    assert!(
+        html.contains("The places were not recorded for this scan."),
+        "{html}"
+    );
+}
+
+/// Test 25 (the badge): a rule with a convention record never reads "AI recommended"; each origin
+/// has its own words.
+#[test]
+fn the_badge_of_a_rule_with_a_record_never_says_ai_recommended() {
+    use camerata_api_types::audit::StandardSource;
+    let mut c = convention_record(true);
+    let (_, observed) = super::rescan::convention_badge(&c);
+    assert_eq!(observed, "Observed in the code");
+    c.standard.source = StandardSource::Reviewer;
+    assert_eq!(super::rescan::convention_badge(&c).1, "Set by you");
+    c.standard = camerata_api_types::audit::StandardState {
+        left_to_client: true,
+        ..Default::default()
+    };
+    assert_eq!(super::rescan::convention_badge(&c).1, "Left to the client");
+    c.standard = Default::default();
+    assert_eq!(
+        super::rescan::convention_badge(&c).1,
+        "Proposal, no convention yet"
+    );
+}

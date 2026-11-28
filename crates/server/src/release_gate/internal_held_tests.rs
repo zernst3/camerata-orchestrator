@@ -157,3 +157,30 @@ fn review_flags_are_in_the_internal_workbook_and_nowhere_in_a_client_package() {
     let grid = xlsx_sheet_grid(&workbook_of(&client.bytes), "All problems").unwrap();
     assert!(!grid[0].iter().any(|h| h == "Review flags" || h == "Held"));
 }
+
+/// #546: a row on a file the repo does not have is held like any other unverified row. A client
+/// export refuses it; an internal export carries it, as before.
+#[test]
+fn a_missing_file_row_is_refused_on_a_client_export_and_carried_by_an_internal_one() {
+    let mut absence = row(
+        "AI-NO-SECURITY-POLICY",
+        "The repository has no security policy.",
+    );
+    absence.path = "SECURITY.md".to_string();
+    absence.line = 0;
+    absence.snippet = "no security policy is published".to_string();
+    let files = vec![(
+        "lib/supabase/admin.ts".to_string(),
+        "db.query(sql)\n".to_string(),
+    )];
+    let mut rows = vec![absence];
+    crate::onboard::evidence_check::verify_evidence(&mut rows, &files, None);
+    assert!(rows[0].captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE));
+    let report = || report_with(rows.clone());
+
+    assert!(matches!(
+        release(package_with(report(), &client_options())),
+        Err(ReleaseError::Blocked(_))
+    ));
+    assert!(release_internal(package_with(report(), &internal_options())).is_ok());
+}

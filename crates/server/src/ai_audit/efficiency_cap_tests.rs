@@ -55,6 +55,7 @@ impl LlmPort for StubLlm {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -82,6 +83,7 @@ impl LlmPort for StubLlm {
 
 fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -365,6 +367,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -388,6 +391,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
 
 fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -409,6 +413,7 @@ fn spend(meter: &UsageMeter, dollars: f64) {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -508,6 +513,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
     // so reaching the network at all would fail this test with a transport error.
     let llm = crate::llm::Llm::for_backend(crate::llm::Backend::Api, Some("sk-test".to_string()));
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -872,6 +878,7 @@ fn response(
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),

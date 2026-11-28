@@ -1,0 +1,89 @@
+id = "IAC-TERRAFORM-WILDCARD-IAM-POLICY-1"
+version = 1
+title = "Access policies defined in Terraform never allow every action on every resource"
+domain = "iac:terraform"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-269"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity floor. A policy that allows everything turns any compromise of its holder into a
+# compromise of the whole account, so a located finding is never rated below high.
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Applies to identity and access policies written in Terraform: AWS IAM policies, inline role, user and group policies and `aws_iam_policy_document` data sources, plus attachments of the AWS managed `AdministratorAccess` policy to a role a workload assumes. The fault is an allow statement whose actions include the full wildcard `*` and whose resources include `*`. A statement that names a service wildcard such as `s3:*` on named resources is broader than it should be but is outside this rule. A deliberate emergency administrator role for people, protected by multi factor sign in and named as such, is outside the rule. Deny statements with wildcards are correct and are never a finding. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"
+title = "AWS Identity and Access Management User Guide: Security best practices in IAM (apply least-privilege permissions)"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"
+title = "AWS Security Hub controls for AWS Identity and Access Management: IAM.1, IAM policies should not allow full \"*\" administrative privileges (maps to CIS AWS Foundations Benchmark v1.4.0 recommendation 1.16)"
+
+[[sources]]
+url = "https://www.cisecurity.org/benchmark/amazon_web_services"
+title = "CIS Amazon Web Services Foundations Benchmark v1.4.0, recommendation 1.16: Ensure IAM policies that allow full \"*:*\" administrative privileges are not attached"
+
+[[sources]]
+url = "https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final"
+title = "NIST SP 800-53 Rev. 5, Security and Privacy Controls for Information Systems and Organizations: control AC-6, Least Privilege"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/269.html"
+title = "CWE-269: Improper Privilege Management"
+
+[decision]
+question = "Does any access policy in this Terraform configuration allow every action on every resource?"
+default = "policies-name-specific-actions-and-resources"
+why = """
+An allow statement with action `*` and resource `*` grants full control of the account: reading
+every data store, creating new users and keys, deleting backups and turning off logging. Whatever
+holds that policy (an application role, a build pipeline, a function) becomes a single point of
+total failure, because a flaw in that one component hands an attacker everything. It is usually
+written to get past a permissions error quickly and then never narrowed. Naming the actions a
+workload really performs and the resources it performs them on limits what any one compromise can
+reach, and it makes the workload's access readable in review.
+"""
+
+[[option]]
+id = "policies-name-specific-actions-and-resources"
+label = "Access policies allow named actions on named resources, with no statement allowing everything"
+directive = """
+No access policy declared in Terraform contains an allow statement whose actions include `*` and
+whose resources include `*`. This covers `aws_iam_policy`, `aws_iam_role_policy`,
+`aws_iam_user_policy` and `aws_iam_group_policy` documents, `statement` blocks in
+`aws_iam_policy_document` data sources and JSON policy documents built with `jsonencode`. Roles
+that applications, functions and pipelines assume are not attached to the AWS managed
+`AdministratorAccess` policy. Each statement lists the actions the workload performs and the
+resources it performs them on. Full administrator access is held only by a named emergency administrator role
+for people, protected by multi factor sign in.
+"""
+remediation = """
+Replace the `*` action and `*` resource in the policy in `<path>` with the specific actions the
+workload calls and the specific resources it calls them on. Use the provider's access analysis or
+the service's access logs to list what the role has actually used, then grant only that. Verify by
+running `terraform plan` and confirming the statement no longer allows `*` on `*`, then run the
+workload and confirm it still completes without an access denied error.
+"""
+effort = "medium"
+why = "A policy limited to named actions and resources caps the damage of any single compromised role, key or pipeline at what that workload legitimately needed."
+
+[[option]]
+id = "policy-allows-every-action-on-every-resource"
+violates = true
+label = "An access policy allows every action on every resource"
+directive = "An access policy contains an allow statement with action `*` on resource `*`. The same fault covers a workload role attached to a full administrator policy."
+remediation = """
+Replace the `*` action and `*` resource in the policy in `<path>` with the specific actions the
+workload calls and the specific resources it calls them on. Use the provider's access analysis or
+the service's access logs to list what the role has actually used, then grant only that. Verify by
+running `terraform plan` and confirming the statement no longer allows `*` on `*`, then run the
+workload and confirm it still completes without an access denied error.
+"""
+effort = "medium"
+why = "Whatever holds this policy has full control of the cloud account, so one stolen key or one flaw in that component lets an attacker read every data store, create new credentials for themselves and delete backups and logs."

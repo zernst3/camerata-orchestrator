@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-PRESENCE-IDENTITY-1"
-version = 3
+version = 4
 title = "A Presence payload carries only the identity a feature genuinely needs, not a user's email, full name or other PII broadcast to every channel subscriber"
 domain = "supabase:realtime"
 layer = "platform"
@@ -14,7 +14,7 @@ max_severity = "high"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Whether a Presence payload includes more identity than the feature genuinely needs is a judgment call over what the UI consuming the presence state actually does with it, not a pattern match — so this rule routes to prose: the object passed to `channel.track(...)` and the UI code reading `presenceState()` are fed to Claude with the question: does this feature need the fields included (an avatar/display name for a 'who's online' list), or does it include more identity than that (a raw email address, a full legal name, an internal user id meant to stay server-side) for no functional reason? Conformance holds when the tracked payload is limited to what the consuming UI displays or needs; it fails when a payload includes PII the feature never renders or uses, broadcast to every other subscriber on the channel merely because it was convenient to pass the whole user object to track()."
+qualifies = "Whether a Presence payload includes more identity than the feature genuinely needs is a judgment call over what the UI consuming the presence state actually does with it, not a pattern match, so this rule routes to prose: the object passed to `channel.track(...)` and the UI code reading `presenceState()` are fed to Claude with the question: does this feature need the fields included (an avatar/display name for a 'who's online' list), or does it include more identity than that (a raw email address, a full legal name, an internal user id meant to stay server-side) for no functional reason? Conformance holds when the tracked payload is limited to what the consuming UI displays or needs; it fails when a payload includes PII the feature never renders or uses, broadcast to every other subscriber on the channel merely because it was convenient to pass the whole user object to track()."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/realtime/presence"
@@ -28,12 +28,11 @@ title = "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
 question = "Does a channel's Presence payload carry only the identity fields the consuming feature actually displays or uses, rather than whatever fields were convenient to pass to track()?"
 default = "presence-payload-scoped-to-what-the-feature-needs"
 why = """
-Presence exists to answer a narrow question — who else is here, and what is their minimal visible status (online,
-typing, viewing this document) — and Supabase broadcasts whatever payload `track()` is called with to every other
+Presence exists to answer a narrow question (who else is here, and what is their minimal visible status, such as online, typing or viewing this document), and Supabase broadcasts whatever payload `track()` is called with to every other
 subscriber on the channel, merged into a shared state object every client receives in full. The documentation
 places no restriction on payload content; it is entirely the caller's choice what goes in. The common shortcut this
 rule targets is passing an existing user/session object straight into `track()` because it was already in scope
-(`channel.track(currentUser)`) rather than constructing a minimal payload purpose-built for presence — which
+(`channel.track(currentUser)`) rather than constructing a minimal payload purpose-built for presence, which
 quietly broadcasts whatever that object happens to carry (an email address, a full legal name, an internal role
 field, anything else the session object holds) to every other person subscribed to the same channel, independent
 of whether the UI displaying 'who's online' ever renders any of it. This is CWE-200 (Exposure of Sensitive
@@ -42,7 +41,7 @@ the user never consented to share with strangers on the same document/room, mere
 convenient object.
 
 The fix is a minimal, purpose-built payload: whatever the consuming UI actually displays (a display name or
-pseudonymous handle, an avatar URL, a status flag) and nothing else — resisting the temptation to pass an entire
+pseudonymous handle, an avatar URL, a status flag) and nothing else, resisting the temptation to pass an entire
 user/session object to `track()` just because it is already available in scope.
 """
 

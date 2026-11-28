@@ -17,45 +17,13 @@
 //! still appended, mirroring `CAMERATA_DATA_DIR` (see [`crate::app_dirs`]). It is read ONLY when
 //! set, so a normal install is unchanged.
 
+#[cfg(test)]
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// Environment variable that replaces the platform cache directory. See the module docs.
-pub const STATE_DIR_ENV: &str = "CAMERATA_STATE_DIR";
-
-/// The per-user directory where Camerata keeps its own bookkeeping for headless runs.
-///
-/// Resolution follows the platform convention, with a temp-dir fallback so a missing `HOME`
-/// degrades to a working (if non-persistent) cache rather than failing the inspection.
-pub fn dir() -> PathBuf {
-    dir_from(
-        std::env::var_os(STATE_DIR_ENV).as_deref(),
-        std::env::var_os("HOME").as_deref(),
-        std::env::var_os("XDG_CACHE_HOME").as_deref(),
-    )
-}
-
-/// The pure resolution behind [`dir`], so every branch is testable without touching the
-/// process environment.
-pub fn dir_from(
-    state_override: Option<&OsStr>,
-    home: Option<&OsStr>,
-    xdg_cache_home: Option<&OsStr>,
-) -> PathBuf {
-    let non_blank = |v: &OsStr| !v.to_string_lossy().trim().is_empty();
-    let base = state_override.filter(|v| non_blank(v)).map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let base = {
-        let _ = xdg_cache_home;
-        base.or_else(|| home.map(|h| PathBuf::from(h).join("Library/Caches")))
-    };
-    #[cfg(not(target_os = "macos"))]
-    let base = base
-        .or_else(|| xdg_cache_home.filter(|v| non_blank(v)).map(PathBuf::from))
-        .or_else(|| home.map(|h| PathBuf::from(h).join(".cache")));
-
-    base.unwrap_or_else(std::env::temp_dir).join("camerata")
-}
+// The location itself lives one layer down, in `camerata-api-types`, so the `claude` call
+// builders (which keep their per-call files under it) resolve the SAME directory.
+pub use camerata_api_types::state_dir::{dir, dir_from, STATE_DIR_ENV};
 
 /// A stable, filesystem-safe key identifying one scanned repository.
 ///
@@ -102,13 +70,15 @@ pub fn ledger_path(repo: &Path) -> PathBuf {
     dir().join(format!("{}.ledger.json", repo_state_key(repo)))
 }
 
-/// Both bookkeeping files for `repo` under an explicit state directory, for callers (source
-/// deletion) that must name them without reading the process environment.
-pub fn repo_state_files_in(state_dir: &Path, repo: &Path) -> [PathBuf; 2] {
+/// The bookkeeping files for `repo` under an explicit state directory, for callers (source
+/// deletion) that must name them without reading the process environment: the cache, the
+/// ledger, and the sealed report an internal run with no run folder saves beside the ledger.
+pub fn repo_state_files_in(state_dir: &Path, repo: &Path) -> [PathBuf; 3] {
     let key = repo_state_key(repo);
     [
         state_dir.join(format!("{key}.cache.json")),
         state_dir.join(format!("{key}.ledger.json")),
+        state_dir.join(format!("{key}.report.json")),
     ]
 }
 
@@ -173,8 +143,8 @@ pub fn write_project_repos(repos: &[PathBuf]) -> std::io::Result<PathBuf> {
 }
 
 /// Every file of every multi-repo project under `state_dir` whose `.repos.json` lists
-/// `checkout` (canonical): its cache, ledger and the list itself, three paths per project. A list
-/// that is not valid JSON names no folder and is left alone.
+/// `checkout` (canonical): its cache, ledger, saved report and the list itself, four paths per
+/// project. A list that is not valid JSON names no folder and is left alone.
 pub fn project_files_covering(state_dir: &Path, checkout: &Path) -> Vec<PathBuf> {
     let wanted = canonical_string(checkout);
     let Ok(entries) = std::fs::read_dir(state_dir) else {
@@ -198,10 +168,52 @@ pub fn project_files_covering(state_dir: &Path, checkout: &Path) -> Vec<PathBuf>
             let stem = name.trim_end_matches(".repos.json");
             out.push(state_dir.join(format!("{stem}.cache.json")));
             out.push(state_dir.join(format!("{stem}.ledger.json")));
+            out.push(state_dir.join(format!("{stem}.report.json")));
             out.push(state_dir.join(name));
         }
     }
     out
+}
+
+/// The multi-repo project sets under `state_dir` that list one of `own` (canonical folders) and
+/// none of `others`, as the file stems (`project-<n>-<hash>`) to remove, and, apart, the stems of
+/// sets that list one of `own` AND one of `others` (they hold another project's findings too, so
+/// a project deletion keeps them). A list that is not valid JSON names no folder and is skipped.
+pub fn project_set_stems_for(
+    state_dir: &Path,
+    own: &[PathBuf],
+    others: &[PathBuf],
+) -> (Vec<String>, Vec<String>) {
+    let own: Vec<String> = own.iter().map(|p| canonical_string(p)).collect();
+    let others: Vec<String> = others.iter().map(|p| canonical_string(p)).collect();
+    let Ok(entries) = std::fs::read_dir(state_dir) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("project-") && n.ends_with(".repos.json"))
+        .collect();
+    names.sort();
+    let (mut mine, mut shared) = (Vec::new(), Vec::new());
+    for name in names {
+        let Ok(text) = std::fs::read_to_string(state_dir.join(&name)) else {
+            continue;
+        };
+        let Ok(listed) = serde_json::from_str::<Vec<String>>(&text) else {
+            continue;
+        };
+        if !listed.iter().any(|l| own.contains(l)) {
+            continue;
+        }
+        let stem = name.trim_end_matches(".repos.json").to_string();
+        if listed.iter().any(|l| others.contains(l)) {
+            shared.push(stem);
+        } else {
+            mine.push(stem);
+        }
+    }
+    (mine, shared)
 }
 
 #[cfg(test)]
@@ -237,10 +249,11 @@ mod tests {
             [
                 "project-2-11111111.cache.json",
                 "project-2-11111111.ledger.json",
+                "project-2-11111111.report.json",
                 "project-2-11111111.repos.json"
             ]
         );
-        assert_eq!(project_files_covering(&state, &b).len(), 6);
+        assert_eq!(project_files_covering(&state, &b).len(), 8);
         assert!(project_files_covering(&state, &root.path().join("zzz")).is_empty());
         assert!(project_files_covering(&root.path().join("missing"), &a).is_empty());
     }
@@ -336,14 +349,15 @@ mod tests {
     }
 
     #[test]
-    fn repo_state_files_are_the_cache_and_the_ledger_under_the_given_dir() {
+    fn repo_state_files_are_the_cache_the_ledger_and_the_saved_report_under_the_given_dir() {
         let files =
             repo_state_files_in(Path::new("/state/camerata"), Path::new("/clients/one/web"));
         assert_eq!(
-            files,
-            [
+            files.to_vec(),
+            vec![
                 PathBuf::from("/state/camerata/web-d646b970.cache.json"),
                 PathBuf::from("/state/camerata/web-d646b970.ledger.json"),
+                PathBuf::from("/state/camerata/web-d646b970.report.json"),
             ]
         );
     }

@@ -266,6 +266,14 @@ pub async fn run_repeatability(args: RepeatabilityArgs) -> Result<RepeatabilityO
     let has_api_key = crate::inspect_cmd::api_key_present(&store);
     crate::inspect_cmd::require_api_key_for_client_inspection(args.backend, has_api_key)
         .map_err(|e| e.to_string())?;
+    // The same start rule as `camerata inspect`, at the production entry only (the scripted test
+    // entry below is not refused): a client run needs a build with a commit and no
+    // uncommitted changes.
+    crate::inspect_cmd::refuse_unfit_build_for_client(
+        args.client_engagement,
+        &camerata_server::run_store::engine_pin::BuildId::current(),
+    )
+    .map_err(|e| e.to_string())?;
     run_repeatability_with(
         args,
         has_api_key,
@@ -332,7 +340,9 @@ pub async fn run_repeatability_with(
         .unwrap_or("repo")
         .to_string();
     let sources = vec![(repo_spec, args.repo.clone())];
-    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
+    // Repeatability measures the default configuration, which excludes nothing.
+    let no_exclusions = camerata_server::onboard::scope::ScanScope::none();
+    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new(), &no_exclusions).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
     let (_ai_only, _excluded, _preview, corpus, _load_failures) =
         camerata_server::split_scannable_rules(selected.clone()).await;
@@ -350,8 +360,13 @@ pub async fn run_repeatability_with(
         .filter(|m| !m.trim().is_empty());
 
     // ── The estimate, printed first ──────────────────────────────────────────────────────
-    let facts =
-        camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref()).await;
+    let facts = camerata_server::preflight::gather_scan_facts(
+        &sources,
+        &selected,
+        corpus.as_ref(),
+        &no_exclusions,
+    )
+    .await;
     let exact = if seams.llm.is_none() && matches!(backend_resolution, BackendResolution::Api) {
         let llm =
             camerata_server::onboard::build_llm(creds, camerata_server::llm::Backend::Api, None);
@@ -413,6 +428,7 @@ pub async fn run_repeatability_with(
         }
     }
     let controls = camerata_server::cost_cap::RunControls {
+        scope: Default::default(),
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
@@ -423,7 +439,8 @@ pub async fn run_repeatability_with(
         // Repeatability measures the drift of the default configuration.
         clone_judge_model: None,
         consensus: false,
-        // Repeatability measures the default (engine) finder.
+        // Repeatability still measures the engine finder (a bare `inspect` now defaults to the agent
+        // finder), so the finder is set explicitly here.
         finder: camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
         finder_model: None,
         finder_force_pieces: None,

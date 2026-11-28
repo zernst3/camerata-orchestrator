@@ -57,6 +57,8 @@ fn convention_rows_never_count_as_problems_needing_a_decision() {
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "A convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let c = counts_for(vec![conv]);
     assert_eq!(c.rows.convention, 1);
@@ -71,6 +73,8 @@ fn problems_plus_dependency_advisories_reconcile_to_source_rows() {
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "A convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let mut unchecked = finding("SYN-B-1", "src/u.rs", 0, "info");
     unchecked.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
@@ -307,11 +311,12 @@ fn row(i: usize, bucket: &'static str, severity: &str, kind: CountKind) -> Count
         kind,
         tool_preview: false,
         escalated: false,
+        reviewed_in_person: false,
         rule_id: format!("SYN-{}", i % 161),
     }
 }
 
-/// A view at the size of the Greenstand run: 5,264 places over 5,591 problem rows, where the
+/// A view at the size of a large real run: 5,264 places over 5,591 problem rows, where the
 /// number of DEFECT ROWS equals the number of PLACES by coincidence of the old counting (5,264
 /// rows of one kind), so a unit mix cannot hide.
 fn scale_view() -> CountingView {

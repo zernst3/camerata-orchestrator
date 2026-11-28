@@ -200,9 +200,9 @@ pub(crate) fn result_line(answer: &serde_json::Value) -> String {
 }
 
 /// Install a fake `claude` in `dir` (put `dir` first on PATH). It appends every argument of
-/// every call to `prompts.log` in `dir` and answers the fix-specific pass with `fix`, any call
-/// whose arguments contain `trigger` with `finding`, and everything else with an empty (but
-/// well-formed) result.
+/// every call, and the prompt it reads on stdin (where `claude -p` is given it), to `prompts.log`
+/// in `dir` and answers the fix-specific pass with `fix`, any call whose arguments or prompt
+/// contain `trigger` with `finding`, and everything else with an empty (but well-formed) result.
 pub(crate) fn install_fake_claude(
     dir: &Path,
     trigger: &str,
@@ -234,7 +234,7 @@ pub(crate) fn install_fake_claude(
     )
     .unwrap();
     let script = format!(
-        "#!/bin/sh\n[ \"$*\" = --version ] && {{ echo '2.1.321 (Claude Code)'; exit 0; }}\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) python3 \"$D/fix.py\" \"$D/fix.json\" \"$@\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
+        "#!/bin/sh\n[ \"$*\" = --version ] && {{ echo '2.1.321 (Claude Code)'; exit 0; }}\nD=\"$(dirname \"$0\")\"\nP=\"$(cat)\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\nprintf '%s\\n' \"$P\" >> \"$D/prompts.log\"\ncase \"$* $P\" in\n  *'codebase-specific fix per finding'*) python3 \"$D/fix.py\" \"$D/fix.json\" \"$@\" \"$P\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
     );
     let bin = dir.join("claude");
     std::fs::write(&bin, script).unwrap();

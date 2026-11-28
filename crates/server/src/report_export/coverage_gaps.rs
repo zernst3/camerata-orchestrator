@@ -1,15 +1,16 @@
 //! H4: what a scan did NOT cover, stated by path and by pass, so nothing is lost silently.
 //!
 //! Two kinds of gap reach the Coverage section of the PDF, the workbook's Coverage sheet and
-//! `findings.json`, all from the one [`coverage_gaps`] computation:
+//! `json/inspection.json`, all from the one [`coverage_gaps`] computation:
 //!
 //! - an AI scan pass that failed (a transport error, a refusal, or a reply that was still not
 //!   JSON after its bounded retries) reads "pass failed, N files not reviewed by the AI pass",
 //!   from the existing failed-pass record ([`crate::ai_audit::FailedPass::coverage_line`]);
-//! - an auditable file the walk did not read (over the 400 KB size limit, or past the
+//! - an auditable file the walk did not read (over the 1 MB size limit, or past the
 //!   20,000-file limit) is listed by repo and path, from the scan ledger's input facts
 //!   ([`crate::scan_ledger::ScanInputFacts::skipped_files`]).
 
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use serde::Serialize;
 
 use crate::scan_ledger::{FileCapHit, SkipReason, SkippedTotals, SKIPPED_FILES_LISTED_PER_REASON};
@@ -78,7 +79,7 @@ pub struct CoverageGapsJson {
     /// Skipped files past that bound, counted but not named.
     pub skipped_beyond_cap_total: usize,
     /// One sentence counting every file the scan did not read, by reason, named or not ("12 files
-    /// were not scanned: 3 over the 400 KB file size limit, 9 beyond the 20,000-file limit.").
+    /// were not read for the inspection: 3 over the 1 MB file size limit, 9 beyond the 20,000-file limit.").
     /// `None` when every auditable file was read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_summary: Option<String>,
@@ -125,7 +126,7 @@ pub(super) fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<S
     Some(format!(
         "{count} {} checked only against the files in {} scope, not every file in the \
          repositories (for example {}: {} of {}). The counts per rule are on the {} sheet and in \
-         findings.json.",
+         {INSPECTION_JSON}.",
         if count == 1 { "rule was" } else { "rules were" },
         if count == 1 { "its" } else { "their" },
         first.rule_id,
@@ -150,20 +151,24 @@ pub fn skipped_beyond_cap_sentence(omitted: usize) -> Option<String> {
     })
 }
 
-/// A file size as Coverage prints it: bytes under a kilobyte, whole kilobytes (1,000 bytes) under
-/// a megabyte, then megabytes to one decimal. Decimal units, like the "400 KB" file limit.
+/// A file size as Coverage prints it, in the base the file size limit is written in (1 MB is
+/// 1,048,576 bytes): bytes under a kilobyte, whole kilobytes (1,024 bytes) under a megabyte, then
+/// megabytes to one decimal, rounded UP so a file over the limit never prints as 1.0 MB.
 pub fn format_size(bytes: u64) -> String {
-    if bytes < 1_000 {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes < KB {
         format!("{bytes} B")
-    } else if bytes < 1_000_000 {
-        format!("{} KB", (bytes + 500) / 1_000)
+    } else if bytes < MB {
+        format!("{} KB", (bytes + KB / 2) / KB)
     } else {
-        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+        let tenths = (bytes * 10).div_ceil(MB);
+        format!("{}.{} MB", tenths / 10, tenths % 10)
     }
 }
 
 /// `n` with a comma between each group of three digits ("20,000").
-fn group_digits(n: usize) -> String {
+pub(crate) fn group_digits(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -215,20 +220,24 @@ fn limit_of(hit: &FileCapHit) -> usize {
 fn beyond_limit_label(hits: &[FileCapHit], repo: &str) -> String {
     match hits.iter().find(|h| h.repo == repo) {
         Some(hit) => format!("beyond the {}-file limit", group_digits(limit_of(hit))),
-        None => SkipReason::BeyondFileCap.label().to_string(),
+        None => SkipReason::BeyondFileCap.label(),
     }
 }
 
 /// The one sentence counting every file the scan did not read, by reason. `None` when none.
-fn skipped_summary_sentence(totals: &SkippedTotals, hits: &[FileCapHit]) -> Option<String> {
+pub(super) fn skipped_summary_sentence(
+    totals: &SkippedTotals,
+    hits: &[FileCapHit],
+) -> Option<String> {
     let total = totals.total();
+    let patterns = never_read_sentence(totals.excluded_never_read);
     if total == 0 {
-        return None;
+        return patterns;
     }
     // The limit named is the one every hit applied; repos that applied different limits are
     // summed under a plain "beyond the file limit".
     let beyond = match hits.split_first() {
-        None => SkipReason::BeyondFileCap.label().to_string(),
+        None => SkipReason::BeyondFileCap.label(),
         Some((first, rest)) if rest.iter().all(|h| limit_of(h) == limit_of(first)) => {
             format!("beyond the {}-file limit", group_digits(limit_of(first)))
         }
@@ -238,34 +247,169 @@ fn skipped_summary_sentence(totals: &SkippedTotals, hits: &[FileCapHit]) -> Opti
         SkipReason::Oversize,
         SkipReason::BeyondFileCap,
         SkipReason::NotText,
+        SkipReason::ExcludedByAgreement,
+        SkipReason::LongLine,
+        SkipReason::Generated,
+        SkipReason::GeneratedUnsearched,
+        SkipReason::NotInspectedType,
+        SkipReason::NotInspectedVersionsOnly,
+        SkipReason::Symlink,
+        SkipReason::NameNotText,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
     .map(|r| {
-        let label = if r == SkipReason::BeyondFileCap {
-            beyond.as_str()
-        } else {
-            r.label()
+        let label = match r {
+            SkipReason::BeyondFileCap => beyond.clone(),
+            // These files are never billed, said here as the generated labels say it.
+            SkipReason::NotInspectedType => {
+                format!(
+                    "{} (not billed)",
+                    crate::onboard::files::not_inspected_in_a_list()
+                )
+            }
+            SkipReason::NotInspectedVersionsOnly => format!(
+                "{} (not billed)",
+                crate::onboard::files::not_inspected_versions_in_a_list()
+            ),
+            // Said as the other reasons are, in the middle of a list: "29 symbolic links (not read
+            // through)".
+            SkipReason::Symlink if totals.of(r) == 1 => {
+                "symbolic link (not read through)".to_string()
+            }
+            SkipReason::Symlink => "symbolic links (not read through)".to_string(),
+            // The sentence part says the cause; the label gives the full reason in the table.
+            SkipReason::NameNotText => "with a file name that is not UTF-8 text".to_string(),
+            _ => in_a_list(&r.label()),
         };
         format!("{} {label}", totals.of(r))
     })
     .collect();
-    Some(format!(
-        "{total} {} not scanned: {}.",
+    let mut sentence = format!(
+        "{total} {} not read for the inspection: {}.",
         files_noun(total),
         parts.join(", ")
-    ))
+    );
+    if let Some(secrets) = secret_search_sentence(totals, &beyond) {
+        sentence.push(' ');
+        sentence.push_str(&secrets);
+    }
+    if let Some(patterns) = patterns {
+        sentence.push(' ');
+        sentence.push_str(&patterns);
+    }
+    Some(sentence)
+}
+
+/// A reason that carries its own colon ("generated: searched for secrets only, not billed"),
+/// worded for the middle of the summary line, where a second colon would read badly:
+/// "generated (searched for secrets only, not billed)".
+fn in_a_list(label: &str) -> String {
+    match label.split_once(": ") {
+        Some((head, rest)) => format!("{head} ({rest})"),
+        None => label.to_string(),
+    }
+}
+
+/// The sentence for Excluded by agreement patterns that match only files never read: patterns,
+/// not skipped files. `None` when there are none.
+fn never_read_sentence(patterns: usize) -> Option<String> {
+    let marking = SkipReason::ExcludedNeverRead.label();
+    match patterns {
+        0 => None,
+        1 => Some(format!("1 pattern is {marking}.")),
+        n => Some(format!("{n} patterns are {marking}.")),
+    }
+}
+
+/// What the secret checks did with the files not read for the inspection. A file over the file
+/// size limit (up to the secret search ceiling) or with a long line is not read, billed or
+/// counted but its contents are still searched for secrets; a file over the ceiling, past the
+/// file limit or not text gets file-name checks only, and is said to be "not searched for
+/// secrets". `None` when the deterministic floor did not run, or nothing needs saying.
+fn secret_search_sentence(totals: &SkippedTotals, beyond: &str) -> Option<String> {
+    if !totals.secret_search_ran {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let ceiling = crate::onboard::files::secret_scan_label();
+    if totals.secret_over_ceiling > 0 {
+        parts.push(format!("{} over {ceiling}", totals.secret_over_ceiling));
+    }
+    if totals.secret_over_budget > 0 {
+        parts.push(format!(
+            "{} past the {} search budget for one run",
+            totals.secret_over_budget,
+            crate::onboard::files::secret_search_budget_label()
+        ));
+    }
+    if totals.beyond_file_cap > 0 {
+        parts.push(format!("{} {beyond}", totals.beyond_file_cap));
+    }
+    let not_text = totals.not_text + totals.secret_oversize_not_text;
+    if not_text > 0 {
+        parts.push(format!("{not_text} not UTF-8 text"));
+    }
+    // A file excluded by agreement is never opened, so it is not searched either.
+    if totals.excluded_by_agreement > 0 {
+        parts.push(format!(
+            "{} excluded by agreement",
+            totals.excluded_by_agreement
+        ));
+    }
+    // A file of a type not inspected yet is never opened, so it is not searched either.
+    if totals.not_inspected_type > 0 {
+        parts.push(format!(
+            "{} {}",
+            totals.not_inspected_type,
+            crate::onboard::files::not_inspected_in_a_list()
+        ));
+    }
+    if totals.not_inspected_versions_only > 0 {
+        parts.push(format!(
+            "{} {}",
+            totals.not_inspected_versions_only,
+            crate::onboard::files::not_inspected_versions_in_a_list()
+        ));
+    }
+    let unsearched = totals.secret_over_ceiling
+        + totals.secret_over_budget
+        + totals.beyond_file_cap
+        + not_text
+        + totals.excluded_by_agreement
+        + totals.not_inspected_type
+        + totals.not_inspected_versions_only;
+    let mut out: Vec<String> = Vec::new();
+    if totals.secret_searched > 0 {
+        out.push(format!(
+            "{} of these files {} still searched for secrets.",
+            totals.secret_searched,
+            if totals.secret_searched == 1 {
+                "was"
+            } else {
+                "were"
+            }
+        ));
+    }
+    if unsearched > 0 {
+        out.push(format!(
+            "{unsearched} {} not searched for secrets: {}.",
+            files_noun(unsearched),
+            parts.join(", ")
+        ));
+    }
+    (!out.is_empty()).then(|| out.join(" "))
 }
 
 /// One sentence per repo that reached the file limit, naming the limit that was applied and the
-/// number of files not scanned.
+/// number of files not read for the inspection.
 fn file_limit_sentences(hits: &[FileCapHit]) -> Vec<String> {
     hits.iter()
         .map(|h| {
             let limit = group_digits(limit_of(h));
             format!(
                 "{} reached the {limit}-file limit, so the scan read the first {limit} files in \
-                 path order. {} {} not scanned.",
+                 path order. {} {} not read for the inspection.",
                 h.repo,
                 h.not_scanned,
                 files_noun(h.not_scanned),
@@ -303,7 +447,7 @@ impl CoverageGapsJson {
 }
 
 /// The Coverage gaps for `report`. Pure, and the only derivation: the PDF data, the workbook
-/// and `findings.json` all call it (or reuse its output), so they cannot disagree.
+/// and `json/inspection.json` all call it (or reuse its output), so they cannot disagree.
 pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
     let mut failed_ai_passes: Vec<String> = report
         .failed_passes
@@ -335,7 +479,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             reason: if s.reason == SkipReason::BeyondFileCap {
                 beyond_limit_label(&input.file_cap_hits, &s.repo)
             } else {
-                s.reason.label().to_string()
+                s.reason.label()
             },
             size_bytes: s.bytes,
             size: s.bytes.map(format_size).unwrap_or_default(),
@@ -396,7 +540,8 @@ pub fn dependency_gaps(report: &crate::onboard::ScanReport) -> Vec<String> {
             .filter(|n| n.tool == "osv-scanner")
             .filter(|n| !crate::dep_audit::note_proves_clean(n))
             .map(|n| {
-                let message = n.message.trim();
+                let rendered = crate::dep_audit::client_note_message(&n.message);
+                let message = rendered.trim();
                 let mut chars = message.chars();
                 match chars.next() {
                     Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),

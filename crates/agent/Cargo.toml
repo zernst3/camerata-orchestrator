@@ -29,3 +29,6 @@ tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
+camerata-test-env = { path = "../test-env" }
+# The workspace-wide `#[serial_test::serial(process_env)]` key; see crates/test-env.
+serial_test = "3"

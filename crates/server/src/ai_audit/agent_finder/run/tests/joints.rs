@@ -11,7 +11,10 @@ fn two_pieces() -> FinderOptions {
 
 /// The piece scripts: part one owns a.rs and reports `a_problems`; part two owns b.rs and writes
 /// `b_problems` (a problem about a.rs there is a lead).
-fn parts(a_problems: Vec<Value>, b_problems: Vec<Value>) -> (ScriptedAgent, ScriptedAgent) {
+pub(super) fn parts(
+    a_problems: Vec<Value>,
+    b_problems: Vec<Value>,
+) -> (ScriptedAgent, ScriptedAgent) {
     let a = ScriptedAgent::new(full_script(
         &[("src/a.rs", 6)],
         a_problems,
@@ -33,7 +36,7 @@ fn parts(a_problems: Vec<Value>, b_problems: Vec<Value>) -> (ScriptedAgent, Scri
     (a, b)
 }
 
-async fn two_part_run(
+pub(super) async fn two_part_run(
     a: ScriptedAgent,
     b: ScriptedAgent,
     joints: ScriptedAgent,

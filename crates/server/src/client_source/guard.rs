@@ -228,20 +228,8 @@ pub async fn guard(
     }
 
     // ── R12 ─────────────────────────────────────────────────────────────────────────────────
-    if state.jobs.has_running_for_project(&project.id) || state.source_ops.scan_running(&project.id)
-    {
-        return Err(Refusal::conflict(
-            "scan_in_progress",
-            "A scan is running for this project. Wait for it to finish or cancel it first.",
-        ));
-    }
-    if governed_run_active_on(state, &repo) {
-        return Err(Refusal::conflict(
-            "governed_run_in_progress",
-            format!(
-                "A governed run is in progress on {repo}; wait for it to finish or stop it first."
-            ),
-        ));
+    if let Some(refusal) = run_in_flight_refusal(state, &project.id, &repo) {
+        return Err(refusal);
     }
     let Some(claim) = state.source_ops.try_begin(&project.id, &repo) else {
         return Err(Refusal::conflict(
@@ -288,6 +276,31 @@ pub async fn guard(
         worktrees,
         _claim: claim,
     })
+}
+
+/// R12's run checks, on their own: the refusal when a scan is running for the project, or an
+/// unfinished governed run is working on `repo`, else `None`. The project deletion asks it for
+/// repos that have no checkout (the full guard stops earlier for those).
+pub(super) fn run_in_flight_refusal(
+    state: &AppState,
+    project_id: &str,
+    repo: &str,
+) -> Option<Refusal> {
+    if state.jobs.has_running_for_project(project_id) || state.source_ops.scan_running(project_id) {
+        return Some(Refusal::conflict(
+            "scan_in_progress",
+            "A scan is running for this project. Wait for it to finish or cancel it first.",
+        ));
+    }
+    if governed_run_active_on(state, repo) {
+        return Some(Refusal::conflict(
+            "governed_run_in_progress",
+            format!(
+                "A governed run is in progress on {repo}; wait for it to finish or stop it first."
+            ),
+        ));
+    }
+    None
 }
 
 /// Whether a run that has not finished is working on `repo`. Every governed development,
@@ -436,7 +449,7 @@ pub(crate) fn protected_reason(
 fn other_checkouts(state: &AppState, project_id: &str, repo: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for project in state.projects.list() {
-        for r in &project.repos {
+        for r in &super::read::owned_repos(state, &project) {
             if project.id == project_id && r.eq_ignore_ascii_case(repo) {
                 continue;
             }

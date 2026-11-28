@@ -37,6 +37,9 @@ pub struct ProjectContextResponse {
     /// The active project's name (present when `ok=true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
+    /// Whether the active project is a client engagement (the lock applies: the chat runs only on
+    /// the API). Lets the chat panel say so before the operator types. False when `ok` is false.
+    pub client_engagement: bool,
     /// The repos in scope for the active project.
     #[serde(default)]
     pub repos: Vec<String>,
@@ -529,6 +532,7 @@ pub(crate) async fn active_project_context(
             phase: ProjectPhase::Blank,
             project_id: None,
             project_name: None,
+            client_engagement: false,
             repos: Vec::new(),
             onboarded: Vec::new(),
             ruleset_summary: None,
@@ -560,6 +564,7 @@ pub(crate) async fn active_project_context(
             phase: ProjectPhase::PostOnboard,
             project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
+            client_engagement: project.client_engagement,
             repos: project.repos.clone(),
             onboarded: project.onboarded.clone(),
             ruleset_summary,
@@ -581,6 +586,7 @@ pub(crate) async fn active_project_context(
             phase: ProjectPhase::PreOnboard,
             project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
+            client_engagement: project.client_engagement,
             repos: project.repos.clone(),
             onboarded: Vec::new(),
             ruleset_summary: None, // No committed ruleset yet.
@@ -605,6 +611,7 @@ pub(crate) async fn active_project_context(
             phase: ProjectPhase::Blank,
             project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
+            client_engagement: project.client_engagement,
             repos: project.repos.clone(),
             onboarded: Vec::new(),
             ruleset_summary: None,

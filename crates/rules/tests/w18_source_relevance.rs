@@ -557,7 +557,7 @@ async fn req_w18_the_migration_did_not_change_any_rule_summary() {
         ),
         (
             "GO-TESTING-INTEGRATION-BUILD-TAGS-1",
-            "Integration tests — tests that require a live ",
+            "Integration tests (tests that require a live ",
         ),
         (
             "GO-TESTING-MOCK-AT-INTERFACE-BOUNDARY-1",

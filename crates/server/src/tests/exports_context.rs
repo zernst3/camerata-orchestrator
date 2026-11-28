@@ -165,7 +165,10 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"findings.json".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"json/inspection.json".to_string()),
+        "{names:?}"
+    );
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
@@ -195,12 +198,12 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
 
     let mut findings_json_str = String::new();
     archive
-        .by_name("findings.json")
+        .by_name("json/inspection.json")
         .unwrap()
         .read_to_string(&mut findings_json_str)
         .unwrap();
     let findings_json: serde_json::Value =
-        serde_json::from_str(&findings_json_str).expect("findings.json must be valid JSON");
+        serde_json::from_str(&findings_json_str).expect("json/inspection.json must be valid JSON");
     assert!(
         findings_json.get("provenance").is_some(),
         "{findings_json_str}"
@@ -212,11 +215,11 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
     let findings_arr = findings_json
         .get("findings")
         .and_then(|f| f.as_array())
-        .expect("findings.json must have a findings array");
+        .expect("json/inspection.json must have a findings array");
     assert_eq!(
         findings_arr.len(),
         1,
-        "the one non-FP fixture finding must be the sole findings.json row: {findings_json_str}"
+        "the one non-FP fixture finding must be the sole json/inspection.json row: {findings_json_str}"
     );
 
     let mut readme = String::new();
@@ -227,7 +230,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         .unwrap();
     assert!(readme.contains(&pdf_name), "{readme}");
     assert!(readme.contains(&xlsx_name), "{readme}");
-    assert!(readme.contains("findings.json"), "{readme}");
+    assert!(readme.contains("json/inspection.json"), "{readme}");
     // P6 (2026-09-29): the product is "Codebase Inspection" — the README names it and
     // never says "audit"/"Audit" (the disclaimer paragraph it embeds verbatim is itself
     // audit-free per `report_export`'s own contract test).
@@ -350,9 +353,9 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
     for path in [
         "a-inspection.pdf",
         "a-inspection-findings.xlsx",
-        "findings.json",
+        "json/inspection.json",
         "README.txt",
-        "decisions.json",
+        "json/decisions.json",
         "csv/tickets.csv",
         "csv/all-findings.csv",
         "json/all-findings.json",
@@ -375,7 +378,7 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
             "{path}: {purpose:?}"
         );
     }
-    // The two all-findings files are the rows of findings.json, not a sheet of the workbook.
+    // The two all-findings files are the rows of json/inspection.json, not a sheet of the workbook.
     for path in ["csv/all-findings.csv", "json/all-findings.json"] {
         let (purpose, _) = manifest_file_facts(path);
         assert!(
@@ -383,7 +386,10 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
                 && !purpose.to_lowercase().contains("xlsx"),
             "{path}: {purpose:?} calls it a workbook table"
         );
-        assert!(purpose.contains("findings.json"), "{path}: {purpose:?}");
+        assert!(
+            purpose.contains("json/inspection.json"),
+            "{path}: {purpose:?}"
+        );
     }
     for old in [
         "manifest",
@@ -523,7 +529,7 @@ fn the_freshness_scanner_catches_a_planted_marker_at_any_depth() {
 }
 
 /// THE GATE. Builds every client artifact through the same builders the product export
-/// uses (PDF input data, xlsx, findings.json, csv/*, json/*, README, manifest, the zip
+/// uses (PDF input data, xlsx, json/inspection.json, csv/*, json/*, README, manifest, the zip
 /// itself) and asserts none contains operator-only freshness text. Also scans the SOURCE of
 /// the export builders for freshness identifiers, so a future wiring is caught at the
 /// import, before it ever produces output.
@@ -869,12 +875,12 @@ fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
     );
 }
 
-/// The clone judge follows the open project's fast (Haiku) band: the run's controls carry the
-/// band's primary model (default Haiku 5.5), a project that moves the band moves the judge,
-/// and with no project the built-in default applies. The environment has no say.
+/// The clone judge resolves to its own built-in default (Haiku 5.5) when the project's clone
+/// judge model is unset, whatever the project's fast band says, and a model set on the project
+/// wins. With no project the built-in default applies. The environment has no say.
 #[test]
 #[serial_test::serial(process_env)]
-fn the_clone_judge_follows_the_projects_fast_band() {
+fn the_clone_judge_resolves_haiku_when_unset_even_if_the_fast_band_moves() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
     let state = AppState::seeded();
     let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
@@ -892,7 +898,7 @@ fn the_clone_judge_follows_the_projects_fast_band() {
     assert_eq!(
         clone_judge_step_model(&state).as_deref(),
         Some("claude-haiku-5-5"),
-        "a new project's fast band is Haiku 5.5"
+        "a new project's clone judge is Haiku 5.5"
     );
     state
         .projects()
@@ -902,8 +908,19 @@ fn the_clone_judge_follows_the_projects_fast_band() {
         .unwrap();
     assert_eq!(
         req.run_controls_for(&state).clone_judge_model_for(),
+        "claude-haiku-5-5",
+        "an unset clone judge is Haiku 5.5 even when the fast band moved"
+    );
+    state
+        .projects()
+        .update(&project.id, |p| {
+            p.review.clone_judge_model = "claude-haiku-4-5-20251001".to_string();
+        })
+        .unwrap();
+    assert_eq!(
+        req.run_controls_for(&state).clone_judge_model_for(),
         "claude-haiku-4-5-20251001",
-        "the project's fast band chooses the judge; the older id stays selectable"
+        "a clone judge set on the project wins; the older id stays selectable"
     );
 }
 
@@ -1037,7 +1054,7 @@ fn manifest_lists_and_hashes_every_file_except_itself() {
     for expected in [
         "acme-audit.pdf",
         "acme-audit-findings.xlsx",
-        "findings.json",
+        "json/inspection.json",
         "README.txt",
         "csv/all-findings.csv",
         "json/all-findings.json",
@@ -1125,6 +1142,33 @@ fn zip_now_reflects_the_current_year() {
         current_year,
         "zip_now must not fall back to the 1980 default"
     );
+}
+
+/// The context names whether the project is a client engagement, so the chat panel can say the
+/// chat runs only on the API before the operator types.
+#[tokio::test]
+async fn active_project_context_reports_client_engagement() {
+    let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let p = state.projects.create("Client", vec![]).unwrap();
+    let get = |state: AppState| async move {
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/active/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body_json(resp).await
+    };
+    assert_eq!(get(state.clone()).await["client_engagement"], true);
+    state
+        .projects
+        .set_client_engagement(&p.id, false, false)
+        .unwrap();
+    assert_eq!(get(state.clone()).await["client_engagement"], false);
+    assert_eq!(get(state.clone()).await["project_id"], p.id);
 }
 
 /// active_project_context returns scan_results_section from last_scan when no draft.
@@ -2248,8 +2292,8 @@ async fn set_credential_for_non_anthropic_name_does_not_touch_the_anthropic_cach
 
 // ── GET /api/models/registry — backend-aware Claude portion (Feature A) ────────
 
-/// The project's finder setting is the run's finder: an agent project runs the agent finder, a
-/// new project runs the engine, and the setting is read when the run starts (never the
+/// The project's finder setting is the run's finder: a new project runs the agent finder, an
+/// engine project runs the engine, and the setting is read when the run starts (never the
 /// environment).
 #[test]
 fn the_projects_finder_reaches_the_audit_runs_controls() {
@@ -2260,9 +2304,9 @@ fn the_projects_finder_reaches_the_audit_runs_controls() {
         .create("Finder wiring", vec!["me/repo".to_string()])
         .expect("create active project");
     let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
-    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Engine);
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Agent);
     let settings = camerata_api_types::project::ReviewSettings {
-        finder: camerata_api_types::project::ProjectFinder::Agent,
+        finder: camerata_api_types::project::ProjectFinder::Engine,
         ..project.review
     };
     state
@@ -2270,7 +2314,7 @@ fn the_projects_finder_reaches_the_audit_runs_controls() {
         .set_review_settings(&project.id, settings)
         .unwrap()
         .unwrap();
-    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Agent);
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Engine);
 }
 
 /// The project's finder, duplicate check and clone judge models are the UI-started run's models;
@@ -2284,11 +2328,11 @@ fn the_projects_finder_dup_check_and_clone_judge_models_reach_the_audit_runs_con
         .expect("create active project");
     let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
     let before = req.run_controls_for(&state);
-    assert_eq!(before.finder_model_for(), "claude-fable-5-2");
+    assert_eq!(before.finder_model_for(), "claude-opus-5-5");
     assert_eq!(before.dup_check_model_for(), "claude-sonnet-5-5");
     assert_eq!(before.clone_judge_model_for(), "claude-haiku-5-5");
     let settings = camerata_api_types::project::ReviewSettings {
-        finder_model: "claude-opus-5-5".to_string(),
+        finder_model: "claude-fable-5-2".to_string(),
         dup_check_model: "claude-haiku-5-5".to_string(),
         clone_judge_model: "claude-haiku-4-5-20251001".to_string(),
         ..project.review
@@ -2299,7 +2343,19 @@ fn the_projects_finder_dup_check_and_clone_judge_models_reach_the_audit_runs_con
         .unwrap()
         .unwrap();
     let after = req.run_controls_for(&state);
-    assert_eq!(after.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(after.finder_model_for(), "claude-fable-5-2");
     assert_eq!(after.dup_check_model_for(), "claude-haiku-5-5");
     assert_eq!(after.clone_judge_model_for(), "claude-haiku-4-5-20251001");
+}
+
+/// Outside review round 1: an app run with no project runs as a new project does (the agent
+/// finder on Opus 5.5), not on the library's engine default.
+#[test]
+fn a_run_with_no_project_takes_the_new_project_defaults() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    let c = req.run_controls_for_project(None);
+    assert_eq!(c.finder, FinderChoice::Agent);
+    assert_eq!(c.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(c.group_review_model_for(), "claude-opus-5-5");
 }

@@ -16,7 +16,7 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > rule by rule scan, the current default) and the **agent finder** (one model reviews each part of
 > the code, section 3b). Both feed the same review stage (a tree, an escalation queue, an Engine
 > Check and a group reviewer, section 3a) and the same client package (PDF, Excel workbook,
-> `findings.json` and `csv/tickets.csv`). Each feature is described in the section where it applies.
+> `json/inspection.json` and `csv/tickets.csv`). Each feature is described in the section where it applies.
 > Sections 19 to 22 and the appendix are reference material: the keyboard shortcuts, a glossary of
 > the words on screen, a "how do I" index and troubleshooting.
 
@@ -118,8 +118,24 @@ backend**, controls only the project-less chat assistant (the chatbox that lives
 project). It does not affect any project's scan, recommendations, rescans or dev loop: those
 always resolve from that project's own Backend setting above, never from the chat setting.
 
+**macOS: stop the Keychain dialog after every rebuild (one-time setup).** macOS remembers
+"Always Allow" per program, and a freshly built `camerata` is a new program each time. Camerata
+therefore reads the Anthropic key through a small separate reader that rarely changes:
+
+1. Install it once: `scripts/install-key-reader.sh` (it puts `camerata-key-reader` in
+   `~/.camerata/bin/`).
+2. Approve it once, by running it yourself: `~/.camerata/bin/camerata-key-reader >/dev/null`,
+   enter your login password and choose **Always Allow**. Do this in a terminal, not through the
+   app: the app stops waiting after 5 seconds.
+3. From then on, rebuilding Camerata does not ask again. If the reader is locked out, denied or
+   missing a key, the run stops with "no API key is configured" instead of hanging.
+
+The reader asks again only when the reader itself is rebuilt differently (a Rust or dependency
+update, or a different build mode); run step 2 again then. Setting `CAMERATA_NO_KEYCHAIN=1`
+turns all of this off.
+
 **Local-first:** Camerata stores only configs + pointers (JSON in the operator's OS app-data dir:
-`projects.json`, `settings.json`, `onboarding-draft.json`); the repo code lives on the operator's own
+`projects.json`, `settings.json`, and one `onboarding-draft-<project>.json` per project); the repo code lives on the operator's own
 machine. Each repo a project references must resolve to a local git checkout (see §5).
 
 ---
@@ -365,6 +381,44 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    are **not violations**; they tell the operator where coverage has a gap, so the operator knows what the scan did
    and didn't check.
 
+   **Excluded by agreement patterns and the pre-start notice.** A project's Excluded by agreement
+   list names files a run never reads and never bills; each one is listed under Coverage as
+   "excluded by agreement". Before a run starts, the desktop and `camerata inspect` check the list
+   against the files of each repo. A pattern that matches no file anywhere stops the start until
+   you remove it or fix it ("Excluded by agreement holds a pattern that matches no file"). A
+   pattern that matches only files in a folder Camerata never reads anyway (`node_modules`,
+   vendored code, build output) does not stop the start: it is a warning, because the pattern is
+   harmless. The desktop says "A start is not held; you can remove it" and still offers
+   **Remove pattern**, and `camerata inspect` prints `warning: Excluded by agreement holds
+   "<pattern>" (matches no file: <folder> is never read, so this pattern is not needed); the start
+   goes ahead` to stderr. `camerata count` prints "warning: <pattern> matches only files never
+   read; excluded by agreement; nothing here is read by default". The package still lists the
+   pattern in its Coverage section, the PDF and the workbook, marked "excluded by agreement;
+   nothing here is read by default". A file over the 1 MB file size limit, or with a line longer
+   than 97 KB, never stops a start. Before the start the desktop lists it, with its size, as a
+   warning ("1 file will not be read for the inspection (over the 1 MB file size limit)") and
+   leaves Start on; `camerata inspect` prints the same warning to stderr. The file is not read for
+   the inspection, sent to a model, billed or counted. The secret checks still search its
+   contents by pattern, never by the model, so a token or key inside it is found and reported with
+   its path and line, masked like any other. With "AI review only" the security floor is off, so
+   the warning says the file is not searched for secrets in this run. Add the file to Excluded by agreement if you want it
+   left alone completely; it is then never opened. Searching holds for a file up to 20 MB, and for 200 MB of such files in all in one run (the secret search budget): files are searched in path order, and a file that does not fit in what is left of the budget is checked by name only, with its own warning before the start. Coverage
+   counts these files in one sentence ("4 files were
+   not read for the inspection: ...") and then says how many of them were still searched for
+   secrets ("2 of these files were still searched for secrets."). Only the file name is checked
+   for a file over 20 MB, a file beyond the 20,000-file limit and a file that is not UTF-8 text,
+   and Coverage says so: "2 files were not searched for secrets: 1 over 20 MB, 1 past the 200 MB
+   search budget for one run". A file excluded by agreement is never opened, so it is named there too ("3 excluded by
+   agreement"). A hand-written file of a type the inspection does not read yet (Razor views,
+   project and solution files, schemas, some scripts and templates) is never silent either: it is not read, billed or
+   searched for secrets, and `camerata count`, the start warning and Coverage list it as "this file type is not
+   inspected yet" ("not billed" in Coverage). `camerata count` tallies them by type ("300 .cshtml, 12 .csproj")
+   beside the first 10 paths. A project file or `Gemfile` is still opened for its declared runtime and package
+   versions, so it is listed as "this file type is not inspected yet; only its declared runtime and package versions
+   are checked", never plainly not read. The report's method text says the same in one sentence. `camerata count
+   --json` also carries `unclassified_types`, for the operator only: files of types nothing reads or lists. A pattern that removed nothing is not a file: Coverage counts it in its own
+   sentence ("1 pattern is excluded by agreement; nothing here is read by default.").
+
    **Scan tools auto-install on first use.** Camerata auto-provisions Semgrep and ESLint into its
    own cache directory (`~/Library/Application Support/camerata/tooling/` on macOS;
    `~/.local/share/camerata/tooling/` on Linux) the first time a scan needs them. The bundled
@@ -462,7 +516,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      list) and picks the places the architect should read in person, each with one reason from a
      closed list. It never removes a place, never overwrites stage 1's answer (a disagreement is
      stored beside it) and never writes a count: the numbers come from the tree. The review screens call a place a "site". Its model is
-     Claude Fable 5.2 by default, changed only by `--group-review-model` or the project's review
+     Claude Opus 5.5 by default, changed only by `--group-review-model` or the project's review
      settings. In a client engagement it must be an Anthropic API model like every other stage.
    - **Tree.** The operator works through areas (categories), rules and rule groups. A node is either
      an escalation node (it holds a security-class place or a critical or high one, so the operator expects
@@ -512,7 +566,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      the repo's source was deleted from this machine it shows `Source deleted on <date>, re-fetch to
      view` and no code. A file too large to view (over 4 MB) offers **Show the enclosing block**
      instead, which opens the full-detail modal. A missing or binary file gives its reason. Files
-     between 400 KB and 4 MB are loaded 800 lines at a time and the next page loads as the operator scrolls.
+     between 1 MB and 4 MB are loaded 800 lines at a time and the next page loads as the operator scrolls.
    - **Deciding without leaving the code.** `C`, `T`, `I` and `F` do exactly what they do in the pane:
      `C` and `T` apply at once with the five-second Undo (shown at the bottom of the viewer), and `I`
      and `F` ask for a reason first (Enter commits, Esc cancels and a blank reason is refused). After
@@ -560,12 +614,13 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      case), the current match is stronger and the field shows `3 of 12`. Enter steps to the next
      match and Shift+Enter to the previous one; stepping past either end wraps and the count says
      `(wrapped)`. `Esc` closes the field and leaves the highlights until the operator's next move (a
-     navigation key, go-to-line or opening a reference). In a file longer than 400 KB only the
+     navigation key, go-to-line or opening a reference). In a file longer than 1 MB only the
      loaded 800 lines are searched, and the count says which lines.
    - **References.** `S` opens a prompt pre-filled with the symbol the rule captured, else the
      longest identifier on the finding's line. Enter lists every whole-word use of it at the
      inspected commit, at most 200 (the heading says when there are more), skipping vendored and
-     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, as in the scan), with every
+     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, and any file the project's
+     Excluded by agreement names, as in the scan), with every
      line redacted; a line of key material is shown as `[redacted]` but keeps its `path:line`.
      `Up` `Down` choose (the list scrolls to keep the choice on screen), `Enter` opens the hit and
      `Esc` goes back to the code. If the search could not run, or took too long or the server was
@@ -693,7 +748,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    timer records how long the operator spent on each group and,
    for each finding the operator decides, that the local operator reviewed it and when. This is for the operator's own
    planning and pricing: it is saved in the operator's in-progress review, it is never in a report, a
-   workbook, `findings.json` or any other file a client receives and the **Review time** button
+   workbook, `json/inspection.json` or any other file a client receives and the **Review time** button
    beside the strip opens a plain stats view (hours per repo, per group type and per severity)
    with a **Save stats JSON** button. After 20 decisions the strip adds an estimate such as `about 3h 10m left`
    at the reviewer's pace (the median of the last 50 decisions' active time times the findings still undecided);
@@ -1054,8 +1109,12 @@ the evidence check held it: ... It stays out of every export until you decide it
 reasons, in the gate's words: evidence unverified (the quoted code was not found near the cited
 line); junk text (a placeholder, a refusal or an untranslated fragment); put back after the engine
 threw it out, no decision; split out of a ruled-out problem, no decision; merged with no decision
-record; Engine Check said No, no correction yet. A held row is never covered by a batch decision.
-Decide it by name to release it. When the gate refuses an export, the export area shows the list
+record; Engine Check said No, no correction yet; shown at critical severity or marked unsure, with no
+decision. A held row is never covered by a batch decision. Decide it by name to release it.
+Changing a row's severity yourself (in Review, or as an Engine Check correction) is a decision:
+the row is released whichever way the severity moved. The workbook's Decision so far column reads
+"Severity set by the reviewer" for it, and the Reviewer decisions sheet records it. Editing its
+wording or location is not a decision. When the gate refuses an export, the export area shows the list
 ("Export blocked: N rows need a decision before the package can be built.") with one line per row
 (the word `held`, the place, the rule, the reason) and an **open** button that jumps to the row. A
 group decision that is missing records for some of its sites shows as a `group` line: "the decision
@@ -1249,7 +1308,7 @@ Everything after the finder is the same for both: the possible-duplicate check, 
   is picked, and it can be changed only while no run is in flight. The **Review** button appears once a
   scan has produced a result. A deterministic-only scan (untick **AI architectural review**) calls no
   model, so it can be used to get to the Review screen before the first paid scan.
-- **On the command line:** `camerata inspect --finder agent` (the default is `engine`). `--finder-model
+- **On the command line:** `camerata inspect` (the default finder is `agent`; `--finder engine` picks the scan passes instead). `--finder-model
   <ID>` sets its model. The command line refuses `--finder agent` together with `--consensus`, and
   refuses an incremental re-inspection ("--finder agent needs a full inspection ... Pass --full"), so
   add `--full` when an earlier inspection of the same code exists. The app does not show that refusal;
@@ -1387,9 +1446,9 @@ automatically.
 |---|---|---|---|
 | **Scan model** | The engine finder's scan passes. With the agent finder it is not used for finding. | Claude Sonnet 5.5 | no (always set) |
 | **Calibration (stage 1)** | Rates each place: real or not, severity, effort, a reason. Note: "per site, batched". Engine finder only. | Claude Opus 5.5 | no |
-| **Group review (stage 2)** | The group reviewer above. Note: "one call per rule group, real time". | Claude Fable 5.2 | no |
+| **Group review (stage 2)** | The group reviewer above. Note: "one call per rule group, real time". | Claude Opus 5.5 | no |
 | **Fix model** | Writes the fix for each problem after review. | Claude Haiku 5.5 (or the calibration model when the `fix_on_haiku` measure is off) | yes |
-| **Finder model** | The agent finder's model. Note: "used when the finder is agent". | Claude Fable 5.2 | yes: "not set: Claude Fable 5.2" |
+| **Finder model** | The agent finder's model. Note: "used when the finder is agent". | Claude Opus 5.5 | yes: "not set: Claude Opus 5.5" |
 | **Duplicate check** | The model that checks each candidate pair of problems for the Possible duplicate hint (is it the same flaw written twice?). | Claude Sonnet 5.5 | yes: "not set: Claude Sonnet 5.5" |
 | **Clone judge** | The duplicate-code checker, which judges code the clone rules flagged. It runs only when a clone rule is selected. | The project's fast model band (Claude Haiku 5.5 unless changed) | yes: "not set: the project's fast tier model" |
 
@@ -1433,7 +1492,7 @@ OpenRouter id cannot slip through when a model list is empty.
 
 **The same run for an internal session (the operator's own development).** Project **Settings**:
 **Backend** CLI and **Client engagement** off. Pieces run one at a time on the CLI, so it is slower.
-Claude Code must be new enough for the models named (`claude-fable-5-2` needs 2.1.290 or newer; see §22).
+Claude Code must be new enough for the models a run calls (a model such as `claude-fable-5-2` needs 2.1.290 or newer; see §22). The built-in defaults are Opus 5.5 and Sonnet 5.5.
 Then Review > Settings: **Finder** Agent, **Finder model** and **Group review (stage 2)** Claude Opus
 5.5, then tick **Full scan** and run.
 
@@ -1535,7 +1594,7 @@ Every inspection is saved part by part; failed or unrun parts are retried, not s
   failed calls in a row, or a login or billing failure) stops and keeps its parts for later.
 - **A client export is refused** while any part failed or did not run. Nothing is written and the run
   stays resumable. With `--internal` an export is still written but is **marked INTERNAL INCOMPLETE**
-  (on the cover, in `findings.json` and in the README) and is **not for a client**. The release gate
+  (on the cover, in `json/inspection.json` and in the README) and is **not for a client**. The release gate
   refuses any package that carries that marking ("this package records an inspection that did not run
   to completion, so it is not for a client"), so an incomplete package cannot pass as a client one.
 - The scan screen shows an **Incomplete: N pass(es) or stage(s) did not run** banner (a compact line
@@ -1573,7 +1632,7 @@ Two tables:
 - **Project rules**: the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules**: the full corpus (**446 rules across 22 domains** as of 2026-11-15: Rust,
+- **All rules**: the full corpus (**455 rules across 22 domains** as of 2026-11-15: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -1606,7 +1665,7 @@ meant a client report could open its healthy list with a rule about how *Camerat
 agents, presented as a verified property of *their* codebase.
 
 Those rules now carry a flag (`inspectable = false`) that separates the two roles. **28 of the
-446 corpus rules are emit-only.** For the operator, that means:
+455 corpus rules are emit-only.** For the operator, that means:
 
 - They are still proposed, still selectable and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
@@ -2520,8 +2579,8 @@ The SOC-2 lens produces a **gap analysis**, a conversation-starter about what co
 ## 11a. The Codebase Inspection deliverable (PDF + Excel + JSON)
 
 This is a different artifact from the deep-report Markdown above. The **product export** is the
-client-facing deliverable: a ZIP holding a PDF summary, an Excel workbook, `findings.json`,
-`decisions.json`, CSV and JSON copies of the workbook's tables, the ticket file, `manifest.json` and
+client-facing deliverable: a ZIP holding a PDF summary, an Excel workbook, `json/inspection.json`,
+`json/decisions.json`, CSV and JSON copies of the workbook's tables, the ticket file, `manifest.json` and
 a `README.txt`. [`CLIENT_PACKAGE.md`](CLIENT_PACKAGE.md) lists every file, every sheet and every PDF
 section, with the glossary. Export it from the cockpit's export button after a scan, or produce the identical ZIP
 from the command line with no server and no UI at all:
@@ -2569,7 +2628,7 @@ Which `claude` the cli backend runs: every cli call launches the program named b
 `claude` found on `PATH`. Set it when the copy on `PATH` is old or when several copies are installed.
 Before the first model call on the cli backend, the run reads that program's version
 (`<program> --version`) and checks it against the models the run will call. Some models need a
-newer Claude Code than others: `claude-fable-5-2`, the default group review model, needs 2.1.290 or
+newer Claude Code than others: `claude-fable-5-2`, a model a project can pick, needs 2.1.290 or
 newer. If the version found is too old, the run is refused before any model call, and the message
 names the version found, the version needed, the model and the fix: update Claude Code, or set
 `CAMERATA_CLAUDE_PROGRAM` to a newer binary. If the version cannot be read (the program is missing,
@@ -2639,7 +2698,7 @@ generated and vendored files.
   a spreadsheet. It deliberately does not carry every row, and that is not a gap.
 - **The Excel workbook is the detail surface.** No sheet shows a problem more than once except All source rows, the raw record. A
   row missing here IS a problem.
-- **`findings.json` is the data.** It carries the whole set, every kind included, for anything
+- **`json/inspection.json` is the data.** It carries the whole set, every kind included, for anything
   programmatic downstream.
 
 ### Tailored fix and Standard fix
@@ -2650,7 +2709,7 @@ code, and it agrees with the problem). A Standard fix is the rule's own guidance
 file and names from the problem. A problem gets a Standard fix when no tailored fix passed the checks,
 or when no tailored fix was written for it. Both are real fixes; the label tells the operator which kind the operator
 are reading. The label is in the PDF beside the fix, in the workbook's **Fix type** column and in the
-`fix_type` field of `findings.json` and of the CSV and JSON files. A problem with no fix text has an
+`fix_type` field of `json/inspection.json` and of the CSV and JSON files. A problem with no fix text has an
 empty label. A problem that ships a Standard fix does not make the inspection incomplete.
 
 ### The workbook's sheets
@@ -2801,6 +2860,30 @@ project. A run that is not complete is deleted only when a newer complete run ex
 commits.
 
 ---
+
+### Finishing a saved, incomplete run on a newer build (`--recheck-saved`)
+
+A whole rerun cannot finish a run when the newer build changes anything a model was asked (a stored reply is found by the digest of its exact request). `camerata inspect --recheck-saved <RUN-ID|latest>` does the smaller job: it reads the run's saved sealed report, ledger and stored replies, uses every saved result as saved, and runs only what the newer build changed.
+
+- The final checks run again on the rows as saved: the convention accounting, the pipeline integrity checks, the seal and the release gate. The integrity failures the first build stored are replaced by this build's result of the same checks.
+- The delta: each clone check part that failed because the judge's reply could not be read. Its request is rebuilt exactly as the inspection built it from the unchanged repository, its stored reply is read with the current reader, and no model is asked. A confirmed clone gets the rule's standard fix text at export.
+- Nothing else runs: no tool preview, dependency audit, finder, fix stage or group review.
+
+If a stored reply still cannot be read, the command refuses and names the part. With `--reask-failed-judge` (or `--reask-failed-judge=<COUNT>`, default 5) it lists each such part, then asks it once on the clone check model the run recorded, within `--max-cost-usd`. It refuses if the run is complete, the saved report or ledger is missing or unreadable, the repository is not the tree the run read, the rules or prompts differ, a part was judged in part, or (client run) the build has uncommitted changes. If the release gate refuses, no export is written. The run, the ledger and "How this was done" name both builds and what ran again.
+
+```
+camerata inspect --recheck-saved <RUN-ID> --repo <PATH> --export <ZIP>
+camerata inspect --recheck-saved <RUN-ID> --repo <PATH> --export <ZIP> --reask-failed-judge
+```
+
+### Rerunning a saved run's deterministic checks (`--rerun-deterministic`)
+
+A resume refuses a different build of Camerata, which is right for model work but means a bug in a deterministic stage (the tool previews and their merges, the convention accounting, the ledger and integrity checks, the collapse, the export) cannot be fixed on a saved run without paying for a whole new inspection. `camerata inspect --rerun-deterministic <RUN-ID|latest>` runs those stages again on the build you are running, from the run's saved inputs, and asks no model.
+
+- Every model reply comes from the run's store. The finder, the group review, the fix text and the clone and duplicate checks keep the results and models of the build that made the run. A reply the run does not hold refuses the whole rerun: the refusal lists every missing reply, nothing is sent and no export is written. A run with a failed or never-answered model part needs a normal `--resume` on its own build first.
+- It refuses, naming the cause, when the models, the rules the scan asks about, the questions Camerata asks the model (the prompt schema numbers) or the rule library differ from the saved run. Until runs carry their own rule snapshot (#560) the live rule library digest must equal the one the run recorded.
+- A normal `--resume` on another build is still refused. A client inspection needs a build with a commit and no uncommitted changes, because the report names it.
+- Both builds are recorded in the run (`reruns` in `run.json`), in the ledger, and in the report's "How this was done". No API key is needed. `--export` may be given again; everything else is the saved run's. A run that is already complete is not rerun.
 
 ## 12. Feature flags (opt-out)
 
@@ -3313,10 +3396,10 @@ or `--finder-model`), else the project's settings in the app, else the built-in 
 nowhere else: no environment variable and no `.env` file picks a model, so a stray line in a local
 file cannot change which model a run uses or what it costs. In the app there are no flags, so the
 project's setting, else the built-in default, applies. The built-in defaults are Claude Sonnet 5.5 for the
-scan, Claude Opus 5.5 for calibration (stage 1), Claude Fable 5.2 for the group reviewer (stage 2) and
+scan, Claude Opus 5.5 for calibration (stage 1), Claude Opus 5.5 for the group reviewer (stage 2) and
 for the agent finder, Claude Sonnet 5.5 for the possible-duplicate check, Claude Haiku 5.5 for the fix
 wording (unless the `fix_on_haiku` measure is off) and, for the duplicate-code judge (the clone judge),
-the project's fast model band (Claude Haiku 5.5 unless the project's fast band says otherwise). A project saved before a model setting existed opens with these built-in defaults.
+the project's fast model band (Claude Haiku 5.5 unless the project's fast band says otherwise). A project saved before a model setting existed opens with these built-in defaults, except the finder: a project saved before the finder setting existed stays on Engine, and a new project starts on Agent.
 The review screen's Settings lane shows every one of these rows (§3a, "The Settings lane").
 
 #### L3 AI code review
@@ -3583,7 +3666,7 @@ glossary (`docs/CLIENT_PACKAGE.md`) defines the package columns.
   tables. **Confirmed**: it is real and it ships in the report. **Ignored**: accepted, with a reason
   (an Ignored row shows "Needs client confirmation" until the client acknowledges it, then "Accepted
   risk"). **Tech debt**: filed as a GitHub issue, resolve later or resolve now. **False positive**: the
-  tool was wrong; excluded from the report, never baselined, reason required. **Merged**: folded into
+  tool was wrong; left out of the problem lists, kept with the reason on the Ruled out sheet, never baselined, reason required. **Merged**: folded into
   another row (it stays in the tree). **Put back**: a row the engine threw out that the operator put
   back into review.
 - **Ruled out** (the workbook's word): looked at and not a problem. The Ruled out sheet holds what a
@@ -3631,7 +3714,7 @@ glossary (`docs/CLIENT_PACKAGE.md`) defines the package columns.
 - **Run what remains**: resume a saved run, sending only what is not stored.
 - **Client engagement**: a project mode that allows only the Anthropic API and Anthropic models and
   never runs the client's own code unless the operator opts in.
-- **Package**: the client export (PDF, Excel workbook, `findings.json`, CSV, tickets, manifest, README).
+- **Package**: the client export (PDF, Excel workbook, `json/inspection.json`, CSV, tickets, manifest, README).
 - **Release gate**: the check that refuses a package with a held row, a secret, a mismatch or an
   incomplete run.
 - **Tailored fix** and **Standard fix**: the two labels on every fix (§11a).

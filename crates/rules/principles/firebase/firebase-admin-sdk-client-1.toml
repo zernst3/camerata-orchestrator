@@ -1,5 +1,5 @@
 id = "FIREBASE-ADMIN-SDK-CLIENT-1"
-version = 2
+version = 3
 title = "The Firebase Admin SDK is imported only by server code, never by code that ships to a browser"
 domain = "firebase"
 layer = "platform"
@@ -24,7 +24,7 @@ title = "Learn about using and managing API keys for Firebase"
 [decision]
 question = "Is the Admin SDK imported by any code that ships to a browser?"
 default = "admin-sdk-stays-in-server-code"
-why = "The Admin SDK is for privileged server environments and is initialised with a service account that has full access to the project. Code that ships to a browser is public, so an Admin SDK import there either fails to build or ships the credentials. Firebase's setup guide asks for extremely high security awareness around the service account key."
+why = "The Admin SDK is for privileged server environments and is initialized with a service account that has full access to the project. Code that ships to a browser is public, so an Admin SDK import there either fails to build or ships the credentials. Firebase's setup guide asks for extremely high security awareness around the service account key."
 
 [[option]]
 id = "admin-sdk-stays-in-server-code"
@@ -39,4 +39,4 @@ id = "admin-sdk-imported-by-browser-code"
 violates = true
 label = "The Admin SDK is imported by code that ships to a browser"
 directive = "Import the Admin SDK in code that is bundled for the browser."
-why = "The Admin SDK is for privileged server environments. In a browser bundle it either fails to build or ships the service account credentials it is initialised with, which let anyone act as the project with full access."
+why = "The Admin SDK is for privileged server environments. In a browser bundle it either fails to build or ships the service account credentials it is initialized with, which let anyone act as the project with full access."

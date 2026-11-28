@@ -27,9 +27,11 @@ pub mod finding_context;
 pub mod finding_context_batch;
 pub mod greenfield;
 pub mod patterns_matrix;
+pub mod placeholder_paths;
 pub mod propose;
 pub(crate) mod redact;
 pub mod report;
+pub mod scope;
 pub mod self_ref;
 pub mod source_file;
 pub mod symbol_refs;
@@ -164,6 +166,13 @@ impl BookkeepingCaptures {
                 if *key == crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE
                     || *key == crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE
                 {
+                    continue;
+                }
+
+                // The birth mark of a model-written row stays: the evidence check reads it after
+                // this step, and held aside it would restore by row identity onto a floor row that
+                // shares the identity (#546).
+                if *key == evidence_check::MODEL_WRITTEN_CAPTURE {
                     continue;
                 }
 
@@ -818,6 +827,16 @@ pub struct CoverageNote {
 /// carries it.
 pub const REPOSITORY_READ_PASS: &str = "repository read";
 
+/// Split a repo's generated files into the ones the secret checks searched and the ones they did
+/// not: with the floor off `searched` is empty, and a file over the search ceiling or not text
+/// never got into it. Coverage words each group for what actually ran.
+pub(crate) fn split_generated_by_search(
+    generated: Vec<String>,
+    searched: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    generated.into_iter().partition(|p| searched.contains(p))
+}
+
 /// What a repo that could not be inspected leaves behind: see
 /// [`ScanReport::note_repo_not_inspected`]. Split into its three destinations so the scan loop,
 /// which holds them as separate locals, and the report method share one implementation.
@@ -1102,6 +1121,12 @@ pub struct ScanReport {
     /// report that speaks per repo reads. `#[serde(default)]` so an older report still loads.
     #[serde(default)]
     pub recommendations_by_repo: Vec<crate::ai_audit::RuleRecommendation>,
+    /// One convention record for each (repo, rule with options) the agent finder judged: the
+    /// options, the places recorded for each, the standard and the finder rows that cite the
+    /// rule (see [`crate::conventions`]). Empty for a report saved before the convention model;
+    /// [`crate::conventions::upgrade`] builds it from the recommendations when one is loaded.
+    #[serde(default)]
+    pub conventions: Vec<camerata_api_types::audit::RuleConvention>,
     /// Where services of one project differ on a rule: the rules violated in at least one repo
     /// and clean in at least one other, as an observation, never a finding (see
     /// [`patterns_matrix`]). Empty for a project of one repo. Rebuilt from the ledger and the
@@ -1232,11 +1257,15 @@ impl ScanReport {
             let cause = if self.ledger.is_outage_stopped() {
                 "the run stopped because the model provider could not be reached"
             } else if self.ledger.is_cost_capped() {
-                if self.ledger.cost_cap().is_some_and(|c| c.cost_unknown) {
-                    "the spend limit could not be enforced (a call's cost could not be \
-                     determined) and stopped the run"
-                } else {
-                    "the spend limit stopped the run"
+                match self.ledger.cost_cap() {
+                    Some(c) if c.cost_unknown => {
+                        "the spend limit could not be enforced (a call's cost could not be \
+                         determined) and stopped the run"
+                    }
+                    Some(c) if c.checkpoint.as_ref().is_some_and(|cp| cp.stopped) => {
+                        crate::cost_checkpoint::CAUSE_PROJECTED
+                    }
+                    _ => "the spend limit stopped the run",
                 }
             } else {
                 "the spend limit or an outage stopped the run"
@@ -1328,6 +1357,7 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
@@ -1370,6 +1400,7 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
@@ -1867,14 +1898,16 @@ fn note_unanswered_checker_rule(
 // ── Orchestration functions ───────────────────────────────────────────────────────
 pub async fn suppression_registry(
     sources: &[(String, std::path::PathBuf)],
+    scope: &scope::ScanScope,
 ) -> Vec<crate::suppression::SuppressionRecord> {
     use crate::suppression::{parse_inline_waivers, registry, Baseline, FindingRef};
     let mut out = Vec::new();
     for (spec, dir) in sources {
         let spec = spec.as_str();
         let dir = dir.clone();
+        let repo_scope = scope.for_repo(spec);
         let Ok(Ok(extracted)) =
-            tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await
+            tokio::task::spawn_blocking(move || read_local_repo_files(&dir, &repo_scope)).await
         else {
             continue;
         };
@@ -1909,6 +1942,7 @@ pub async fn suppression_registry(
 pub async fn scan_repos(
     sources: &[(String, std::path::PathBuf)],
     extra_notes: Vec<String>,
+    scope: &scope::ScanScope,
 ) -> ScanReport {
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
@@ -1926,7 +1960,8 @@ pub async fn scan_repos(
             continue;
         }
         let dir = dir.clone();
-        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await {
+        let repo_scope = scope.for_repo(spec);
+        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir, &repo_scope)).await {
             Ok(Ok(extracted)) => {
                 let ExtractedRepo {
                     files,
@@ -2357,6 +2392,12 @@ pub async fn audit_repos_with_llm_controlled(
     // by path, for the Coverage section.
     // Bounded: the first paths per reason are named, the rest counted (`SkippedFileList`).
     let mut skipped_files_total = crate::scan_ledger::SkippedFileList::default();
+    // Per repo whose floor ran: (files searched for secrets only, over the secret search ceiling,
+    // over the size limit but not text). Recorded into the ledger beside the skipped files.
+    // The fourth figure is the files the run's secret search budget left unsearched.
+    let mut secret_search_totals: Vec<(usize, usize, usize, usize)> = Vec::new();
+    // Bytes of over-limit files the secret search has opened so far in this run, all repos.
+    let mut secret_search_bytes_used: u64 = 0;
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
@@ -2375,6 +2416,8 @@ pub async fn audit_repos_with_llm_controlled(
     > = std::collections::BTreeMap::new();
     // Repos the scan could not read: see `ScanReport::repos_not_inspected`.
     let mut repos_not_inspected: Vec<(String, String)> = Vec::new();
+    // The convention records of every repo the agent finder judged.
+    let mut all_conventions: Vec<camerata_api_types::audit::RuleConvention> = Vec::new();
     // How many repos had a whole-repo AI failure, beyond the first.
     let mut ai_error_repos = 0usize;
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
@@ -2523,10 +2566,12 @@ pub async fn audit_repos_with_llm_controlled(
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
+        // The project's exclusion list, bound to this repo: the walk never reads a file on it.
+        let repo_scope = controls.scope.for_repo(spec);
         // The excluded-noise line count (22c) is read in the same blocking task, through the
         // function `camerata count` uses (`count::excluded_noise_lines`).
         match tokio::task::spawn_blocking(move || {
-            read_local_repo_files(&dir).map(|extracted| {
+            read_local_repo_files(&dir, &repo_scope).map(|extracted| {
                 let noise_lines =
                     count::excluded_noise_lines(&dir, &extracted.excluded_noise_paths);
                 (extracted, noise_lines)
@@ -2542,19 +2587,102 @@ pub async fn audit_repos_with_llm_controlled(
                     truncated,
                     reference_truncated,
                     skipped_oversize,
+                    secret_searchable,
                     skipped_beyond_cap,
                     skipped_unreadable,
+                    skipped_long_line,
+                    long_line_contents,
                     skipped_sizes,
+                    matched_patterns,
                     file_cap,
                     excluded_noise,
                     excluded_noise_paths: _,
+                    excluded_by_agreement,
+                    generated,
+                    not_inspected,
+                    symlinks,
+                    names_not_text,
+                    unclassified_types: _,
                 },
                 noise_lines,
             )) => {
                 // H9: the path-only floor rules still run over every file the walk named but
                 // could not read: a 2 MB `.pem` or a binary `.p12` is a secret file by its name.
+                // A long-line file is not here: `long_line_contents` carries its text, and the
+                // secret-shaped rules (path included) run over it below, so it is scanned once.
+                //
+                // A file over the file size limit and not over the secret search ceiling is
+                // opened here, one at a time, for the secret-shaped rules only: never read for
+                // the inspection, sent to a model, billed or counted, and never kept. One that
+                // is searched is not in `unread_paths` (the secret pass includes the path rules,
+                // so it would be reported twice); one that is not text stays name-only.
+                let mut secret_searched_oversize: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut oversize_secret_findings: Vec<Finding> = Vec::new();
+                let mut oversize_not_text = 0usize;
+                let mut oversize_grown = 0usize;
+                if run_deterministic {
+                    // A file that declares itself generated is searched the same way: its
+                    // contents are never read for the inspection, but a key baked into it is
+                    // a normal finding. Both kinds spend the run's one byte budget, in path
+                    // order; what does not fit is checked by name only.
+                    let candidates: Vec<String> = secret_searchable
+                        .iter()
+                        .chain(&generated)
+                        .cloned()
+                        .collect();
+                    let (to_search, over_budget) = files::plan_secret_search(
+                        &candidates,
+                        &skipped_sizes,
+                        &mut secret_search_bytes_used,
+                        files::MAX_SECRET_SEARCH_TOTAL_BYTES,
+                    );
+                    // The ledger's over-budget count is over-limit files; a generated file left
+                    // unsearched is counted by its own line (`split_generated_by_search`).
+                    let oversize_over_budget = over_budget
+                        .iter()
+                        .filter(|p| secret_searchable.contains(p))
+                        .count();
+                    for rel in &to_search {
+                        let (root, path) = (repo_root_for_history.clone(), rel.clone());
+                        let repo_name = spec.to_string();
+                        let read =
+                            tokio::task::spawn_blocking(
+                                move || match files::read_for_secret_search(&root, &path) {
+                                    files::SecretRead::Text(text) => {
+                                        Ok(audit::secret_findings_in(&repo_name, &path, &text))
+                                    }
+                                    other => Err(other),
+                                },
+                            )
+                            .await
+                            .unwrap_or(Err(files::SecretRead::NotText));
+                        match read {
+                            Ok(mut found) => {
+                                audit::enrich_secret_context(&mut found, &files);
+                                oversize_secret_findings.extend(found);
+                                secret_searched_oversize.insert(rel.clone());
+                            }
+                            // Grew past the ceiling after the walk: name-only, like the rest.
+                            Err(files::SecretRead::OverCeiling) => oversize_grown += 1,
+                            Err(_) => oversize_not_text += 1,
+                        }
+                    }
+                    secret_search_totals.push((
+                        secret_searched_oversize.len() + skipped_long_line.len(),
+                        skipped_oversize.len() - secret_searchable.len() + oversize_grown,
+                        oversize_not_text,
+                        oversize_over_budget,
+                    ));
+                }
                 let unread_paths: Vec<String> = skipped_oversize
                     .iter()
+                    .filter(|p| !secret_searched_oversize.contains(*p))
+                    .chain(
+                        generated
+                            .iter()
+                            .filter(|p| !secret_searched_oversize.contains(*p)),
+                    )
                     .chain(&skipped_beyond_cap)
                     .chain(&skipped_unreadable)
                     .cloned()
@@ -2563,12 +2691,41 @@ pub async fn audit_repos_with_llm_controlled(
                 files_excluded_total += excluded_noise;
                 excluded_noise_lines_total += noise_lines;
                 any_repo_read = true;
+                // A pattern for this repo that matched nothing because its folder is never read
+                // is listed by the pattern, marked as having removed nothing read or billed.
+                let never_read_patterns: Vec<String> = controls
+                    .scope
+                    .patterns()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, p)| {
+                        !matched_patterns.contains(i)
+                            && (scope::names_any_repo(p)
+                                || scope::target_repo(p, std::slice::from_ref(&spec.to_string()))
+                                    .is_some())
+                            && scope::never_read_folder(p, std::slice::from_ref(&spec.to_string()))
+                                .is_some()
+                    })
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                // A generated file is "searched" only when the secret pass opened it; with the
+                // floor off, over the search ceiling or not text it is named, not searched.
+                let (generated, generated_unsearched) =
+                    split_generated_by_search(generated, &secret_searched_oversize);
                 skipped_files_total.record_repo(
                     spec,
                     crate::scan_ledger::RepoSkips {
+                        generated_unsearched,
+                        not_inspected_type: not_inspected,
+                        excluded_never_read: never_read_patterns,
                         oversize: skipped_oversize,
                         beyond_cap: skipped_beyond_cap,
                         not_text: skipped_unreadable,
+                        excluded_by_agreement,
+                        long_line: skipped_long_line,
+                        generated,
+                        symlink: symlinks,
+                        name_not_text: names_not_text,
                         sizes: &skipped_sizes,
                         file_cap,
                     },
@@ -2681,6 +2838,12 @@ pub async fn audit_repos_with_llm_controlled(
                     }
                     let mut floor = audit_files(spec, &files);
                     floor.extend(audit::audit_unread_paths(spec, &unread_paths, &files));
+                    floor.extend(audit::audit_long_line_secrets(
+                        spec,
+                        &long_line_contents,
+                        &files,
+                    ));
+                    floor.extend(oversize_secret_findings);
                     // P4: the ONE context fact that needs real git plumbing (whether a
                     // committed secret also appears in an EARLIER commit) rather than just
                     // the already-fetched file set `audit_files` works from — see
@@ -2732,7 +2895,7 @@ pub async fn audit_repos_with_llm_controlled(
                             &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
                         );
                     }
-                    // Reference text (HTML, components, docs) is handed to the architectural
+                    // Reference text (generated code) is handed to the architectural
                     // tier ONLY, and only when an armed rule needs it: the AI digest and the
                     // secrets floor above and below keep reading `files` alone.
                     let arch_armed = architectural::withhold_on_incomplete_scan(
@@ -3166,17 +3329,27 @@ pub async fn audit_repos_with_llm_controlled(
                         let audited = if controls.finder
                             == crate::ai_audit::agent_finder::FinderChoice::Agent
                         {
-                            match Box::pin(crate::ai_audit::agent_finder::run::find_repo_for_run(
-                                llm,
-                                spec,
-                                &part.changed,
-                                &audit_rules,
-                                corpus,
-                                &controls,
-                                chosen_options,
-                                &backend_resolution,
-                                Some(&meter),
-                            ))
+                            match Box::pin(
+                                crate::ai_audit::agent_finder::run::with_finder_activity(
+                                    feedback.map(|(store, key)| {
+                                        crate::ai_audit::agent_finder::run::FinderActivity::new(
+                                            store.clone(),
+                                            key,
+                                        )
+                                    }),
+                                    crate::ai_audit::agent_finder::run::find_repo_for_run(
+                                        llm,
+                                        spec,
+                                        &part.changed,
+                                        &audit_rules,
+                                        corpus,
+                                        &controls,
+                                        chosen_options,
+                                        &backend_resolution,
+                                        Some(&meter),
+                                    ),
+                                ),
+                            )
                             .await
                             {
                                 Ok((found, rules, recs, failed_parts, samples, extras)) => {
@@ -3353,6 +3526,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 // complete (a rule with no answer, a file nobody reviewed): marked
                                 // partial now that their entries exist, so none reads clean.
                                 if let Some(extras) = &finder_extras {
+                                    all_conventions.extend(extras.conventions.iter().cloned());
                                     extras.note_after_rules(&mut pipeline_ledger, spec);
                                     for note in &extras.notes {
                                         meter.record_note(format!("{spec}: {note}"));
@@ -3383,7 +3557,8 @@ pub async fn audit_repos_with_llm_controlled(
                                     let kind = match group.scope {
                                         crate::scan_routing::Scope::Language(_) => "language",
                                         crate::scan_routing::Scope::Declared { .. } => "declared",
-                                        crate::scan_routing::Scope::All => continue,
+                                        crate::scan_routing::Scope::All
+                                        | crate::scan_routing::Scope::AllWith(_) => continue,
                                     };
                                     let evaluated = crate::scan_routing::files_in_scope(
                                         &part.changed,
@@ -3656,6 +3831,7 @@ pub async fn audit_repos_with_llm_controlled(
                             crate::ai_audit::stage_batch::StageRoute {
                                 batch: mode == crate::ai_audit::ScanMode::Batch,
                                 job,
+                                feedback,
                             },
                         )
                         .await;
@@ -3782,6 +3958,18 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.recommendations_by_repo = recommendations.into_values().collect();
+    let mut conventions_block =
+        crate::scan_ledger::ConventionsBlock::from_records(&all_conventions, &report.findings);
+    // The independent check: a finder row the records counted must still be a row, an absorbed
+    // place or a set-aside row. A gap is disclosed, never silent (no open violations).
+    let lost_finder_rows = conventions_block.check_finder_rows_kept(
+        &all_conventions,
+        &report.findings,
+        &report.discarded,
+    );
+    #[cfg(any(test, feature = "test-support"))]
+    let lost_finder_rows = crate::test_defects::lost_finder_rows(lost_finder_rows);
+    report.conventions = all_conventions;
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
     // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
@@ -3803,6 +3991,11 @@ pub async fn audit_repos_with_llm_controlled(
     // ("N rules could not be mechanically checked...") directly from the ledger instead of
     // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
+    if let Some(failure) =
+        crate::scan_ledger::convention_accounting_failure(&repo_label, &lost_finder_rows)
+    {
+        all_failed_passes.push(failure);
+    }
     for stage in pipeline_ledger.stages() {
         // A stage that ran over one repo is disclosed against that repo, not the whole project.
         let label = stage.disclosure_label(&repo_label);
@@ -3811,6 +4004,7 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.ledger = pipeline_ledger;
+    report.ledger.record_conventions(conventions_block);
     if let Some(carry) = incremental_carry.finish() {
         report.ledger.record_incremental(carry);
     }
@@ -3871,6 +4065,9 @@ pub async fn audit_repos_with_llm_controlled(
     // Computed once and shared with provenance below, so the gate and the export can never
     // disagree about whether a model ran.
     let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
+    for (searched, over_ceiling, not_text, over_budget) in &secret_search_totals {
+        skipped_files_total.record_secret_search(*searched, *over_ceiling, *not_text, *over_budget);
+    }
     let skipped_totals = skipped_files_total.totals();
     let file_cap_hits = skipped_files_total.file_cap_hits();
     let (skipped_files, skipped_beyond_cap_total) = skipped_files_total.finish();
@@ -3965,8 +4162,9 @@ fn fold_spend_records(
         all_failed_passes.extend(cap.failed_passes());
         if cap.stopped_the_run() {
             notes.push(format!(
-                "INCOMPLETE: the spend limit stopped this scan; {} scan pass(es) and {} stage(s) \
+                "INCOMPLETE: {}; {} scan pass(es) and {} stage(s) \
                  did not run (see the list of passes that did not run)",
+                cap.cause(),
                 cap.not_run_passes.len(),
                 cap.not_run_stages.len()
             ));
@@ -4101,6 +4299,17 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 mod tests {
     use super::*;
 
+    /// The rules table in the UI keeps its own copy of the floor ids so it can tell an inline
+    /// floor rule from a corpus rule that has not loaded. The two lists must stay equal.
+    #[test]
+    fn the_ui_inline_floor_ids_equal_the_audit_rules() {
+        assert_eq!(
+            camerata_ui_core::rules::INLINE_AUDIT_RULE_IDS,
+            AUDIT_RULES,
+            "update camerata_ui_core::rules::INLINE_AUDIT_RULE_IDS to match onboard::AUDIT_RULES"
+        );
+    }
+
     /// A batch the provider lost, or a submission it may have accepted and orphaned, is spend the
     /// ledger cannot count. The notes about it reach the ledger whether or not a limit was set.
     #[test]
@@ -4123,6 +4332,92 @@ mod tests {
         assert!(
             failed.is_empty() && notes.is_empty(),
             "a note is not a failure"
+        );
+    }
+
+    /// The note on an incomplete scan names what really stopped it, from the cap's own cause: a
+    /// checkpoint pause and an unknown cost are not "the spend limit stopped this scan".
+    #[tokio::test]
+    async fn the_incomplete_note_names_the_real_cause_of_the_stop() {
+        fn capped() -> crate::ai_audit::UsageMeter {
+            crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls {
+                scope: Default::default(),
+                max_cost_usd: Some(20.0),
+                ..crate::cost_cap::RunControls::default()
+            })
+        }
+        fn reply(model: &str, cost: Option<f64>) -> crate::llm::LlmResponse {
+            crate::llm::LlmResponse {
+                reported_model: None,
+                cli_cost_usd: None,
+                elapsed_ms: None,
+                text: String::new(),
+                model: model.to_string(),
+                backend: "api".to_string(),
+                cost_usd: cost,
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            }
+        }
+        async fn note_of(meter: &crate::ai_audit::UsageMeter) -> String {
+            assert!(meter.admit_for_stage("acme/api", "fix").await.is_err());
+            let mut ledger = crate::scan_ledger::ScanLedger::new();
+            let (mut failed, mut notes) = (Vec::new(), Vec::new());
+            fold_spend_records(&mut ledger, meter, &mut failed, &mut notes);
+            notes.join(" | ")
+        }
+
+        // Checkpoint pause.
+        let paused = capped();
+        paused.seed_checkpoint_stop(&crate::cost_checkpoint::CostCheckpoint {
+            approved_usd: 10.0,
+            spent_usd: 1.0,
+            projected_usd: 15.0,
+            pieces_done: 1,
+            pieces_left: 3,
+            stopped: true,
+            new_estimate_usd: Some(15.0),
+            difference_usd: Some(5.0),
+            stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
+        });
+        let note = note_of(&paused).await;
+        assert!(
+            note.contains(crate::cost_checkpoint::CAUSE_PROJECTED),
+            "{note}"
+        );
+        assert!(
+            !note.contains("the spend limit stopped this scan"),
+            "{note}"
+        );
+
+        // Unknown cost.
+        let unknown = capped();
+        unknown.record_stage(
+            crate::stage_telemetry::Stage::Finder,
+            &reply("claude-from-the-future", None),
+        );
+        let note = note_of(&unknown).await;
+        assert!(note.contains("could not be enforced"), "{note}");
+        assert!(
+            !note.contains("the spend limit stopped this scan"),
+            "{note}"
+        );
+
+        // A limit really reached keeps its words.
+        let reached = capped();
+        reached.record_stage(
+            crate::stage_telemetry::Stage::Finder,
+            &reply("claude-sonnet-5-5", Some(25.0)),
+        );
+        let note = note_of(&reached).await;
+        assert!(
+            note.contains("the spend limit set for this run was reached"),
+            "{note}"
         );
     }
 
@@ -4284,7 +4579,10 @@ mod tests {
 
         let got = capture_audited_ref("acme/app", &repo).await;
         let _ = commits_touching_path(&repo, "a.txt").await;
-        let _ = crate::onboard::files::read_local_repo_files(&repo);
+        let _ = crate::onboard::files::read_local_repo_files(
+            &repo,
+            &crate::onboard::scope::RepoScope::none(),
+        );
         assert!(got.sha.is_some());
         assert!(
             !marker.exists(),
@@ -4523,6 +4821,53 @@ mod tests {
         );
     }
 
+    /// #546: the birth mark of a model-written row survives the held-aside step, so the evidence
+    /// check that follows it (as the scan calls it) still knows the row is model-written, even
+    /// under a floor rule id the ledger lists as deterministic.
+    #[test]
+    fn a_model_row_under_a_floor_rule_id_is_still_held_by_the_check_after_the_held_aside_step() {
+        let dir =
+            std::env::temp_dir().join(format!("camerata-pipeline-546-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/excluded.rs"), "fn a() { db.execute(q); }\n").unwrap();
+        let mut row = Finding {
+            repo: "acme/shop".to_string(),
+            path: "src/excluded.rs".to_string(),
+            line: 0,
+            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            snippet: "db.execute(q);".to_string(),
+            ..Finding::default()
+        };
+        row.captures.insert(
+            evidence_check::MODEL_WRITTEN_CAPTURE.to_string(),
+            "1".to_string(),
+        );
+        let mut ledger = crate::scan_ledger::ScanLedger::default();
+        ledger.record_rule(
+            "acme/shop",
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            1,
+            1,
+        );
+        let mut rows = vec![row];
+        BookkeepingCaptures::default().take(&mut rows);
+        assert!(rows[0]
+            .captures
+            .contains_key(evidence_check::MODEL_WRITTEN_CAPTURE));
+        let admitted = vec![("src/a.rs".to_string(), "fn b() {}\n".to_string())];
+        evidence_check::verify_and_record(&mut ledger, &mut rows, &admitted, Some(&dir));
+        assert!(
+            rows[0]
+                .captures
+                .contains_key(evidence_check::EVIDENCE_UNVERIFIED_CAPTURE),
+            "{:?}",
+            rows[0].captures
+        );
+    }
+
     /// A capture that records bookkeeping (a severity-adjustment sentence, a history status, the
     /// producer, the carried-from commit) must not read as "the same captured object": two
     /// unrelated findings in different files that share one stay separate rows through the merge
@@ -4698,10 +5043,11 @@ mod tests {
         fs::create_dir_all(base.join("src")).unwrap();
         fs::create_dir_all(base.join("node_modules/x")).unwrap();
         fs::write(base.join("src/main.rs"), "fn main() {}\n").unwrap();
-        fs::write(base.join("README.md"), "# readme").unwrap(); // not a code ext -> skipped
+        fs::write(base.join("logo.png"), "# readme").unwrap(); // not an inspected type -> skipped
         fs::write(base.join("node_modules/x/index.js"), "noise").unwrap(); // noise dir -> skipped
 
-        let extracted = read_local_repo_files(&base).unwrap();
+        let extracted =
+            read_local_repo_files(&base, &crate::onboard::scope::RepoScope::none()).unwrap();
         let files = extracted.files;
         let _ = fs::remove_dir_all(&base);
 
@@ -6194,6 +6540,305 @@ mod tests {
         .unwrap();
         let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
         (dir, sources)
+    }
+
+    /// Fix A (round 3): a file with a line longer than the room's read page is not read, billed
+    /// or counted, but the secrets floor still scans its content. One synthetic minified file
+    /// holds a vendor-token-shaped string, and a one-line `.pem` proves the path-only rule is
+    /// not reported twice (once from the unread paths, once from the long-line pass).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_long_line_file_still_gets_the_secrets_floor_once_with_bounded_evidence() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::create_dir_all(dir.path().join("certs")).unwrap();
+        std::fs::write(dir.path().join("lib/ok.rs"), "fn ok() {}\n").unwrap();
+        let token = "ghp_0123456789012345678901234567890123456";
+        let wide = format!(
+            "var a=1;{}var t=\"{token}\";{}\n",
+            "x".repeat(60_000),
+            "y".repeat(60_000)
+        );
+        assert!(wide.len() > crate::ai_audit::agent_finder::room::MAX_READ_LINE_BYTES);
+        std::fs::write(dir.path().join("lib/wide.js"), &wide).unwrap();
+        std::fs::write(
+            dir.path().join("certs/server.pem"),
+            format!("{}\n", "A".repeat(100_500)),
+        )
+        .unwrap();
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        // Not read, not counted.
+        assert_eq!(
+            report.files_scanned, 1,
+            "only lib/ok.rs is read and counted"
+        );
+        let hits: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "lib/wide.js" && f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .collect();
+        assert_eq!(hits.len(), 1, "one vendor-token finding: {hits:?}");
+        let hit = hits[0];
+        assert!(hit.snippet.chars().count() <= 160, "snippet is capped");
+        assert!(!hit.snippet.contains(token), "snippet is redacted");
+        assert!(hit.captures.contains_key("secret-kind"), "enriched");
+        assert!(hit.effort.is_some());
+        assert_eq!(hit.repo, "me/api");
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains(token), "no raw token anywhere in the report");
+        assert!(
+            !json.contains(&"x".repeat(2_000)),
+            "the long line never travels whole into the report"
+        );
+        // Only secret-shaped rules run over a long-line file.
+        assert!(report
+            .findings
+            .iter()
+            .filter(|f| f.path == "lib/wide.js")
+            .all(|f| audit::SECRET_SHAPED_RULES.contains(&f.rule_id.as_str())));
+        // The path-only rule is reported exactly once for the one-line `.pem`.
+        let pem = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "certs/server.pem" && f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .count();
+        assert_eq!(pem, 1, "the path-only rule must not be reported twice");
+        // Still listed as a long-line file under Coverage data.
+        let ledger = serde_json::to_value(&report.ledger).unwrap();
+        let skipped = ledger["input"]["skipped_files"].to_string();
+        assert!(
+            skipped.contains("lib/wide.js") && skipped.contains("long_line"),
+            "still listed as long-line: {skipped}"
+        );
+    }
+
+    /// Fix D (V1 item 38): the secret checks search the contents of files over the 1 MB file size
+    /// limit up to the 20 MB ceiling. A 2 MB text file with a planted fake token gives one masked
+    /// finding with its path and line; a 21 MB file and a 2 MB binary key store get file-name
+    /// checks only, and Coverage says so. None of them is read for the inspection or counted.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn secret_checks_search_over_limit_files_up_to_the_ceiling() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(dir.path().join("keys")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn ok() {}\n").unwrap();
+        // A text key file over the limit: searched, and its name rule is reported once.
+        std::fs::write(dir.path().join("keys/server.pem"), "AAAA\n".repeat(250_000)).unwrap();
+        let token = "ghp_0123456789012345678901234567890123456";
+        let mut big = "var row = 1;\n".repeat(4_999);
+        big.push_str(&format!("var t = \"{token}\";\n"));
+        big.push_str(&"var row = 1;\n".repeat(150_000));
+        assert!(big.len() > files::MAX_FILE_BYTES && big.len() < files::MAX_SECRET_SCAN_BYTES);
+        std::fs::write(dir.path().join("data/dump.js"), &big).unwrap();
+        let mut huge = format!("var t = \"{token}\";\n").into_bytes();
+        huge.resize(files::MAX_SECRET_SCAN_BYTES + 1_024, b'x');
+        std::fs::write(dir.path().join("data/huge.js"), huge).unwrap();
+        std::fs::write(
+            dir.path().join("keys/store.p12"),
+            vec![0xFFu8; files::MAX_FILE_BYTES + 4_096],
+        )
+        .unwrap();
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert_eq!(report.files_scanned, 1, "only lib.rs is read and counted");
+        let hits: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "data/dump.js" && f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "one masked finding in the 2 MB file: {hits:?}"
+        );
+        assert_eq!(hits[0].line, 5_000, "with its line");
+        assert!(!hits[0].snippet.contains(token), "snippet is redacted");
+        assert!(hits[0].snippet.chars().count() <= 160, "snippet is bounded");
+        assert!(
+            !serde_json::to_string(&report).unwrap().contains(token),
+            "no raw token anywhere in the report"
+        );
+        assert!(
+            !report.findings.iter().any(|f| f.path == "data/huge.js"),
+            "a file over 20 MB is name-only: no content finding"
+        );
+        let p12 = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "keys/store.p12" && f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .count();
+        assert_eq!(
+            p12, 1,
+            "a binary over-limit file is flagged once by its name"
+        );
+        let pem = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "keys/server.pem" && f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .count();
+        assert_eq!(pem, 1, "a searched file is not flagged twice by its name");
+        let summary = crate::report_export::coverage_gaps::coverage_gaps(&report)
+            .skipped_summary
+            .expect("skipped files are summarised");
+        assert_eq!(
+            summary,
+            "4 files were not read for the inspection: 4 over the 1 MB file size limit. \
+             2 of these files were still searched for secrets. \
+             2 files were not searched for secrets: 1 over 20 MB, 1 not UTF-8 text."
+        );
+    }
+
+    /// The secret search has a total byte budget per run. Eleven 19 MB files (sparse, so the test
+    /// writes almost nothing) are 209 MB: ten are searched in path order (190 MB) and the last is
+    /// not, so a token planted in it is NOT found, and the ledger counts it as not searched.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_secret_search_stops_at_the_run_budget_and_says_which_files_it_left() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn ok() {}\n").unwrap();
+        let token = "ghp_0123456789012345678901234567890123456";
+        for i in 0..=10 {
+            let path = dir.path().join(format!("d{i:02}.js"));
+            std::fs::write(&path, format!("var t = \"{token}\";\n")).unwrap();
+            let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.set_len(19 * 1024 * 1024).unwrap();
+        }
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        let token_rule = |path: &str| {
+            report
+                .findings
+                .iter()
+                .any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+        };
+        assert!(
+            token_rule("d09.js"),
+            "the tenth file in path order is searched"
+        );
+        assert!(
+            !token_rule("d10.js"),
+            "the eleventh is past the budget: not searched"
+        );
+        let ledger = serde_json::to_string(&report.ledger).unwrap();
+        assert!(ledger.contains("\"secret_over_budget\":1"), "{ledger}");
+        assert!(ledger.contains("\"secret_searched\":10"), "{ledger}");
+    }
+
+    /// An agreed exclusion wins over the secret search too: an excluded over-limit file is never
+    /// opened, so it is not even a candidate for the secret checks.
+    #[test]
+    fn an_agreed_exclusion_keeps_an_over_limit_file_out_of_the_secret_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::write(
+            dir.path().join("data/dump.js"),
+            "var a = 1;\n".repeat(150_000),
+        )
+        .unwrap();
+        let open = read_local_repo_files(dir.path(), &scope::RepoScope::none()).unwrap();
+        assert_eq!(open.secret_searchable, ["data/dump.js"]);
+        let scope = scope::ScanScope::from_patterns(&["api/data/dump.js".to_string()])
+            .unwrap()
+            .for_repo("me/api");
+        let extracted = read_local_repo_files(dir.path(), &scope).unwrap();
+        assert!(extracted.secret_searchable.is_empty());
+        assert!(extracted.skipped_oversize.is_empty());
+        assert_eq!(extracted.excluded_by_agreement, ["data/dump.js"]);
+    }
+
+    /// An agreed exclusion wins over every class: a long-line file excluded by agreement is
+    /// never read, so no secrets pass runs over it.
+    #[test]
+    fn an_agreed_exclusion_keeps_a_long_line_file_out_of_the_secrets_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        let wide = format!(
+            "{}ghp_0123456789012345678901234567890123456{}\n",
+            "x".repeat(60_000),
+            "y".repeat(60_000)
+        );
+        std::fs::write(dir.path().join("lib/wide.js"), wide).unwrap();
+        let scope = scope::ScanScope::from_patterns(&["api/lib/wide.js".to_string()])
+            .unwrap()
+            .for_repo("me/api");
+        let extracted = read_local_repo_files(dir.path(), &scope).unwrap();
+        assert!(extracted.long_line_contents.is_empty());
+        assert!(extracted.skipped_long_line.is_empty());
+        assert_eq!(extracted.excluded_by_agreement, ["lib/wide.js"]);
+        assert!(
+            audit::audit_long_line_secrets("me/api", &extracted.long_line_contents, &[]).is_empty()
+        );
     }
 
     /// The removed "must choose an alternative before arming" gate (2026-09-22 design,
@@ -7779,7 +8424,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("secrets.env")),
@@ -7789,6 +8435,212 @@ mod tests {
             paths.iter().any(|p| p.contains("main.rs")),
             "src/main.rs must appear in scan: {paths:?}"
         );
+    }
+
+    /// Run `git add -f` for `paths` (a gitignored link is staged on purpose).
+    fn git_add_force(dir: &std::path::Path, paths: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["add", "-f"])
+            .args(paths)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git add failed");
+        assert!(status.success(), "git add -f must succeed for {paths:?}");
+    }
+
+    /// A tracked symbolic link is never read through: not to a file in the repository, not to a
+    /// folder, not to a file outside the repository, not to nothing. Each is listed as a symbolic
+    /// link, and the line total counts only the real files.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_symlink_is_listed_and_never_read_or_counted() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.rs"), "fn leaked_outside() {}\n").unwrap();
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        git_init(&root);
+        std::fs::write(root.join(".gitignore"), "ignored-link.rs\n").unwrap();
+        std::fs::write(root.join("src/real.rs"), "fn real() {}\n").unwrap();
+        std::fs::write(root.join("lib/a.rs"), "fn lib_a() {}\n").unwrap();
+        symlink("real.rs", root.join("src/inside-link.rs")).unwrap();
+        symlink(outside.join("secret.rs"), root.join("src/outside-link.rs")).unwrap();
+        symlink("../lib", root.join("src/folder-link")).unwrap();
+        symlink(
+            base.path().join("acme-nothing.rs"),
+            root.join("src/dangling.rs"),
+        )
+        .unwrap();
+        symlink(outside.join("secret.rs"), root.join("ignored-link.rs")).unwrap();
+        git_add(
+            &root,
+            &[
+                ".gitignore",
+                "src/real.rs",
+                "lib/a.rs",
+                "src/inside-link.rs",
+                "src/outside-link.rs",
+                "src/folder-link",
+                "src/dangling.rs",
+            ],
+        );
+        git_add_force(&root, &["ignored-link.rs"]);
+
+        let extracted =
+            read_local_repo_files(&root, &crate::onboard::scope::RepoScope::none()).expect("scan");
+        let mut paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            [".gitignore", "lib/a.rs", "src/real.rs"],
+            "only real files are read"
+        );
+        assert!(
+            extracted
+                .files
+                .iter()
+                .all(|(_, c)| !c.contains("leaked_outside")),
+            "a file outside the repository must not be read through a link"
+        );
+        assert_eq!(
+            extracted.symlinks,
+            [
+                "ignored-link.rs",
+                "src/dangling.rs",
+                "src/folder-link",
+                "src/inside-link.rs",
+                "src/outside-link.rs"
+            ],
+            "every link is listed, none dropped"
+        );
+        let real: Vec<(String, String)> = extracted
+            .files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".rs"))
+            .cloned()
+            .collect();
+        let (lines, _) = propose::count_source_lines(&real);
+        assert_eq!(lines, 2, "a link's target is never counted");
+        // It reaches Coverage under its own reason, with the client-facing label.
+        let mut list = crate::scan_ledger::SkippedFileList::default();
+        list.push(
+            "acme/repo",
+            "src/inside-link.rs".to_string(),
+            crate::scan_ledger::SkipReason::Symlink,
+        );
+        assert_eq!(list.totals().symlink, 1);
+        assert_eq!(
+            crate::scan_ledger::SkipReason::Symlink.label(),
+            "a symbolic link; what it points to is not read through it"
+        );
+    }
+
+    /// A tracked file whose folder is now a link (a dirty tree) is read through neither a link to
+    /// a folder outside the repository nor one inside it: each is listed as a symbolic link.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_file_under_a_folder_swapped_for_a_link_is_not_read_through_it() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("a.rs"), "fn leaked_outside() {}\n").unwrap();
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("dirout")).unwrap();
+        std::fs::create_dir_all(root.join("dirin")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        git_init(&root);
+        std::fs::write(root.join("dirout/a.rs"), "fn first() {}\n").unwrap();
+        std::fs::write(root.join("dirin/b.rs"), "fn second() {}\n").unwrap();
+        std::fs::write(root.join("lib/b.rs"), "fn lib_b() {}\n").unwrap();
+        git_add(&root, &["dirout/a.rs", "dirin/b.rs", "lib/b.rs"]);
+        // The tree is now dirty: both tracked folders became links.
+        std::fs::remove_dir_all(root.join("dirout")).unwrap();
+        std::fs::remove_dir_all(root.join("dirin")).unwrap();
+        symlink(&outside, root.join("dirout")).unwrap();
+        symlink(root.join("lib"), root.join("dirin")).unwrap();
+
+        let extracted =
+            read_local_repo_files(&root, &crate::onboard::scope::RepoScope::none()).expect("scan");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["lib/b.rs"],
+            "only the real file is read, under its own name"
+        );
+        assert!(extracted
+            .files
+            .iter()
+            .all(|(_, c)| !c.contains("leaked_outside")));
+        for listed in ["dirout/a.rs", "dirin/b.rs"] {
+            assert!(
+                extracted.symlinks.iter().any(|p| p == listed),
+                "{listed} must be listed: {:?}",
+                extracted.symlinks
+            );
+        }
+    }
+
+    /// The one check every reader of a repository file uses: a regular file whose real path is
+    /// the repository's path for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_inside_is_told_from_a_link_or_a_file_under_a_linked_folder() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let root = base.path().join("acme-repo");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("src/real.rs"), "x\n").unwrap();
+        std::fs::write(outside.join("o.rs"), "x\n").unwrap();
+        symlink(root.join("src/real.rs"), root.join("src/link.rs")).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        use files::is_regular_file_inside as inside;
+        assert!(inside(&root, &root.join("src/real.rs")));
+        assert!(!inside(&root, &root.join("src/link.rs")));
+        assert!(!inside(&root, &root.join("linked/o.rs")));
+        assert!(!inside(&root, &root.join("src/missing.rs")));
+        assert!(!inside(&root, &outside.join("o.rs")));
+        assert!(matches!(
+            files::read_for_secret_search(&root, "src/link.rs"),
+            files::SecretRead::NotText
+        ));
+    }
+
+    /// A path spelled differently from the disk only in case, or in the Unicode form of a name,
+    /// is the same file on a filesystem that folds them (macOS): it is read, not called a link.
+    /// The checks are skipped where the filesystem does not fold the spelling.
+    #[test]
+    fn a_spelling_that_differs_from_disk_is_a_file_not_a_link() {
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("Src")).unwrap();
+        std::fs::write(root.join("Src/Real.rs"), "x\n").unwrap();
+        let composed = "caf\u{e9}.rs";
+        let decomposed = "cafe\u{301}.rs";
+        std::fs::write(root.join(composed), "x\n").unwrap();
+        let mut checked = 0;
+        if root.join("src/real.rs").exists() {
+            checked += 1;
+            assert!(
+                files::is_regular_file_inside(&root, &root.join("src/real.rs")),
+                "a case-only difference is the same file"
+            );
+        }
+        if root.join(decomposed).exists() {
+            checked += 1;
+            assert!(
+                files::is_regular_file_inside(&root, &root.join(decomposed)),
+                "a decomposed name is the same file"
+            );
+        }
+        eprintln!("spelling checks run: {checked}");
     }
 
     #[test]
@@ -7809,7 +8661,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         // The .env is NOT in .gitignore → must be scanned.
         assert!(
@@ -7934,7 +8787,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             paths.contains(&".env.production"),
@@ -7967,7 +8821,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("local-only.env")),
@@ -8016,7 +8871,8 @@ mod tests {
         )
         .expect("write .env.staging");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let findings = audit_files("test/repo", &extracted.files);
 
         for path in [
@@ -8083,7 +8939,8 @@ mod tests {
         std::fs::create_dir_all(&nm).expect("mkdir node_modules");
         std::fs::write(nm.join("index.js"), "module.exports = {};\n").expect("write noise");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let admitted_paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
 
         // File-count sanity: the benign config files WERE admitted (so an empty-findings
@@ -8155,7 +9012,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
-        let extracted = read_local_repo_files(root).expect("non-git fallback ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("non-git fallback ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("node_modules")),

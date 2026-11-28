@@ -53,6 +53,7 @@ fn report() -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string(), "acme/web".to_string()],
@@ -221,7 +222,7 @@ fn gate6_one_corrupted_byte_in_any_exported_file_is_caught_and_localized() {
     let targets: Vec<&String> = original.keys().filter(|n| *n != "manifest.json").collect();
     assert!(
         targets.len() >= 6,
-        "pdf + xlsx + findings.json + README + csv + json expected: {targets:?}"
+        "pdf + xlsx + json/inspection.json + README + csv + json expected: {targets:?}"
     );
     for target in targets {
         let mut tampered = original.clone();

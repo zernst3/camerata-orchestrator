@@ -1,5 +1,5 @@
 id = "INTEGRATION-AUTH-SEAM-1"
-version = 3
+version = 4
 title = "Every UI-gated affordance maps to a guarded endpoint"
 domain = "integration"
 layer = "universal"
@@ -31,7 +31,7 @@ title = "CONVENTIONS.md: §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI 
 
 [decision]
 question = "How does the project verify that every UI affordance it gates on a permission maps to a producer endpoint that enforces that permission server-side?"
-why = "The classic authorization gap is a cross-agent inconsistency no per-agent gate catches: the UI agent hides a button behind a permission and ships a clean diff; the API agent ships a clean diff for an endpoint that enforces nothing; and the SEAM is wrong (the button is hidden but the endpoint is open). The integration tier is the only place positioned to enforce 'every gated affordance maps to a guarded endpoint.' The rule is RELATIONAL and PER-SEAM: it fires ONLY for affordances the UI actually gates. A public endpoint the UI does not gate is out of scope — no false positive — and an intentionally-public endpoint is waived per-endpoint."
+why = "The classic authorization gap is a cross-agent inconsistency no per-agent gate catches: the UI agent hides a button behind a permission and ships a clean diff; the API agent ships a clean diff for an endpoint that enforces nothing; and the SEAM is wrong (the button is hidden but the endpoint is open). The integration tier is the only place positioned to enforce 'every gated affordance maps to a guarded endpoint.' The rule is RELATIONAL and PER-SEAM: it fires ONLY for affordances the UI actually gates. A public endpoint the UI does not gate is out of scope (no false positive) and an intentionally-public endpoint is waived per-endpoint."
 
 [[option]]
 id = "reconcile-gated-affordance-to-guarded-endpoint"
@@ -41,7 +41,7 @@ remediation = """
 Add server-side authorization enforcement to the producer endpoint that the UI currently gates only client-side behind a permission check, so the guard exists on both sides of the seam. If the endpoint is genuinely meant to be open, remove the UI's permission gate instead so the affordance's visibility matches what the server actually allows. Verify by calling the endpoint directly, bypassing the UI and confirming it is rejected for a caller who lacks the permission.
 """
 effort = "medium"
-why = "Server-side authorization is a whole-system property, not a per-file one; the integration tier is the only gate that sees both the UI's gating and the endpoint's enforcement at once, so it can deterministically require that a hidden button maps to a guarded endpoint — while per-seam firing plus waivers keep a legitimately-public endpoint from becoming a false positive."
+why = "Server-side authorization is a whole-system property, not a per-file one; the integration tier is the only gate that sees both the UI's gating and the endpoint's enforcement at once, so it can deterministically require that a hidden button maps to a guarded endpoint, while per-seam firing plus waivers keep a legitimately-public endpoint from becoming a false positive."
 
 [[option]]
 id = "no-auth-seam-check"

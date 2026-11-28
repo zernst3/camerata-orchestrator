@@ -106,7 +106,7 @@ pub(super) fn routed_units(
                     ),
                     "no file in this scan's file set is one this rule applies to".to_string(),
                 ),
-                Scope::All => (
+                Scope::All | Scope::AllWith(_) => (
                     "pass[all]".to_string(),
                     "no files matched this scan's file set".to_string(),
                 ),
@@ -746,6 +746,9 @@ pub(crate) fn assign_deviation_kinds(
                 assessed_sites,
                 convention_option_id: Some(opt.id.clone()),
                 convention_label: opt.label.clone(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }));
         }
     }
@@ -896,6 +899,8 @@ pub(crate) fn conventions_observed_findings(
             kind: Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: opt.id.clone(),
                 convention_label: opt.label.clone(),
+                standard_source: None,
+                differs_from_default: None,
             })),
             ..Finding::default()
         };
@@ -958,6 +963,7 @@ pub(crate) fn no_convention_findings(
             located: false,
             kind: Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: rec.observed_options.clone(),
+                left_to_client: false,
             })),
             ..Finding::default()
         };

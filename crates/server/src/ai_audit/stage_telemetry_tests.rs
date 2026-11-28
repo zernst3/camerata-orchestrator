@@ -18,6 +18,7 @@ impl LlmPort for UsageStub {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: super::reply_schemas::check::address_by_id(&req.prompt, &self.text),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -72,6 +73,7 @@ fn record_stage_keeps_the_aggregate_equal_to_the_sum_of_the_stages() {
     let r = |cost| LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: "m".to_string(),
         backend: "api".to_string(),
@@ -108,6 +110,7 @@ fn a_wasted_attempt_is_attributed_to_its_stage_without_changing_the_aggregate() 
     let resp = LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: "m".to_string(),
         backend: "api".to_string(),
@@ -302,6 +305,7 @@ impl LlmPort for CutOffCalibration {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"severity":"hi"#.to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),

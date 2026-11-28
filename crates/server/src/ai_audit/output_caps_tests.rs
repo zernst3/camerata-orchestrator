@@ -120,6 +120,7 @@ impl LlmPort for ThinksUntilTheCap {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -286,6 +287,7 @@ async fn the_truncation_retry_raises_the_cap_and_is_never_the_same_request_twice
 
 fn capped_meter(cap: f64) -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(cap),
         ..crate::cost_cap::RunControls::default()
     })
@@ -302,6 +304,7 @@ fn paid_reply(model: &str, cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),
@@ -466,6 +469,7 @@ impl LlmPort for Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "claude-sonnet-5-5".to_string(),
             backend: "api".to_string(),
@@ -597,6 +601,7 @@ async fn the_re_ask_goes_through_the_spend_limit() {
     let llm = Scripted::new(vec![(cut, true)]);
     // A limit the first call has already reached.
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.005),
         ..crate::cost_cap::RunControls::default()
     });

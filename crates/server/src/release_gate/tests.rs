@@ -24,7 +24,7 @@ fn sealed_report() -> SealedReport {
     scan_report().seal()
 }
 
-pub(super) fn scan_report() -> ScanReport {
+pub(crate) fn scan_report() -> ScanReport {
     let findings = vec![Finding {
         repo: "acme/portal".to_string(),
         path: "src/db.rs".to_string(),
@@ -41,6 +41,7 @@ pub(super) fn scan_report() -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
@@ -229,7 +230,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
     assert_eq!(manifest["client_engagement"], true);
     assert_eq!(manifest["models"][0]["role"], "the scan");
     assert_eq!(manifest["models"][0]["model"], scan_model.as_str());
-    // The PDF and findings.json carry the backend on the report cover.
+    // The PDF and json/inspection.json carry the backend on the report cover.
     assert_eq!(
         package.report_json.cover.model_backend.as_deref(),
         Some("api (anthropic)")
@@ -436,13 +437,16 @@ fn release_passes_a_clean_package_and_reports_sixteen_checks() {
             "reviewer decision on restored findings",
             "reviewer decision on split-out problems",
             "reviewer correction on flagged findings",
+            "reviewer decision on critical and unsure findings",
             "confidentiality marking",
             "manifest",
             "provenance",
             "unsynced reviewer changes",
+            "reviewer decision on split rules",
             "one fix per row",
             "client text style",
-            "internal notes kept out"
+            "internal notes kept out",
+            "operator paths kept out"
         ]
     );
     assert_eq!(&z.bytes[0..2], b"PK");
@@ -458,9 +462,10 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
             "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
-             reviewer decision on split-out problems, reviewer correction on flagged findings, confidentiality marking, manifest, \
-             provenance, unsynced reviewer changes, one fix per row, client text style, internal \
-             notes kept out (all passed)"
+             reviewer decision on split-out problems, reviewer correction on flagged findings, \
+             reviewer decision on critical and unsure findings, confidentiality marking, manifest, \
+             provenance, unsynced reviewer changes, reviewer decision on split rules, one fix per \
+             row, client text style, internal notes kept out, operator paths kept out (all passed)"
         ),
         "{readme}"
     );
@@ -485,7 +490,7 @@ fn release_blocks_a_secret_planted_in_every_surface_with_an_exact_problem() {
         assert!(!problems.is_empty(), "{surface:?}: no secrets problem");
         let (file, location) = match surface {
             Surface::DataJson => ("PDF data (data.json)", "a_field_added_tomorrow.note"),
-            Surface::FindingsJson => ("findings.json", "a_field_added_tomorrow"),
+            Surface::FindingsJson => ("json/inspection.json", "a_field_added_tomorrow"),
             Surface::DatasetJson => ("json/deviations.json", "$[0].snippet"),
             Surface::DatasetCsv => ("csv/conventions.csv", "row 1, column \"snippet\""),
             Surface::XlsxSharedString => ("acme-inspection-findings.xlsx", "shared string #"),
@@ -532,7 +537,7 @@ fn secrets_check_walks_also_locations_not_a_named_field_list() {
     let failure = blocked(pkg);
     let locations: Vec<&str> = secret_problems(&failure)
         .iter()
-        .filter(|q| q.file == "findings.json")
+        .filter(|q| q.file == "json/inspection.json")
         .map(|q| q.location.as_str())
         .collect();
     for expected in [
@@ -611,7 +616,7 @@ fn release_reports_every_problem_not_just_the_first() {
         .iter()
         .map(|q| q.file.as_str())
         .collect();
-    for expected in ["PDF data (data.json)", "findings.json", "README.txt"] {
+    for expected in ["PDF data (data.json)", "json/inspection.json", "README.txt"] {
         assert!(
             files.contains(expected),
             "{expected} missing from {files:?}"
@@ -665,7 +670,7 @@ fn the_failure_block_has_the_documented_shape() {
         "EXPORT BLOCKED by the release gate for acme-inspection (1 problem)"
     );
     assert!(
-        display.contains("findings.json \u{203a} a_field_added_tomorrow"),
+        display.contains("json/inspection.json \u{203a} a_field_added_tomorrow"),
         "{display}"
     );
     assert!(
@@ -700,12 +705,12 @@ fn dataset_set_check_flags_a_missing_and_an_extra_dataset() {
 fn dataset_set_check_flags_a_pdf_without_the_magic_and_an_empty_findings_json() {
     let mut entries = entries_of(&released());
     entries.insert(format!("{STEM}.pdf"), b"not a pdf".to_vec());
-    entries.insert("findings.json".to_string(), Vec::new());
+    entries.insert("json/inspection.json".to_string(), Vec::new());
     let problems = dataset_set_problems(&entries);
     assert!(problems.iter().any(|q| q.message.contains("%PDF-")));
     assert!(problems
         .iter()
-        .any(|q| q.file == "findings.json" && q.message.contains("empty")));
+        .any(|q| q.file == "json/inspection.json" && q.message.contains("empty")));
 }
 
 #[test]
@@ -730,17 +735,17 @@ fn dataset_parity_check_flags_a_cell_disagreement() {
 #[test]
 fn dataset_parity_check_flags_findings_json_disagreeing_with_all_findings() {
     let mut entries = entries_of(&released());
-    let mut doc: Value = serde_json::from_slice(&entries["findings.json"]).expect("parses");
+    let mut doc: Value = serde_json::from_slice(&entries["json/inspection.json"]).expect("parses");
     doc["findings"][0]["severity"] = json!("tampered");
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec_pretty(&doc).expect("serializes"),
     );
     let problems = dataset_parity_problems(&entries);
     assert!(
         problems
             .iter()
-            .any(|q| q.file == "findings.json" && q.message.contains("all-findings")),
+            .any(|q| q.file == "json/inspection.json" && q.message.contains("all-findings")),
         "{problems:?}"
     );
 }
@@ -839,12 +844,12 @@ fn audit_zip_over_a_released_zip_is_clean() {
         "{:?}",
         report.problems().collect::<Vec<_>>()
     );
-    // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own decisions.json, so a standalone
+    // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own json/decisions.json, so a standalone
     // audit of a zip runs it too. Item #1 adds the one-fix-per-row check: 11. The rewrite
-    // advisory's internal-notes check makes 12.
+    // advisory's internal-notes check makes 12; the operator-paths check makes 13.
     assert_eq!(
         report.checks.len(),
-        12,
+        13,
         "row parity needs the in-memory rows"
     );
 }
@@ -1253,8 +1258,10 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
             "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
              finding content, reviewer decision on unverified evidence, decision records behind \
              merged rows, reviewer decision on restored findings, reviewer decision on split-out problems, reviewer correction on \
-             flagged findings, confidentiality marking, manifest, provenance, unsynced \
-             reviewer changes, one fix per row, client text style, internal notes kept out"
+             flagged findings, reviewer decision on critical and unsure findings, \
+             confidentiality marking, manifest, provenance, unsynced \
+             reviewer changes, reviewer decision on split rules, one fix per row, client text \
+             style, internal notes kept out, operator paths kept out"
         )
     );
 }
@@ -1720,6 +1727,9 @@ fn mixed_scan_report() -> ScanReport {
             assessed_sites: Some(10),
             convention_option_id: Some("versioned".to_string()),
             convention_label: "URI-versioned endpoints".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         })
     };
     let rows: Vec<(&str, &str, Option<FindingKind>)> = vec![
@@ -1743,6 +1753,8 @@ fn mixed_scan_report() -> ScanReport {
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "Cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             })),
         ),
         (
@@ -1750,6 +1762,7 @@ fn mixed_scan_report() -> ScanReport {
             "info",
             Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: Vec::new(),
+                left_to_client: false,
             })),
         ),
         (
@@ -1781,16 +1794,34 @@ fn mixed_scan_report() -> ScanReport {
 }
 
 pub(super) fn mixed_package() -> ProductPackage {
-    let sealed = mixed_scan_report().seal();
+    let report = mixed_scan_report();
+    // The gate refuses a critical row with no decision of its own, so the fixture's critical rows
+    // carry one; every other row stays as it was.
+    let decided: HashMap<String, crate::report_export::DispositionWire> = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "critical" || f.needs_review)
+        .map(|f| {
+            (
+                crate::report_export::finding_key(f),
+                crate::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "read in person".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let sealed = report.seal();
     let options = client_options();
     let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         None,
         &options,
     );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         None,
         &options,
         STEM,
@@ -1903,6 +1934,9 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "x".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             },
         ),
     ));
@@ -1978,6 +2012,9 @@ fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "x".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             },
         ),
     ));

@@ -294,7 +294,7 @@ pub(crate) fn matrix_bucket(
 /// say, for the one case none of them cover — a row that earns an action bucket
 /// (do_now/do_next/plan) on severity/effort/disposition alone, survives every other gate, but
 /// has no fix to put in front of the client. Delegates entirely to
-/// [`is_action_row_missing_a_fix`] — see that function's doc comment for the exact scope (in
+/// [`is_action_row_missing_a_fix_with`]; see that function's doc comment for the exact scope (in
 /// particular, why an UNRECOGNIZED rule id is deliberately exempt). Shipping a recognized-but-
 /// unauthored rule's row as an action item with a blank Fix block is worse than silence — it
 /// reads as "we checked, here is what to do" when there is nothing to do yet. It is NOT dropped
@@ -306,6 +306,7 @@ pub(crate) fn matrix_bucket(
 /// mirroring `gate_uncited`'s identical pattern a few lines up in `build_report_json`).
 /// `"accepted"` is deliberately EXEMPT: an auditor who already accepted the risk is not
 /// expecting a fix at all, so a missing one there is not a gap this check needs to catch.
+#[cfg(test)]
 pub(crate) fn effective_bucket(
     finding: &Finding,
     disposition: Disposition,
@@ -313,6 +314,28 @@ pub(crate) fn effective_bucket(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen_option: Option<&str>,
+) -> &'static str {
+    effective_bucket_with(
+        finding,
+        disposition,
+        severity,
+        corpus,
+        test_file_count,
+        chosen_option,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// [`effective_bucket`] reading the project's chosen options of every rule (the rules merged into
+/// the row included), as the export surfaces do.
+pub(crate) fn effective_bucket_with(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> &'static str {
     if is_held_for_review(finding, disposition) {
         return "held";
@@ -328,13 +351,14 @@ pub(crate) fn effective_bucket(
         return "informational";
     }
     let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
-    if is_action_row_missing_a_fix(
+    if is_action_row_missing_a_fix_with(
         finding,
         disposition,
         severity,
         corpus,
         test_file_count,
         chosen_option,
+        chosen_options,
     ) {
         return "held";
     }
@@ -377,13 +401,14 @@ pub(crate) fn effective_bucket(
 /// hasn't run in a given synchronous test, is UNCHANGED by this gate — exactly as it was before
 /// C5-8 — because `resolve_fix` was never going to find a rule-level remediation for an invented
 /// id regardless of this feature.
-pub(crate) fn is_action_row_missing_a_fix(
+pub(crate) fn is_action_row_missing_a_fix_with(
     finding: &Finding,
     disposition: Disposition,
     severity: &str,
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> bool {
     if is_held_for_review(finding, disposition) || is_uncited_ai_finding(finding, corpus) {
         return false;
@@ -395,7 +420,7 @@ pub(crate) fn is_action_row_missing_a_fix(
     if !matches!(bucket, "do_now" | "do_next" | "plan") {
         return false;
     }
-    if has_any_fix(finding, corpus, chosen_option) {
+    if has_any_fix_with(finding, corpus, chosen_option, chosen_options) {
         return false;
     }
     // Neither fix half exists. Only count that as the C5-8 gap when the rule is one the
@@ -416,7 +441,7 @@ pub(crate) fn is_action_row_missing_a_fix(
 /// authored `effort` band — which means a recognized rule's row almost never reaches this
 /// gate in practice going forward: if it has a fix to show, [`resolve_effort`] can virtually
 /// always find a number to go with it. This function exists as the SAME kind of belt-and-
-/// suspenders runtime safety net [`is_action_row_missing_a_fix`] is for its own invariant
+/// suspenders runtime safety net [`is_action_row_missing_a_fix_with`] is for its own invariant
 /// (a corpus-authoring gap slipping past the build-time test some other way, a non-default
 /// resolved option, a corpus that failed to load at render time) — not an expected steady
 /// state. The fifth-consecutive-run alarm C6-B4 exists to close is exactly this: an
@@ -576,6 +601,16 @@ pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
     "integration",
 ];
 
+/// Whether the calibrator or the finder doubts the row (`needs_review` or a needs-review
+/// confidence) and the reviewer has not ruled on it by editing the row's severity themselves.
+/// Used only to decide whether the row is HELD ([`is_held_for_review`]): the doubt itself stays
+/// the engine's statement in every export (`needs_review`, the confidence), as on a Confirmed
+/// row, and the reviewer's ruling is carried by the label, Decision so far and the record.
+fn calibration_doubt(f: &Finding) -> bool {
+    (f.needs_review || f.confidence.as_deref() == Some("needs-review"))
+        && !super::overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
+}
+
 /// C5-4: whether a finding is HELD for a human reviewer's judgment call, INDEPENDENT of its own
 /// severity — the calibrator's own hedge (`needs_review` / `confidence == "needs-review"`),
 /// applied only to an OPEN (`Unresolved`) row (an auditor's explicit disposition — accepted /
@@ -604,8 +639,10 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
     // decides it; the release gate also refuses to export it without that decision.
     // M4: a row whose text is real junk (an empty or placeholder explanation, the model's own
     // refusal, a JSON fragment) is held the same way, until the reviewer decides it.
-    finding.needs_review
-        || finding.confidence.as_deref() == Some("needs-review")
+    // The reviewer's own severity edit decides the doubt (Zach, 2026-11-20): it lifts the
+    // calibration hedge, and only that. Unverified evidence, junk text and a put-back row below
+    // stay held until they are ruled on.
+    calibration_doubt(finding)
         || finding
             .captures
             .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
@@ -711,7 +748,7 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
     u8::from(f.needs_review || f.confidence.as_deref() == Some("needs-review"))
 }
 
-// ── C4-P2 / C5-4: one hedge source of truth, shared by findings.json / the xlsx workbook / the
+// ── C4-P2 / C5-4: one hedge source of truth, shared by json/inspection.json / the xlsx workbook / the
 // PDF ──────────────────────────────────────────────────────────────────────────────────────
 //
 // Bug family (artifact-consistency hardening, see docs/plans for the originating report): the
@@ -719,7 +756,7 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
 // `confidence` string could each tell a different story for the SAME finding — a row routed to
 // the informational/held appendix for a reason OTHER than calibration doubt (an `info`-severity
 // note, a testing-style deviation with no corpus, an absence-type stance rule) rendered with
-// `needs_review: false` / `confidence: "high"` in `findings.json`/the workbook, even though the
+// `needs_review: false` / `confidence: "high"` in `json/inspection.json`/the workbook, even though the
 // narrative text calls that same row "held for a human reviewer's judgment call" — an unhedged
 // row sitting in the bucket whose entire definition is "needs a human to decide". Separately, a
 // raw desync between `f.needs_review` and `f.confidence` (a verdict re-application, a merge)
@@ -730,7 +767,7 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
 // placement (`bucket == "informational"` or `bucket == "held"` (C5-4) — being held for review IS
 // a hedge, by definition of either bucket). `build_report_json` (the PDF's
 // `CuratedSiteJson.confidence`) and `xlsx_export::partition_rows`
-// (`FindingRow.confidence`/`FindingRow.needs_review`, which `findings.json` serializes verbatim)
+// (`FindingRow.confidence`/`FindingRow.needs_review`, which `json/inspection.json` serializes verbatim)
 // both call this ONE function with their own already-computed `bucket` (itself a single shared
 // computation — see `effective_bucket`) — never re-deriving hedge state independently. This does
 // NOT change bucket placement (a finding explicitly dispositioned out of `Unresolved` still
@@ -948,16 +985,119 @@ pub(crate) fn ends_with_known_abbreviation(prefix: &str) -> bool {
     SENTENCE_ABBREVIATIONS.iter().any(|a| lower.ends_with(a))
 }
 
-/// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
-/// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
-/// say "Every advisory finding is reviewed and dispositioned by a human reviewer before it
-/// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
-/// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
-/// reviewer" in the `Raw` case — grep-tested alongside the narrative's own gate.
+/// Which finder produced the report's findings, from the run record. The agent finder records its
+/// coverage block (one entry for each repository it read); the engine finder never does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FinderRan {
+    #[default]
+    Engine,
+    Agent,
+}
+
+/// The finder that ran for `report`.
+pub(crate) fn finder_of(report: &crate::onboard::ScanReport) -> FinderRan {
+    if report.ledger.finder_coverage().is_empty() {
+        FinderRan::Engine
+    } else {
+        FinderRan::Agent
+    }
+}
+
+/// What the method text states about the run: the finder that ran and what a person read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MethodFacts {
+    pub finder: FinderRan,
+    pub review: ReviewCounts,
+}
+
+/// The line every method text ends its list of what was not done with: what an inspection of the
+/// code does not cover.
+pub(crate) const NOT_ASSESSED_LINE: &str =
+    "Team, process and roadmap were not assessed; this inspection reads the code.";
+
+/// The first method paragraph, for the finder that ran.
+pub(crate) fn deterministic_note_for(finder: FinderRan) -> String {
+    format!(
+        "{} {}",
+        deterministic_checks_note(finder),
+        crate::onboard::files::inspected_types_sentence()
+    )
+}
+
+fn deterministic_checks_note(finder: FinderRan) -> String {
+    match finder {
+        FinderRan::Engine => "Camerata runs a two-tier engine. A deterministic security floor \
+             (proven-defect SAST rules plus a migration-timeline replay for Supabase Row Level \
+             Security) produces findings that either hold or do not, with no model judgment. \
+             These are labeled deterministic in the report."
+            .to_string(),
+        FinderRan::Agent => "Camerata first runs deterministic checks: proven-defect rules over \
+             the code and, for Supabase, a replay of the migration history for Row Level \
+             Security. Each of these either holds or does not, with no model judgment. They are \
+             labeled deterministic in the report."
+            .to_string(),
+    }
+}
+
+/// The severity paragraph, for the finder that ran.
+pub(crate) fn severity_scale_note_for(finder: FinderRan) -> String {
+    match finder {
+        FinderRan::Engine => "Severity is bimodal by design. Deterministic floor findings are \
+             proven defects rated by impact; advisory findings are rated by likely impact \
+             together with calibrated confidence. There is deliberately no single numeric score \
+             or letter grade: a grade hides which specific object is exposed, which is exactly \
+             what a remediation team needs to know."
+            .to_string(),
+        FinderRan::Agent => {
+            "Severity is rated by likely impact, and a rule's own floor or ceiling \
+             holds where it sets one. Problems the model was unsure of are marked, and a person \
+             decides them. There is deliberately no single numeric score or letter grade: a \
+             grade hides which specific object is exposed, which is exactly what a remediation \
+             team needs to know."
+                .to_string()
+        }
+    }
+}
+
+/// What a person read, in the first person of the signed report, from the review store's counts.
+/// The clause about every critical and unsure finding is printed only when the release gate
+/// guarantees it ([`ReviewCounts::every_critical_and_unsure_decided`]).
+fn read_in_person_sentence(review: &ReviewCounts) -> String {
+    use crate::xlsx_export::vocabulary as v;
+    let n = review.reviewed_in_person;
+    if n == 0 {
+        return "I did not review any place in person; every place was checked by the engine \
+                against the code."
+            .to_string();
+    }
+    let clause = if review.every_critical_and_unsure_decided {
+        ", including every critical problem and every problem the review marked unsure"
+    } else {
+        ""
+    };
+    format!(
+        "I reviewed {n} {} in person{clause}. The rest were checked by the engine against the \
+         code; the {} column of the {} sheet shows which.",
+        v::places_word(n),
+        v::H_REVIEWED_IN_PERSON,
+        v::ALL_PROBLEMS
+    )
+}
+
+/// P5: the AI-tier Methodology paragraph must never claim a human reviewed what no human reviewed.
+/// A [`ReviewState::Raw`] export has had no human triage pass, and a reviewed one says how many
+/// places a person read (outside review item 2b), never that every finding was reviewed: the
+/// review budget leaves places below the line to the engine. Neither branch contains the literal
+/// phrases "reviewed by a human reviewer" or "dispositioned by a human reviewer".
+///
+/// The paragraph describes the finder that ran (outside review item 5b): the agent finder's
+/// model reads every in-scope file against the rules that apply, with coverage taken from the
+/// record of what it opened; the engine finder's two tiers are described as before.
 pub(crate) fn ai_tier_note_for(
     review_state: ReviewState,
     repos_not_run: usize,
     total_repos: usize,
+    facts: &MethodFacts,
 ) -> String {
     let repos = |n: usize| {
         if n == 1 {
@@ -966,34 +1106,65 @@ pub(crate) fn ai_tier_note_for(
             format!("{n} repos")
         }
     };
+    let agent = facts.finder == FinderRan::Agent;
     if repos_not_run > 0 && repos_not_run >= total_repos {
-        // The tier ran nowhere: say so, and make no claim about a review that did not happen.
-        return format!(
-            "The advisory language-model tier did not run for {}; see the {} sheet. Every finding \
-             produced in this run came from the deterministic tier.",
-            repos(repos_not_run),
-            crate::xlsx_export::vocabulary::NOT_CHECKED
-        );
+        // The model ran nowhere: say so, and make no claim about a review that did not happen.
+        return if agent {
+            format!(
+                "The model did not read the code of {}; see the {} sheet. Every problem \
+                 produced in this run came from the deterministic checks.",
+                repos(repos_not_run),
+                crate::xlsx_export::vocabulary::NOT_CHECKED
+            )
+        } else {
+            format!(
+                "The advisory language-model tier did not run for {}; see the {} sheet. Every \
+                 finding produced in this run came from the deterministic tier.",
+                repos(repos_not_run),
+                crate::xlsx_export::vocabulary::NOT_CHECKED
+            )
+        };
     }
-    let ran = match review_state {
-        ReviewState::Reviewed => {
+    let ran = match (agent, review_state) {
+        (false, ReviewState::Reviewed) => format!(
             "A second, advisory tier uses a calibrated language-model review for findings that \
-             require semantic judgment. Every advisory finding in this export has been \
-             reviewed and dispositioned by a human reviewer; lower-confidence items are marked \
-             needs-review."
-                .to_string()
-        }
-        ReviewState::Raw => {
-            "A second, advisory tier uses a calibrated language-model review for findings that \
-             require semantic judgment. This export has not yet had a human triage pass: every \
-             advisory finding here is the engine's own calibrated output, awaiting a human \
-             reviewer's judgment before any is accepted, marked tech debt or ruled out. \
-             Lower-confidence items are marked needs-review."
-                .to_string()
-        }
+             require semantic judgment. {} Lower-confidence items are marked needs-review.",
+            read_in_person_sentence(&facts.review)
+        ),
+        (false, ReviewState::Raw) => "A second, advisory tier uses a calibrated language-model \
+             review for findings that require semantic judgment. This export has not yet had a \
+             human triage pass: every advisory finding here is the engine's own calibrated \
+             output, awaiting a human reviewer's judgment before any is accepted, marked tech \
+             debt or ruled out. Lower-confidence items are marked needs-review."
+            .to_string(),
+        (true, ReviewState::Reviewed) => format!(
+            "A model then reads every in-scope file against the rules that apply to it. What it \
+             read is taken from the record of the files it opened, not from what it said it \
+             read; the {} sheet lists any file it did not read. A group review then sorts what \
+             it found and picks the places that most need a person. {} Lower-confidence items \
+             are marked needs-review.",
+            crate::xlsx_export::vocabulary::NOT_CHECKED,
+            read_in_person_sentence(&facts.review)
+        ),
+        (true, ReviewState::Raw) => format!(
+            "A model then reads every in-scope file against the rules that apply to it. What it \
+             read is taken from the record of the files it opened, not from what it said it \
+             read; the {} sheet lists any file it did not read. A group review then sorts what \
+             it found and picks the places that most need a person. This export has not yet had \
+             a person's review: every problem here is the model's own, awaiting a person's \
+             judgment before any is accepted, marked tech debt or ruled out. Lower-confidence \
+             items are marked needs-review.",
+            crate::xlsx_export::vocabulary::NOT_CHECKED
+        ),
     };
     if repos_not_run == 0 {
         ran
+    } else if agent {
+        format!(
+            "{ran} The model did not read the code of {}; see the {} sheet.",
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
+        )
     } else {
         format!(
             "{ran} The advisory language-model tier did not run for {}; see the {} sheet.",
@@ -1179,7 +1350,7 @@ pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
 /// silently shadowing that function's own `report` parameter — so the PDF's JSON saw the
 /// synthetic rows, but `xlsx_export::build_workbook` / `build_findings_export` (which read the
 /// ORIGINAL, un-injected `ScanReport` directly, never the exporter-local clone) never did. That
-/// was the exact shape of the measured defect: `findings.json`'s own `summary` (cloned from the
+/// was the exact shape of the measured defect: `json/inspection.json`'s own `summary` (cloned from the
 /// PDF's `AuditReportJson`) described `N+K` rows while its `findings` array held only `N`.
 ///
 /// The fix is a POSITION fix, not a logic fix: this function is now part of the SCAN pipeline,

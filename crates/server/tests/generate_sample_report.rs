@@ -253,6 +253,20 @@ async fn regenerate_sample_report() {
             confirmed_by_client: false,
         },
     );
+    // The release gate refuses a critical problem with no decision of its own, so the sample's
+    // two critical problems carry the auditor's own confirmation (not a client's).
+    let edge_jwt = fn_by_rule(&all_findings, "SUPABASE-AUTH-EDGE-JWT-1");
+    for critical in [&rls_enabled, &key_service_role, &edge_jwt] {
+        dispositions.insert(
+            report_export::finding_key(critical),
+            DispositionWire {
+                state: "Confirmed".to_string(),
+                reason: "read in person against the repository and confirmed".to_string(),
+                bucket: String::new(),
+                confirmed_by_client: false,
+            },
+        );
+    }
     dispositions.insert(
         report_export::finding_key(&auth_getsession),
         DispositionWire {
@@ -304,6 +318,7 @@ async fn regenerate_sample_report() {
         discarded: Vec::new(),
  repos_not_inspected: Vec::new(),
  recommendations_by_repo: Vec::new(),
+ conventions: Vec::new(),
  patterns_across_services: Default::default(),
  volume_by_repo: Default::default(),
         repos: vec![PORTAL.to_string(), EDGE.to_string()],
@@ -432,8 +447,10 @@ async fn regenerate_sample_report() {
     // the reconciliation whole (see below). Reconfirmed on the 2026-10-20 sample regen (W27).
     assert_eq!(json.methodology.candidates_reviewed, 10);
     assert_eq!(json.methodology.excluded_false_positive, 3);
-    assert_eq!(json.executive_summary.curated_total, 5);
-    assert_eq!(json.executive_summary.held_for_review, 1); // the needs-review AUTH-EDGE-JWT row
+    // The auditor confirmed the needs-review AUTH-EDGE-JWT row (the release gate wants it decided),
+    // so it is curated again and nothing is held.
+    assert_eq!(json.executive_summary.curated_total, 6);
+    assert_eq!(json.executive_summary.held_for_review, 0);
     assert_eq!(json.dependency_snapshot.rows.len(), 1);
     // The reconciliation invariant, asserted whole so a future drift names itself:
     // candidates_reviewed == curated + held + false_positive + dependency_advisories.
@@ -501,7 +518,7 @@ async fn regenerate_sample_report() {
         xlsx.len()
     );
 
-    // ═══ Build + write the REAL findings.json (machine-readable sibling of the xlsx) ═══
+    // ═══ Build + write the REAL json/inspection.json (machine-readable sibling of the xlsx) ═══
     // Same `report`/`dispositions`/`corpus` inputs as the xlsx above, plus the ALREADY-BUILT
     // `json` (`AuditReportJson`) for provenance/summary reuse — see
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
@@ -518,10 +535,10 @@ async fn regenerate_sample_report() {
     assert_eq!(
         findings_export.findings.len(),
         6,
-        "findings.json must carry exactly the 6 non-FP code findings (matches curated_total)"
+        "json/inspection.json must carry exactly the 6 non-FP code findings (matches curated_total)"
     );
     let findings_json_bytes =
-        serde_json::to_vec_pretty(&findings_export).expect("serialize findings.json");
+        serde_json::to_vec_pretty(&findings_export).expect("serialize json/inspection.json");
     std::fs::write(
         repo_root.join("camerata-sample-audit-findings.json"),
         &findings_json_bytes,

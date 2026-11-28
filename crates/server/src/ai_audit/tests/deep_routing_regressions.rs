@@ -381,6 +381,7 @@ fn advisory_disabled_only_in_language_groups_not_in_all_group() {
             Scope::Declared { .. } => {
                 unreachable!("no rule in this fixture declares applies_to")
             }
+            Scope::AllWith(_) => unreachable!("no rule in this fixture is routed to text kinds"),
         }
     }
 }
@@ -816,6 +817,7 @@ fn bug_ai3_calibration_defaults_to_the_stage1_model_when_nothing_is_pinned() {
 #[tokio::test]
 async fn an_uncosted_call_under_a_limit_stops_admission_and_is_disclosed_as_unenforceable() {
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(10.0),
         ..crate::cost_cap::RunControls::default()
     });
@@ -824,6 +826,7 @@ async fn an_uncosted_call_under_a_limit_stops_admission_and_is_disclosed_as_unen
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-sonnet-4-6".to_string(),
             backend: "api".to_string(),

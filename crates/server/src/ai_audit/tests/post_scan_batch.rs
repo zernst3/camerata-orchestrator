@@ -15,6 +15,7 @@ const ALTERNATIVES_REPLY: &str = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1
 
 fn capped(cap: f64) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -33,6 +34,7 @@ fn capped(cap: f64) -> UsageMeter {
 const BATCH: StageRoute<'static> = StageRoute {
     batch: true,
     job: None,
+    feedback: None,
 };
 
 // ── fix generation ──────────────────────────────────────────────────────────────────────────

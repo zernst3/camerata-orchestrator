@@ -48,11 +48,11 @@ pub const PUBLISHED_EXAMPLES: &[PublishedExample] = &[
         "3543c50b0cb9cea8e55eb1f529b79f043cb250d485fde7b66cabbb5183add7da",
         "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github",
     ),
-    // The Azure Storage emulator (Azurite) well-known development account key, which every
-    // local-development connection string uses.
+    // The Azure Storage emulator (Azurite) well-known development account key (88 characters,
+    // ending `==`), which every local-development connection string uses.
     key(
-        "8b5130ead464e35d5743246136340bfe7e022bfaf8bb42ff07000e2acc5994ee",
-        "https://learn.microsoft.com/azure/storage/common/storage-use-emulator",
+        "0011cc25eb4320717494d2703e8cba85743e71b500283c21c8b88147992f9059",
+        "https://learn.microsoft.com/azure/storage/common/storage-connect-azurite",
     ),
     // Supabase's documented `password_requirements` setting value, a config enum that reads as a
     // password on a `password`-named identifier. It is readable under that setting's name only:
@@ -98,4 +98,14 @@ pub fn is_published_example(sha256_hex: &str, before_value: &str) -> bool {
                 .identifier
                 .is_none_or(|identifier| names_identifier(before_value, identifier))
     })
+}
+
+/// Whether `sha256_hex` is a key the vendor publishes as ITSELF (a documentation key every snippet
+/// uses, [`PublishedExample::identifier`] `None`), as opposed to a value documented only as one
+/// setting's value (a config enum). Only the first kind is a key that must be masked in a client
+/// package; the second is a setting a reader sees as one.
+pub fn is_documentation_key(sha256_hex: &str) -> bool {
+    PUBLISHED_EXAMPLES
+        .iter()
+        .any(|example| example.digest == sha256_hex && example.identifier.is_none())
 }

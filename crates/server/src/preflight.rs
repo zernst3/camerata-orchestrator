@@ -28,6 +28,20 @@ pub struct RepoScanFacts {
     /// characters, so its estimate is zero; the caller must say so rather than let a missing
     /// repo read as a cheap one.
     pub read_error: Option<String>,
+    /// Files the run could not read because they are over [`crate::onboard::files::MAX_FILE_BYTES`]
+    /// and not excluded by agreement. A warning before the start, never a refusal.
+    pub over_limit: Vec<crate::onboard::files::OverLimitFile>,
+    /// The patterns of the project's Excluded by agreement list this repo's files matched.
+    pub matched_patterns: Vec<usize>,
+    /// Files that declare themselves generated: not read, not billed, searched for secrets only.
+    /// The count and the non-blank lines in them, so the pre-start check shows what was left out.
+    pub generated_files: usize,
+    pub generated_lines: usize,
+    /// The generated files' paths, in path order, so the pre-start check names them.
+    pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet, in path order: not read,
+    /// billed or searched for secrets, and named by the pre-start check.
+    pub not_inspected_paths: Vec<String>,
 }
 
 /// Read each source the way the scan does and count what the AI tier will be given. A source
@@ -37,6 +51,7 @@ pub async fn gather_scan_facts(
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
     corpus: Option<&camerata_rules::RuleSet>,
+    scope: &crate::onboard::scope::ScanScope,
 ) -> Vec<RepoScanFacts> {
     let scan_rules = crate::onboard::inspectable_rules_for_scan(selected, corpus);
     let mut out = Vec::new();
@@ -55,11 +70,17 @@ pub async fn gather_scan_facts(
             continue;
         }
         let dir = dir.clone();
-        let read =
-            tokio::task::spawn_blocking(move || crate::onboard::files::read_local_repo_files(&dir))
-                .await;
-        let extracted = match read {
-            Ok(Ok(extracted)) => extracted,
+        let repo_scope = scope.for_repo(spec);
+        let read = tokio::task::spawn_blocking(move || {
+            crate::onboard::files::read_local_repo_files(&dir, &repo_scope).map(|extracted| {
+                let generated_lines =
+                    crate::onboard::count::non_blank_lines_in_files(&dir, &extracted.generated);
+                (extracted, generated_lines)
+            })
+        })
+        .await;
+        let (extracted, generated_lines) = match read {
+            Ok(Ok(read)) => read,
             Ok(Err(e)) => {
                 out.push(unreadable(spec, &e.to_string()));
                 continue;
@@ -81,6 +102,11 @@ pub async fn gather_scan_facts(
             })
             .unwrap_or(0);
         let code_chars = extracted.files.iter().map(|(_, c)| c.len()).sum();
+        let over_limit = extracted.over_limit_files();
+        let matched_patterns = extracted.matched_patterns.clone();
+        let generated_files = extracted.generated.len();
+        let generated_paths = extracted.generated.clone();
+        let not_inspected_paths = extracted.not_inspected.clone();
         out.push(RepoScanFacts {
             repo: spec.to_string(),
             files: extracted.files,
@@ -88,6 +114,12 @@ pub async fn gather_scan_facts(
             semantic,
             multi_option_rules,
             read_error: None,
+            over_limit,
+            matched_patterns,
+            generated_files,
+            generated_lines,
+            generated_paths,
+            not_inspected_paths,
         });
     }
     out
@@ -102,6 +134,12 @@ fn unreadable(spec: &str, why: &str) -> RepoScanFacts {
         semantic: Vec::new(),
         multi_option_rules: 0,
         read_error: Some(why.to_string()),
+        over_limit: Vec::new(),
+        matched_patterns: Vec::new(),
+        generated_files: 0,
+        generated_lines: 0,
+        generated_paths: Vec::new(),
+        not_inspected_paths: Vec::new(),
     }
 }
 
@@ -119,6 +157,59 @@ pub struct RepoSizeWire {
     /// command line. `None` for a repo that could not be read.
     #[serde(default)]
     pub agent_finder: Option<AgentFinderWire>,
+    /// Files over the read limit that are not excluded by agreement: the desktop lists them
+    /// before an inspection starts and holds Start until each is excluded.
+    #[serde(default)]
+    pub over_limit: Vec<crate::onboard::files::OverLimitFile>,
+    /// Files that declare themselves generated and the non-blank lines in them: not read, not
+    /// billed, searched for secrets only. The desktop states both before an inspection starts.
+    #[serde(default)]
+    pub generated_files: usize,
+    #[serde(default)]
+    pub generated_lines: usize,
+    /// The generated files' paths, in the form the exclusion list uses, so the desktop names
+    /// them (capped there) as the command line does.
+    #[serde(default)]
+    pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet, in the form the exclusion
+    /// list uses: not read, billed or searched for secrets. The desktop names them (capped there)
+    /// as the command line does.
+    #[serde(default)]
+    pub not_inspected_paths: Vec<String>,
+    /// The part of the list above that the engine still opens for declared runtime and package
+    /// versions (a project file, a `Gemfile`): not billed or searched for secrets, and never
+    /// called plainly not read. Named separately so the desktop words them as the command line
+    /// does.
+    #[serde(default)]
+    pub not_inspected_versions_only_paths: Vec<String>,
+    /// The read limit as a person reads it ("1 MB"), from the engine's own constant, so the
+    /// desktop never states a number the engine does not apply.
+    #[serde(default)]
+    pub read_limit: String,
+    /// The largest over-limit file the secret checks still search ("20 MB"), from the engine's own
+    /// constant, so the desktop prints the same ceiling as the command line and Coverage.
+    #[serde(default)]
+    pub secret_search_limit: String,
+    /// Patterns of the project's Excluded by agreement list that match no file in any repo. The
+    /// desktop lists each with "Remove pattern" and holds Start until none is left.
+    #[serde(default)]
+    pub unmatched_patterns: Vec<String>,
+    /// One entry per unmatched pattern: why it can never match ("node_modules is never read, so
+    /// this pattern is not needed"), or empty.
+    #[serde(default)]
+    pub unmatched_reasons: Vec<String>,
+    /// Patterns naming a project repo that was not read: they cannot be checked, they block a
+    /// start, and they are never offered for removal. Reasons in `unchecked_reasons`.
+    #[serde(default)]
+    pub unchecked_patterns: Vec<String>,
+    #[serde(default)]
+    pub unchecked_reasons: Vec<String>,
+    /// Patterns that match only files never read anyway, with the reason in `warned_reasons`: a
+    /// warning, never a block; the desktop offers Remove pattern (removing changes nothing).
+    #[serde(default)]
+    pub warned_patterns: Vec<String>,
+    #[serde(default)]
+    pub warned_reasons: Vec<String>,
 }
 
 /// The agent finder's pre-flight figures for one repo (the same function the command line
@@ -161,6 +252,43 @@ pub fn repo_sizes(
                 code_chars: f.code_chars,
                 error: f.read_error.clone(),
                 agent_finder: f.read_error.is_none().then(|| agent_finder_wire(f)),
+                over_limit: f
+                    .over_limit
+                    .iter()
+                    .map(|o| crate::onboard::files::OverLimitFile {
+                        display: crate::onboard::scope::pattern_form(requested, spec, &o.path),
+                        ..o.clone()
+                    })
+                    .collect(),
+                generated_files: f.generated_files,
+                generated_lines: f.generated_lines,
+                generated_paths: f
+                    .generated_paths
+                    .iter()
+                    .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                    .collect(),
+                not_inspected_paths: crate::onboard::files::split_not_inspected(
+                    &f.not_inspected_paths,
+                )
+                .0
+                .iter()
+                .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                .collect(),
+                not_inspected_versions_only_paths: crate::onboard::files::split_not_inspected(
+                    &f.not_inspected_paths,
+                )
+                .1
+                .iter()
+                .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                .collect(),
+                read_limit: crate::onboard::files::max_file_label(),
+                secret_search_limit: crate::onboard::files::secret_scan_label(),
+                unmatched_patterns: Vec::new(),
+                unmatched_reasons: Vec::new(),
+                unchecked_patterns: Vec::new(),
+                unchecked_reasons: Vec::new(),
+                warned_patterns: Vec::new(),
+                warned_reasons: Vec::new(),
             },
             None => RepoSizeWire {
                 repo: spec.to_string(),
@@ -175,6 +303,20 @@ pub fn repo_sizes(
                         .to_string(),
                 ),
                 agent_finder: None,
+                over_limit: Vec::new(),
+                generated_files: 0,
+                generated_lines: 0,
+                generated_paths: Vec::new(),
+                not_inspected_paths: Vec::new(),
+                not_inspected_versions_only_paths: Vec::new(),
+                read_limit: crate::onboard::files::max_file_label(),
+                secret_search_limit: crate::onboard::files::secret_scan_label(),
+                unmatched_patterns: Vec::new(),
+                unmatched_reasons: Vec::new(),
+                unchecked_patterns: Vec::new(),
+                unchecked_reasons: Vec::new(),
+                warned_patterns: Vec::new(),
+                warned_reasons: Vec::new(),
             },
         })
         .collect()
@@ -241,6 +383,24 @@ fn agent_finder_wire(facts: &RepoScanFacts) -> AgentFinderWire {
     }
 }
 
+/// The patterns of `scope` that no walked file matched, judged only against repos that were READ
+/// (a pattern naming a repo that was not read cannot be checked), in list order.
+pub fn unmatched_of(
+    scope: &crate::onboard::scope::ScanScope,
+    facts: &[RepoScanFacts],
+) -> crate::onboard::scope::PatternChecks {
+    let matched: Vec<bool> = (0..scope.patterns().len())
+        .map(|i| facts.iter().any(|f| f.matched_patterns.contains(&i)))
+        .collect();
+    let read_ok: Vec<String> = facts
+        .iter()
+        .filter(|f| f.read_error.is_none())
+        .map(|f| f.repo.clone())
+        .collect();
+    let all: Vec<String> = facts.iter().map(|f| f.repo.clone()).collect();
+    crate::onboard::scope::classify_patterns(scope, &all, &read_ok, &matched)
+}
+
 /// `POST /api/onboard/preflight`: what each repo would be fed to the scan, for the pre-audit cost
 /// estimate. Reads the same files the scan reads (the scan chunks and calibrates PER REPO, so the
 /// estimate has to be built per repo too). Makes no model call and reads no rule.
@@ -249,8 +409,33 @@ pub(crate) async fn onboard_preflight(
     axum::Json(req): axum::Json<PreflightReq>,
 ) -> axum::Json<Vec<RepoSizeWire>> {
     let local = crate::resolve_local_sources(&state, &req.repos);
-    let facts = gather_scan_facts(&local.sources, &[], None).await;
-    axum::Json(repo_sizes(&req.repos, &facts, &local.unresolved))
+    // An exclusion list that cannot be used reads as an error on every repo: never as "nothing
+    // is excluded", which would size and bill files the agreement leaves out.
+    let scope = match crate::onboard::scope::ScanScope::of_project(state.projects.active().as_ref())
+    {
+        Ok(scope) => scope,
+        Err(why) => {
+            let facts: Vec<RepoScanFacts> = local
+                .sources
+                .iter()
+                .map(|(spec, _)| unreadable(spec, &why))
+                .collect();
+            return axum::Json(repo_sizes(&req.repos, &facts, &local.unresolved));
+        }
+    };
+    let facts = gather_scan_facts(&local.sources, &[], None, &scope).await;
+    let mut sizes = repo_sizes(&req.repos, &facts, &local.unresolved);
+    let checks = unmatched_of(&scope, &facts);
+    let notes = crate::onboard::scope::unmatched_notes(&checks.unmatched, scope.repos());
+    for row in &mut sizes {
+        row.unmatched_reasons = notes.clone();
+        row.unmatched_patterns = checks.unmatched.clone();
+        row.unchecked_patterns = checks.unchecked.iter().map(|(p, _)| p.clone()).collect();
+        row.unchecked_reasons = checks.unchecked.iter().map(|(_, r)| r.clone()).collect();
+        row.warned_patterns = checks.warned.iter().map(|(p, _)| p.clone()).collect();
+        row.warned_reasons = checks.warned.iter().map(|(_, r)| r.clone()).collect();
+    }
+    axum::Json(sizes)
 }
 
 /// The exact input size of one representative scan pass, from `count_tokens` (free, API backend
@@ -304,7 +489,13 @@ mod tests {
             ("acme/a".to_string(), a.path().to_path_buf()),
             ("acme/b".to_string(), missing),
         ];
-        let facts = gather_scan_facts(&sources, &[], None).await;
+        let facts = gather_scan_facts(
+            &sources,
+            &[],
+            None,
+            &crate::onboard::scope::ScanScope::none(),
+        )
+        .await;
         assert_eq!(facts.len(), 2, "no repo may be dropped");
         assert_eq!(facts[0].repo, "acme/a");
         assert!(facts[0].read_error.is_none());
@@ -325,7 +516,13 @@ mod tests {
             ("acme/a".to_string(), a.path().to_path_buf()),
             ("acme/b".to_string(), b.path().to_path_buf()),
         ];
-        let facts = gather_scan_facts(&sources, &[], None).await;
+        let facts = gather_scan_facts(
+            &sources,
+            &[],
+            None,
+            &crate::onboard::scope::ScanScope::none(),
+        )
+        .await;
         let sizes = repo_sizes(&["acme/a".into(), "acme/b".into()], &facts, &[]);
         assert_eq!(sizes.len(), 2);
         assert_eq!(sizes[0].files, 1);
@@ -363,5 +560,52 @@ mod tests {
             sizes[0].error.is_some(),
             "an unlisted repo is still reported"
         );
+    }
+
+    /// Item 31 step 6: the wire carries every file over the read limit, with its size and the
+    /// limit's own words, and a file excluded by agreement is not on it.
+    #[tokio::test]
+    async fn the_wire_lists_files_over_the_read_limit_until_they_are_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.rs", "fn a() {}\n");
+        write(
+            dir.path(),
+            "seeds/data.js",
+            &"x".repeat(crate::onboard::files::MAX_FILE_BYTES + 200),
+        );
+        let sources = vec![("acme/api".to_string(), dir.path().to_path_buf())];
+
+        let facts = gather_scan_facts(
+            &sources,
+            &[],
+            None,
+            &crate::onboard::scope::ScanScope::none(),
+        )
+        .await;
+        let sizes = repo_sizes(&["acme/api".into()], &facts, &[]);
+        assert_eq!(
+            sizes[0].over_limit,
+            [crate::onboard::files::OverLimitFile {
+                path: "seeds/data.js".to_string(),
+                bytes: crate::onboard::files::MAX_FILE_BYTES as u64 + 200,
+                display: "api/seeds/data.js".to_string(),
+                reason: String::new(),
+            }]
+        );
+        assert_eq!(sizes[0].read_limit, "1 MB");
+        let wire = serde_json::to_value(&sizes[0]).unwrap();
+        assert_eq!(wire["over_limit"][0]["path"], "seeds/data.js");
+        assert_eq!(wire["read_limit"], "1 MB");
+
+        let scope =
+            crate::onboard::scope::ScanScope::from_patterns(&["api/seeds/data.js".to_string()])
+                .unwrap();
+        let facts = gather_scan_facts(&sources, &[], None, &scope).await;
+        let sizes = repo_sizes(&["acme/api".into()], &facts, &[]);
+        assert!(
+            sizes[0].over_limit.is_empty(),
+            "excluded by agreement, so nothing blocks"
+        );
+        assert_eq!(sizes[0].files, 1);
     }
 }

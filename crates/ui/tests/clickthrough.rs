@@ -238,7 +238,7 @@ fn liveview_serves_only_the_review_lanes() {
         false_positive: 2,
         tech_debt: 1,
         merged: 1,
-        held: 5,
+        held: 7,
     });
     stack.assert_no_model_calls();
 }
@@ -453,7 +453,7 @@ const BASE: Strip = Strip {
     false_positive: 2,
     tech_debt: 1,
     merged: 1,
-    held: 5,
+    held: 7,
 };
 
 #[test]
@@ -593,7 +593,7 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
         ".engine-state-text",
         "held from export until corrected (wrong severity)",
     );
-    assert_eq!(stack.strip().held, 5);
+    assert_eq!(stack.strip().held, 7);
 
     // Correct it: it was wrong about the severity, and the right one is critical.
     stack.click(".engine-card button", "Correct it");
@@ -616,20 +616,26 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     stack.type_into(".engine-correction .queue-reason-input", "", reason);
     stack.click(".engine-correction .queue-prompt-commit", "");
 
-    // The card says corrected, and the Held count fell by the one row.
-    stack.wait_text(".engine-state-text", "corrected");
+    // The card says corrected.
+    // "No, corrected": the held states say "until corrected" too, so the bare word would match a card that is still held.
+    stack.wait_text(".engine-state-text", "No, corrected");
     stack.wait_for("no correction form", "T.count('.engine-correction') === 0");
     assert!(stack
         .page_text()
         .contains("The corrected version is what ships."));
+    // The correction answered the Engine Check's No: that hold is gone. It also raised the row to
+    // critical, and a severity edit the reviewer made on the row is their decision (Zach,
+    // 2026-11-20: "If I manually update the severity at all, that is my decision regardless."), so
+    // the critical check is met too: the gate holds nothing on the row.
     assert!(
         !stack.gate_held().iter().any(|h| h["key"] == key.as_str()),
-        "the gate no longer holds the row"
+        "the severity correction releases the row from both holds: {:?}",
+        stack.gate_held()
     );
-    let gate_text = stack.js_string("T.text('.export-blocked-head')");
-    assert!(
-        gate_text.contains("4 rows"),
-        "the export panel lists one row fewer: {gate_text}"
+    assert_eq!(
+        stack.gate_held().len(),
+        6,
+        "the row left the gate's holds: one fewer than before"
     );
 
     // The correction is a real severity edit on that row, with the reason, and the verdict names it.
@@ -652,7 +658,26 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     assert_eq!(verdict["wrong"], "wrong_severity", "{verdict}");
     assert_eq!(verdict["correction"]["edit"], edit["id"], "{verdict}");
 
-    stack.assert_shell_counts(&Strip { held: 4, ..BASE });
+    // Review shows the row as decided by the edit: no held line, and the export panel counts it out.
+    stack.click(".triage-tab", "Tree");
+    open_site(&stack, "cat:injection", "SEC-NO-RAW-SQL-CONCAT-1", &place);
+    let detail = stack.text(".site-detail");
+    assert!(
+        !detail.contains("Held from export"),
+        "Review no longer holds the row after its severity edit: {detail}"
+    );
+    stack.wait_for(
+        "the export panel to count the row out",
+        "T.text('.export-blocked-head').includes('6 held rows')",
+    );
+    let gate_text = stack.js_string("T.text('.export-blocked-head')");
+    assert!(gate_text.contains("6 held rows"), "{gate_text}");
+
+    // A severity edit is not a decision record: the strip's decision counts do not move, only the
+    // held count does.
+    let mut after = BASE;
+    after.held = 6;
+    stack.assert_shell_counts(&after);
     stack.assert_no_model_calls();
 }
 
@@ -1315,17 +1340,36 @@ fn adding_a_finding_with_a_stale_snippet_is_held_and_the_gate_refuses_the_export
     assert_eq!(held[0]["reason"], "evidence_unverified", "{held:?}");
     assert_eq!(held[0]["path"], "src/orders/repo.rs", "{held:?}");
     assert_eq!(held[0]["line"], 5, "{held:?}");
-    let panel = stack.text(".export-blocked");
-    assert!(
-        panel.contains("Export blocked: 1 row needs a decision"),
+    // The panel is now one line and a door (deliberate design, export_panel.rs and the held-rows
+    // work): the row itself, its place and its reason are shown in Review, not in the panel.
+    let panel = stack.text(".export-blocked-head");
+    assert_eq!(
+        panel, "Export blocked: 1 held row needs a decision (it is in Review).",
         "{panel}"
     );
-    assert!(panel.contains("src/orders/repo.rs:5"), "{panel}");
-    assert!(panel.contains("evidence unverified"), "{panel}");
     assert_eq!(
         stack.js("T.count('.export-clear .btn-run')"),
         0,
         "the Export button is gone"
+    );
+    // Follow the door with a real click: Review shows that row, at that place, held for the reason.
+    assert!(
+        stack.js_bool("(() => { const w = document.querySelector('.site-detail .site-detail-where'); return !w || !w.textContent.includes('src/orders/repo.rs:5'); })()"),
+        "Review does not already show the held row before the door is used"
+    );
+    stack.click(".export-blocked .export-open-review", "Open Review");
+    stack.wait_for(
+        "the held row in Review",
+        "T.has('.site-detail .site-detail-where', 'src/orders/repo.rs:5')",
+    );
+    assert_eq!(
+        stack.text(".site-detail .site-detail-where").trim(),
+        "Where\nacme/portal src/orders/repo.rs:5"
+    );
+    let detail = stack.text(".site-detail");
+    assert!(
+        detail.contains("Held from export: evidence unverified. Decide it to release."),
+        "{detail}"
     );
     let added = stack.store("edits");
     let rows = added["added"].as_array().expect("added");
@@ -1431,7 +1475,8 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         "this one is reachable without signing in",
     );
     stack.click(".engine-correction .queue-prompt-commit", "");
-    stack.wait_text(".engine-state-text", "corrected");
+    // "No, corrected": the held states say "until corrected" too, so the bare word would match a card that is still held.
+    stack.wait_text(".engine-state-text", "No, corrected");
     assert_eq!(stack.strip().held, 0, "a corrected No holds nothing");
 
     // Card 2: press N, start the correction, then go Next without finishing it. The No is
@@ -1457,17 +1502,11 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
     held_one.held = 1;
     stack.assert_shell_counts(&held_one);
     stack.wait_for("the export panel", "T.count('.export-blocked') === 1");
-    let panel = stack.text(".export-blocked");
-    assert!(
-        panel.contains("Export blocked: 1 row needs a decision"),
-        "{panel}"
-    );
-    assert!(
-        panel.contains(&second),
-        "the panel lists the row of card 2: {panel}"
-    );
-    assert!(
-        panel.contains("Engine Check said No, no correction yet"),
+    // The panel is one line and a door (deliberate design, export_panel.rs): the row is named
+    // where the door leads, not in the panel.
+    let panel = stack.text(".export-blocked-head");
+    assert_eq!(
+        panel, "Export blocked: 1 held row needs a decision (it is in Review).",
         "{panel}"
     );
     assert_eq!(
@@ -1476,13 +1515,26 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         "the Export button is gone"
     );
 
-    // The panel's door on that row takes the reviewer to that card in the Engine Check lane.
-    stack.click_in(".gate-row", &second, "button");
+    // The panel's door takes the reviewer to that row's card in the Engine Check lane.
+    stack.click(".export-blocked .export-open-review", "Open Review");
     stack.wait_for(
         "card 2 again",
         "T.text('.engine-card-pos').startsWith('Card 2 of')",
     );
     assert_eq!(stack.text(".engine-card .site-pane-code"), second);
+    // The gate names that same row, at that place, for the Engine Check's uncorrected No.
+    let held = stack.gate_held();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(
+        held[0]["reason"], "engine_check_no_without_correction",
+        "{held:?}"
+    );
+    assert_eq!(
+        format!("{}:{}", held[0]["path"].as_str().unwrap(), held[0]["line"]),
+        second,
+        "{held:?}"
+    );
+    stack.wait_text(".engine-state-text", "held from export until corrected");
     assert!(
         stack.js_bool("T.has('.triage-tab.active', 'Engine Check')"),
         "the Engine Check lane is showing"
@@ -1494,9 +1546,14 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
     stack.type_into(
         ".engine-correction .queue-reason-input",
         "",
-        "this one is a real finding at critical",
+        "this one is a real finding, just a medium one",
     );
-    stack.js("(() => { const s = T.find('.engine-correction select'); s.value = 'critical'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()");
+    // The correction picks a severity the row does not already have, below critical (the row's
+    // own severity is read from the form). Any severity edit is the reviewer's decision on the
+    // row, so this test is about the Engine Check hold falling whichever way it goes.
+    let current = stack.js_string("T.find('.engine-correction select').value");
+    let chosen = if current == "medium" { "low" } else { "medium" };
+    stack.js(&format!("(() => {{ const s = T.find('.engine-correction select'); s.value = '{chosen}'; s.dispatchEvent(new Event('change', {{ bubbles: true }})); return s.value; }})()"));
     stack.click(".engine-correction .queue-prompt-commit", "");
     stack.wait_for(
         "the Export button",
@@ -1948,7 +2005,7 @@ fn a_place_with_two_rules_is_decided_once_a_rule_decided_alone_wins_and_the_gate
         let mut outer = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
         let mut data = String::new();
         outer
-            .by_name("findings.json")
+            .by_name("json/inspection.json")
             .unwrap()
             .read_to_string(&mut data)
             .unwrap();

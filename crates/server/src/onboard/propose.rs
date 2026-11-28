@@ -521,8 +521,10 @@ const FRAMEWORK_DOMAINS: &[(&str, &[&str])] = &[
     // only through this row; they carry no `extra_domains`, so a plain Express app never sees them).
     ("Firebase", &["firebase"]),
     // ── Infrastructure-as-code → `iac` ──────────────────────────────────────────────────────
-    ("Terraform", &["iac"]),
-    ("Terragrunt", &["iac"]),
+    // The eight Terraform security rules live in `iac:terraform`, so a Bicep, Pulumi or
+    // CloudFormation repo never selects (or counts) them.
+    ("Terraform", &["iac", "iac:terraform"]),
+    ("Terragrunt", &["iac", "iac:terraform"]),
     ("Bicep", &["iac"]),
     ("Pulumi", &["iac"]),
     ("CloudFormation", &["iac"]),
@@ -724,7 +726,8 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
     if !path.exists() {
         return Vec::new();
     }
-    let (set, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+    let (set, errs) = camerata_rules::load_corpus_lenient(&path).await;
+    crate::log_corpus_load_errors("rule proposal", &errs);
     // The union of all repos' domains selects the candidate rules from the corpus.
     let mut all_domains = std::collections::BTreeSet::new();
     for (_, ds) in repo_domains {
@@ -1226,6 +1229,7 @@ mod tests {
         ("sql", &[("db/schema.sql", "create table t (id int);")]),
         ("ci-cd", &[(".github/workflows/ci.yml", "on: push\n")]),
         ("iac", &[("main.tf", "resource \"null_resource\" \"a\" {}\n")]),
+        ("iac:terraform", &[("main.tf", "resource \"null_resource\" \"a\" {}\n")]),
         // ── Supabase: the CLI project config alone is a sufficient structural marker ─────────
         // (There is no bare `supabase` row: no rule lives directly in
         // `crates/rules/principles/supabase/`, so it is not a corpus domain —
@@ -1595,6 +1599,57 @@ mod tests {
             "every stack-matched, grounded nest rule must be pre-checked: {unarmed:?}"
         );
     }
+
+    /// The eight Terraform rules live in `iac:terraform`: a Terraform repo proposes all of them
+    /// plus the generic `ARCH-IAC-1`.
+    #[tokio::test]
+    async fn a_terraform_repo_proposes_the_eight_terraform_rules_and_arch_iac() {
+        let repo_files = files(&[("main.tf", "resource \"null_resource\" \"a\" {}\n")]);
+        let stack = detect_stack("acme/infra", &repo_files);
+        let repo_domains = vec![("acme/infra".to_string(), domains_for_stack(&stack))];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+        // The whole library is listed; only the stack-matched rules are recommended (selected).
+        let ids: std::collections::BTreeSet<&str> = proposed
+            .iter()
+            .filter(|r| r.recommended)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert!(ids.contains("ARCH-IAC-1"), "ARCH-IAC-1 missing");
+        for id in TERRAFORM_RULE_IDS {
+            assert!(ids.contains(id), "{id} not proposed for a Terraform repo");
+        }
+    }
+
+    /// A Bicep-only repo proposes `ARCH-IAC-1` and NONE of the Terraform rules, so the report's
+    /// headline "rules checked" count (the audited set) never includes them.
+    #[tokio::test]
+    async fn a_bicep_only_repo_proposes_no_terraform_rules() {
+        let repo_files = files(&[("infra/main.bicep", "param location string\n")]);
+        let stack = detect_stack("acme/infra", &repo_files);
+        let repo_domains = vec![("acme/infra".to_string(), domains_for_stack(&stack))];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+        // The whole library is listed; only the stack-matched rules are recommended (selected).
+        let ids: std::collections::BTreeSet<&str> = proposed
+            .iter()
+            .filter(|r| r.recommended)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert!(ids.contains("ARCH-IAC-1"), "ARCH-IAC-1 missing");
+        for id in TERRAFORM_RULE_IDS {
+            assert!(!ids.contains(id), "{id} must not be proposed for Bicep");
+        }
+    }
+
+    const TERRAFORM_RULE_IDS: &[&str] = &[
+        "IAC-TERRAFORM-ENCRYPTION-AT-REST-1",
+        "IAC-TERRAFORM-DATABASE-EXPOSURE-1",
+        "IAC-TERRAFORM-ACCESS-LOGGING-1",
+        "IAC-TERRAFORM-DELETION-PROTECTION-1",
+        "IAC-TERRAFORM-WILDCARD-IAM-POLICY-1",
+        "IAC-TERRAFORM-PUBLIC-BUCKET-1",
+        "IAC-TERRAFORM-REMOTE-STATE-1",
+        "IAC-TERRAFORM-NETWORK-EXPOSURE-1",
+    ];
 
     /// `ARCH-ONE-IMPORT-PATH-1` lives in the `javascript` domain, which a TypeScript repo
     /// reaches via `javascript:typescript` and a plain JavaScript repo reaches directly. No

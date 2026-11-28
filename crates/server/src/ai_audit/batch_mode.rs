@@ -99,6 +99,34 @@ pub(crate) fn one_hour_cache_is_cheaper(items: usize) -> bool {
     items >= 2
 }
 
+/// THE WARM RULE (#240): whether a submission sends its first cache-marked item in real time,
+/// and waits for the reply, before the rest are submitted.
+///
+/// A batch runs its items side by side, so items that start before the first has written the
+/// cache each write the shared prefix again, at the 1-hour write price. One call that has
+/// finished first turns every later item into a read. It needs a prefix to share, so:
+///
+/// * `batch_warm` off: never.
+/// * fewer than two marked items: never (nothing to share).
+/// * the batch asks for the 5-minute cache: the warm write would be a 5-minute one and is likely
+///   to have expired before the batch starts. Never.
+/// * `cache_unproven`: an earlier warm reply in this run reported no cache write and no cache
+///   read, so the prefix is under the model's minimum cacheable size and the marks do nothing;
+///   another warm call would only be a real-time call at full price. Never.
+pub(crate) fn should_warm_batch(
+    eff: crate::efficiency::EfficiencyConfig,
+    marked_items: usize,
+    cache_unproven: bool,
+    batch_ttl: CacheTtl,
+) -> bool {
+    eff.batch_warm && marked_items >= 2 && !cache_unproven && batch_ttl == CacheTtl::OneHour
+}
+
+/// True when a reply shows the cache did nothing: no tokens written and none read.
+pub(crate) fn reply_shows_no_caching(resp: &LlmResponse) -> bool {
+    resp.cache_creation_input_tokens == 0 && resp.cache_read_input_tokens == 0
+}
+
 /// The Message Batches calls the batch scan path makes. A seam so the path runs against a fake
 /// in tests; production implements it on the real [`Llm`].
 #[async_trait::async_trait]
@@ -242,6 +270,23 @@ pub(crate) struct BatchWork {
     pub ci: usize,
     pub bi: usize,
     pub req: LlmRequest,
+}
+
+/// Whether an error row that was NOT billed is a credit or billing refusal (the account or the
+/// credential was refused), and if so, stop the run now through run health. Both batch paths
+/// (the scan pass's [`submit_round`] and the stage runner) call this, so a credit row maps to
+/// the same class, the same stop reason and the same message in each. Waiting or sending again
+/// fixes neither, so a caller that gets `true` never resends the row in that attempt; nothing
+/// is recorded on the meter for it, because the provider did not bill it.
+pub(crate) fn stop_run_on_billing_row(meter: Option<&UsageMeter>, error: &str) -> bool {
+    use camerata_llm::failure::{classify_text, FailureClass};
+    if classify_text(error).0 != FailureClass::AuthOrBilling {
+        return false;
+    }
+    if let Some(m) = meter {
+        m.health().note_failure(FailureClass::AuthOrBilling, error);
+    }
+    true
 }
 
 /// Why one batch item has no reply, and whether sending it again is safe.
@@ -423,7 +468,7 @@ pub(crate) async fn submit_round(
                             .iter()
                             .map(|(path, _)| path.clone())
                             .collect(),
-                        class: camerata_llm::failure::FailureClass::SpendLimit,
+                        class: camerata_llm::failure::FailureClass::OutageStop,
                     });
                 }
             }
@@ -504,12 +549,15 @@ pub(crate) async fn submit_round(
                                 reprice(&mut billed);
                                 m.record_stage(Stage::ScanPass, &billed);
                             }
+                            // A credit or billing row (never billed) stops the run now, as in the
+                            // stage runner, and is neither resubmitted nor second-tried.
+                            let sendable = !refused && !stop_run_on_billing_row(ctx.meter, &error);
                             out.results.insert(
                                 w.custom_id.clone(),
                                 Err(ItemFailure {
                                     reason: error,
-                                    resubmittable: !refused,
-                                    second_tryable: !refused,
+                                    resubmittable: sendable,
+                                    second_tryable: sendable,
                                 }),
                             );
                         }
@@ -714,6 +762,7 @@ async fn submit_poll_fetch(
     ttl: CacheTtl,
 ) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
     let n_items = items.len();
+    let round_started = crate::stage_telemetry::now_unix_ms();
     let submitted = ctx.api.submit(items).await;
     note_batch_call(ctx.meter, &submitted);
     let batch_id = submitted.map_err(|error| SubBatchFailure {
@@ -734,7 +783,7 @@ async fn submit_poll_fetch(
         done_before: 0,
         total: Some(n_items),
     };
-    poll_and_fetch(
+    poll_and_fetch_since(
         ctx,
         &batch_id,
         ttl,
@@ -742,6 +791,7 @@ async fn submit_poll_fetch(
         Some(progress),
         ctx.fatal_errors,
         false,
+        round_started,
     )
     .await
 }
@@ -754,6 +804,63 @@ async fn submit_poll_fetch(
 /// With `cancellable` the job's cancel flag is looked at once per poll interval (and before each
 /// attempt); a cancel ends the wait at once with a [`JobCancelled`] error carrying the batch id.
 pub(crate) async fn poll_and_fetch(
+    ctx: &RoundContext<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    interval: std::time::Duration,
+    progress: Option<PollProgress>,
+    fatal_errors: bool,
+    cancellable: bool,
+) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
+    poll_and_fetch_since(
+        ctx,
+        batch_id,
+        ttl,
+        interval,
+        progress,
+        fatal_errors,
+        cancellable,
+        crate::stage_telemetry::now_unix_ms(),
+    )
+    .await
+}
+
+/// [`poll_and_fetch`] for a round that began at `started_unix_ms` (the submission, for a fresh
+/// batch): when the wait ends, however it ends, the stage's run figures learn the round's span.
+/// A resume that only polls starts the round at the poll, so it records this session's wait only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn poll_and_fetch_since(
+    ctx: &RoundContext<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    interval: std::time::Duration,
+    progress: Option<PollProgress>,
+    fatal_errors: bool,
+    cancellable: bool,
+    started_unix_ms: u64,
+) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
+    let stage = progress.map(|p| p.stage);
+    let result = poll_and_fetch_inner(
+        ctx,
+        batch_id,
+        ttl,
+        interval,
+        progress,
+        fatal_errors,
+        cancellable,
+    )
+    .await;
+    if let (Some(meter), Some(stage)) = (ctx.meter, stage) {
+        meter.record_batch_round(
+            stage,
+            started_unix_ms,
+            crate::stage_telemetry::now_unix_ms(),
+        );
+    }
+    result
+}
+
+async fn poll_and_fetch_inner(
     ctx: &RoundContext<'_>,
     batch_id: &str,
     ttl: CacheTtl,

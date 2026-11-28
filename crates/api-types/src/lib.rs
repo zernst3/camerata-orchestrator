@@ -59,6 +59,11 @@
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
+/// The workbook sheet that lists the source rows a reviewer ruled out. Defined here, at the leaf,
+/// so the cockpit's operator text and the exported package name the sheet with one word
+/// (`camerata_server::xlsx_export::vocabulary::RULED_OUT` is this constant).
+pub const RULED_OUT_SHEET: &str = "Ruled out";
+
 pub mod audit;
 pub mod claude_cli;
 pub mod cost_checkpoint;
@@ -71,6 +76,8 @@ pub mod governance;
 pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;
+pub mod package_paths;
+pub mod process_alive;
 pub mod project;
 pub mod review;
 pub mod review_timing;
@@ -79,6 +86,7 @@ pub mod rewrite_advisory;
 pub mod run;
 pub mod site_key;
 pub mod snippet;
+pub mod state_dir;
 pub mod stories;
 pub mod symbol;
 pub mod uow;

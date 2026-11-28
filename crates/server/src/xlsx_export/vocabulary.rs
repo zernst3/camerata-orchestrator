@@ -5,11 +5,12 @@
 //! defined here, once, and the Glossary sheet prints the definition; no other file spells the
 //! name for itself.
 //!
-//! Machine-facing files keep their own field names (`csv/`, `json/`, `findings.json`,
+//! Machine-facing files keep their own field names (`csv/`, `json/`, `json/inspection.json`,
 //! `tickets.csv`'s headers and the wire values such as `do_now` or `kind`). Those are for tools,
 //! not people, and renaming them would break whatever reads them. Everything a person reads is
 //! named from this module.
 
+use camerata_api_types::package_paths::{workbook_name, DS_ALL_FINDINGS, DS_FALSE_POSITIVES};
 use camerata_api_types::review::FpReason;
 
 /// Excel refuses a sheet name over this many characters.
@@ -27,7 +28,7 @@ pub const DEPARTURES: &str = "Departures";
 pub const DEPENDENCIES: &str = "Dependencies";
 pub const RULES_CHECKED: &str = "Rules checked";
 pub const PATTERNS_ACROSS_SERVICES: &str = "Patterns across services";
-pub const RULED_OUT: &str = "Ruled out";
+pub const RULED_OUT: &str = camerata_api_types::RULED_OUT_SHEET;
 pub const NOT_CHECKED: &str = "Not checked";
 /// Excel caps a sheet name at 31 characters, so "(complete record)" is said by the sheet's own
 /// first lines and by the Start here list, not by the tab.
@@ -294,6 +295,7 @@ pub const H_HOW_CONSISTENTLY: &str = "How consistently";
 pub const H_PLACES_LOOKED_AT: &str = "Places looked at";
 pub const H_MORE_DETAIL: &str = "More detail";
 pub const H_CONVENTION: &str = "Convention";
+pub const H_CONVENTION_SOURCE: &str = "Where the convention came from";
 pub const H_PLACES_DEPARTING: &str = "Places departing";
 pub const H_PLACES_CHECKED: &str = "Places checked";
 pub const H_WORST_SEVERITY: &str = "Worst severity";
@@ -428,6 +430,9 @@ pub const DECIDED: &str = "decided";
 pub const WAITING: &str = "Waiting";
 /// What a confirmed problem reads as in a Decision so far cell.
 pub const CONFIRMED_BY_REVIEWER: &str = "Confirmed by the reviewer";
+/// What a problem reads as in a Decision so far cell when the reviewer decided it by changing its
+/// severity themselves.
+pub const SEVERITY_SET_BY_REVIEWER: &str = "Severity set by the reviewer";
 /// What a kind of group is on How problems were grouped.
 pub const LEVEL_AREA: &str = "Area";
 pub const LEVEL_RULE: &str = "Rule";
@@ -473,9 +478,12 @@ pub const GAP_LEFT_TO_CI: &str = "Rule left to your CI";
 
 pub const P_REPOS_INSPECTED: &str = "Repos inspected";
 pub const P_FILES_SCANNED: &str = "Files scanned";
+pub const P_FILE_TYPES: &str = "File types inspected";
 pub const P_CODE_VOLUME: &str = "Code volume";
 pub const P_GENERATED: &str = "Generated";
 pub const P_WHAT_WE_CHECKED: &str = "What we checked";
+/// Set only on an inspection finished by a recheck of its saved run: which build did what.
+pub const P_HOW_THIS_WAS_DONE: &str = "How this was done";
 /// The internal Start here line's label for the possible duplicate count.
 pub const P_POSSIBLE_DUPLICATES: &str = "Possible duplicates";
 /// The internal Start here line's label for the possible false positive count.
@@ -494,6 +502,41 @@ pub fn places_word(n: usize) -> &'static str {
     } else {
         "places"
     }
+}
+
+/// What a person read in this inspection and the review budget that bounds it, in one line the
+/// PDF and the workbook's Start here both print (so a blank "Reviewed in person" cell is
+/// explained, not hidden). The sentence about every critical place and every place the engine was
+/// unsure of is printed only when the release gate guarantees it
+/// ([`crate::release_gate::needs_decision`]).
+pub fn review_line(c: &crate::report_export::ReviewCounts) -> String {
+    let n = c.reviewed_in_person;
+    let mut out = if n == 0 {
+        "No place was reviewed in person.".to_string()
+    } else {
+        format!(
+            "{n} {} {} reviewed in person.",
+            places_word(n),
+            if n == 1 { "was" } else { "were" }
+        )
+    };
+    if let Some(budget) = c.review_budget {
+        out.push_str(&format!(
+            " The review budget for this inspection is {budget} {}.",
+            places_word(budget)
+        ));
+    }
+    if n > 0 && c.every_critical_and_unsure_decided {
+        out.push_str(
+            " Every critical place and every place the review marked unsure is among them, \
+             whatever the budget.",
+        );
+    }
+    out.push_str(&format!(
+        " The other places were checked by the engine against the code, so their \
+         {H_REVIEWED_IN_PERSON} cell is blank."
+    ));
+    out
 }
 
 /// A place's position as the PDF and the sheets say it: "line 12", or "whole file" for a problem
@@ -655,7 +698,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
         TERM_ALSO_MATCHES,
         "A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision.",
-        "All problems; the Rules column; the also_matches field of findings.json",
+        concat!("All problems; the Rules column; the also_matches field of ", camerata_api_types::pkg_inspection_json!()),
     ),
     e(
         "Rule id",
@@ -704,7 +747,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Confidence",
-        "How sure the review is that the problem is real: High, Low or Disputed. Low means the review was unsure; Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
+        "How sure the review is that the problem is real: High, Low or Disputed. Low has three causes. One is that the review marked the problem unsure. Another is that no published standard backs it. The third is that it reads as a convention to consider. Only the first means the review was unsure, and only those problems are always read in person. Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
         "All problems; Needs a decision",
     ),
     e(
@@ -761,6 +804,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Reviewed in person",
         "Yes when a person read the problem in your code. Blank means the engine checked it against your files without a person reading it.",
         "All problems; Dependencies",
+    ),
+    e(
+        "Review budget",
+        "How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the review marked unsure is read whatever the budget.",
+        "Start here; the PDF's most serious problems",
     ),
     e(
         "Engine verified",
@@ -997,6 +1045,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "More detail",
         "The longer explanation behind a row.",
         "All problems; Your conventions; Not checked",
+    ),
+    e(
+        "Where the convention came from",
+        "Whether your code follows the convention or the reviewer set it, with the number of places that depart.",
+        "Departures",
     ),
     e(
         "Places departing",
@@ -1548,12 +1601,8 @@ pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE, POSSIBLE_DUPLICAT
 /// retired word written with capitals in the table (an id header) is matched as written.
 pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
-    for file in [
-        "all-findings",
-        "findings.json",
-        "findings.xlsx",
-        "false-positives",
-    ] {
+    let workbook = workbook_name("");
+    for file in [DS_ALL_FINDINGS, workbook.as_str(), DS_FALSE_POSITIVES] {
         cleaned = cleaned.replace(file, " ");
     }
     let mut lower = cleaned.to_lowercase();
@@ -1730,6 +1779,16 @@ mod tests {
         strings.extend([
             words.details_intro.clone(),
             words.skipped_files_more.clone(),
+            // The reasons Coverage gives for a file it did not read (item 31).
+            crate::scan_ledger::SkipReason::ExcludedByAgreement.label(),
+            crate::scan_ledger::SkipReason::Oversize.label(),
+            crate::scan_ledger::SkipReason::ExcludedNeverRead.label(),
+            crate::scan_ledger::SkipReason::NotInspectedType.label(),
+            crate::onboard::files::not_inspected_in_a_list(),
+            crate::scan_ledger::SkipReason::NotInspectedVersionsOnly.label(),
+            crate::scan_ledger::SkipReason::Symlink.label(),
+            crate::scan_ledger::SkipReason::NameNotText.label(),
+            crate::onboard::files::not_inspected_versions_in_a_list(),
             closes_rules(&["A".to_string(), "B".to_string()]),
             places_count(3),
             more_in_sheet(4, FIX_PLAN),
@@ -1808,7 +1867,7 @@ mod tests {
             Some(("deviation", "Departure"))
         );
         assert_eq!(banned_synonym_in("a website"), None);
-        assert_eq!(banned_synonym_in("see findings.json"), None);
+        assert_eq!(banned_synonym_in("see json/inspection.json"), None);
     }
 
     /// A word an owned concept uses is not retired: "pattern" names the Patterns across services

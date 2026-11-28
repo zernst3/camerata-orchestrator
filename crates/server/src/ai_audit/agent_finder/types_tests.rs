@@ -39,6 +39,37 @@ fn piece_limits_follow_the_design() {
     );
 }
 
+/// Item 31, step 4: a file the size of the read limit (1 MiB) is read in pages of at most 2,000
+/// lines and 100,000 bytes, so the piece's turn limit must cover those reads, not only the file
+/// count. The numbers are pinned here.
+#[test]
+fn a_piece_turn_limit_covers_reading_its_files_in_pages() {
+    use crate::onboard::files::MAX_FILE_BYTES;
+    // A file at the limit, about 40,000 short lines: 21 pages by lines (11 by bytes).
+    let line = "x".repeat(25);
+    let big = format!("{line}\n").repeat(MAX_FILE_BYTES / 26);
+    assert_eq!(room::read_pages(&big), 21);
+    // Few very long lines: the byte limit decides (a 1 MiB file is 11 pages of 100,000 bytes).
+    let wide = "y".repeat(MAX_FILE_BYTES);
+    assert_eq!(room::read_pages(&wide), 11);
+    assert_eq!(room::read_pages(""), 1, "an empty file is one read");
+    // One file's own read is already in the two turns each file is given; only the pages past
+    // the first add turns, on top of the floor of 60.
+    assert_eq!(PieceLimits::turns_for_reading(1, 21), 60);
+    assert_eq!(PieceLimits::turns_for_reading(1, 200), 231);
+    assert_eq!(PieceLimits::turns_for_reading(3, 60), 6 + 30 + 57);
+    // The clamp stays at 400.
+    assert_eq!(PieceLimits::turns_for_reading(10, 10_000), 400);
+    // Without extra pages it is the old rule.
+    assert_eq!(
+        PieceLimits::turns_for_reading(100, 100),
+        PieceLimits::turns_for(100)
+    );
+    let l = PieceLimits::for_piece_reading(1, 200, 2.0);
+    assert_eq!(l.max_turns, 231);
+    assert_eq!(l.ceiling_usd, 8.0);
+}
+
 #[tokio::test]
 async fn a_scripted_agent_plays_its_calls_against_the_room_and_records_the_trace() {
     let agent = ScriptedAgent::new(vec![
@@ -281,6 +312,7 @@ fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
     }
     assert_eq!(finder_model_for(&controls), DEFAULT_FINDER_MODEL);
     let picked = crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder_model: Some(" claude-pick ".into()),
         ..crate::cost_cap::RunControls::default()
     };

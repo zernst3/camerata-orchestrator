@@ -91,6 +91,7 @@ async fn run_with(
 ) -> (Vec<String>, UsageMeter) {
     let rec = Recorder::default();
     let m = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -620,6 +621,7 @@ fn batch_response() -> crate::llm::LlmResponse {
     crate::llm::LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: "{}".to_string(),
         model: "stub".to_string(),
         backend: "api/batch".to_string(),
@@ -703,6 +705,7 @@ async fn run_batch(
         items: std::sync::Mutex::new(Vec::new()),
     };
     let m = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

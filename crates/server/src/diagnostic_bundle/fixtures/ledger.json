@@ -1,0 +1,355 @@
+{
+  "rules": [
+    {
+      "rule_id": "RUST-DOMAIN-2",
+      "repo": "acme-web",
+      "tier": "semantic",
+      "ran": false,
+      "skip_reason": "the scan pass failed: HTTP 529 overloaded",
+      "files_evaluated": 14,
+      "findings_emitted": 0,
+      "coverage_note": "2 of 14 files not reviewed",
+      "not_applicable": false,
+      "judged_not_a_problem": false,
+      "partial_reason": "chunk 2 of 3 failed",
+      "repos_not_run": ["acme-api"],
+      "not_run_reason": "the scan pass failed",
+      "scope_coverage": {"checked": 12, "of": 14, "kind": "files", "changed_files_only": false},
+      "repo_level": false
+    },
+    {
+      "rule_id": "ACME-BILLING-7",
+      "repo": "acme-api",
+      "tier": "deterministic",
+      "ran": true,
+      "skip_reason": null,
+      "files_evaluated": 3,
+      "findings_emitted": 1,
+      "coverage_note": null,
+      "not_applicable": false,
+      "judged_not_a_problem": true,
+      "partial_reason": null,
+      "repos_not_run": [],
+      "not_run_reason": null,
+      "scope_coverage": null,
+      "repo_level": true
+    }
+  ],
+  "stages": [
+    {
+      "stage": "cross-family-merge",
+      "repo": "acme-web",
+      "rows_in": 20,
+      "rows_out": 15,
+      "merged_into": [{"rule_id": "RUST-DOMAIN-2", "target_rule_id": "RUST-DOMAIN-5"}],
+      "routed_held": 1,
+      "routed_informational": 2,
+      "deduped": 2,
+      "other": [["junk finding discarded", 0]],
+      "added": [["clone judge", 1]],
+      "unaccounted": 0,
+      "model": "model-audit-1"
+    }
+  ],
+  "not_a_problem_notes": ["scan pass 1/3 · RUST-DOMAIN-2 · src/billing/charge.ts:41 · not a problem: the value is validated upstream"],
+  "input": {
+    "files_scanned": 120,
+    "files_excluded": 4,
+    "code_chars": 345678,
+    "engine_artifacts_admitted": 0,
+    "audit_model": "model-audit-1",
+    "skipped_files": [
+      {"repo": "acme-web", "path": "assets/acme-logo.svg", "reason": "oversize", "bytes": 2048000},
+      {"repo": "acme-web", "path": "src/gen/schema.ts", "reason": "generated", "bytes": 5000},
+      {"repo": "acme-web", "path": "src/gen/big.ts", "reason": "generated_unsearched", "bytes": 2100000},
+      {"repo": "acme-web", "path": "src/legacy/Report.vb", "reason": "not_inspected_type", "bytes": 800},
+      {"repo": "acme-web", "path": "Gemfile", "reason": "not_inspected_versions_only", "bytes": 300},
+      {"repo": "acme-web", "path": "src/link.ts", "reason": "symlink"}
+    ],
+    "skipped_beyond_cap_total": 0,
+    "skipped_totals": {
+      "oversize": 1,
+      "beyond_file_cap": 0,
+      "not_text": 2,
+      "excluded_by_agreement": 1,
+      "long_line": 0,
+      "excluded_never_read": 0,
+      "secret_search_ran": true,
+      "secret_searched": 3,
+      "secret_over_ceiling": 0,
+      "secret_oversize_not_text": 0,
+      "generated": 2,
+      "generated_unsearched": 1,
+      "not_inspected_type": 4,
+      "not_inspected_versions_only": 2,
+      "symlink": 1,
+      "name_not_text": 0,
+      "secret_over_budget": 1
+    },
+    "file_cap_hits": [{"repo": "acme-web", "not_scanned": 0, "limit": 2000}]
+  },
+  "path_hygiene": {
+    "rows_total": 30,
+    "absolute": 1,
+    "backslash": 0,
+    "prose": 0,
+    "worst_example": "/Users/auditor/clients/acme/acme-web/src/billing/charge.ts",
+    "offending_rows": 1
+  },
+  "evidence": {
+    "checked": 10,
+    "verified": 8,
+    "unverified": 1,
+    "exempt": 1,
+    "site_checked": 10,
+    "site_exempt": 1,
+    "site_verified": 8,
+    "site_unverified": 1
+  },
+  "content": {"rows_seen": 30, "held": 1, "wording_flags": 0},
+  "discarded": {"by_reason": {"no evidence": 2, "outside scope": 1}},
+  "escalation": {
+    "model": "model-review-1",
+    "rate_per_kloc": 0.5,
+    "floor": 3,
+    "counted_lines": 12000,
+    "budget": 6,
+    "candidates": 9,
+    "escalated": 7,
+    "candidate_rows": 10,
+    "escalated_rows": 8,
+    "over_budget": 1,
+    "total_sites": 40,
+    "share_escalated": 0.175,
+    "by_reason": {"high severity": 5, "low confidence": 2},
+    "over_budget_by_reason": {"high severity": 1},
+    "over_budget_reasons": ["high severity over budget"],
+    "unplaced": ["acme-web:src/billing/charge.ts:41:RUST-DOMAIN-2"],
+    "rules_reviewed": 4,
+    "rules_failed": 0
+  },
+  "fix_merge": {
+    "stage": "fix-merge",
+    "sub_groups_in": 5,
+    "fixes_out": 4,
+    "folded": [["fix-member-acme-1", "fix-acme-2"]]
+  },
+  "place_merge": {"stage": "place-merge", "rows_in": 30, "places_out": 25, "carried": 5},
+  "conventions": {
+    "rules": [
+      {
+        "repo": "acme-web",
+        "rule_id": "RUST-DOMAIN-5",
+        "finder_rows": 4,
+        "departures": 1,
+        "conforming": 3,
+        "unknown": 0,
+        "recorded_places": 4,
+        "departure_rows": 1
+      }
+    ],
+    "lost_finder_rows": 0
+  },
+  "group_review": {"stage1_sites": 40, "sites": 30, "groups": 6, "rules_in_play": 4, "files": 12},
+  "stage_telemetry": {
+    "counted_lines": 12000,
+    "stages": [
+      {
+        "stage": "scan_pass",
+        "usage": {
+          "calls": 12,
+          "input_tokens": 120000,
+          "output_tokens": 8000,
+          "cache_read_input_tokens": 50000,
+          "cache_creation_input_tokens": 10000,
+          "cost_usd": 3.25,
+          "cost_reported_calls": 12,
+          "wasted_calls": 2,
+          "wasted_input_tokens": 20000,
+          "wasted_output_tokens": 0,
+          "wasted_cost_usd": 0.5,
+          "busy_ms": 90000,
+          "wasted_busy_ms": 15000,
+          "first_call_unix_ms": 1795601800000,
+          "last_call_unix_ms": 1795603400000,
+          "batch_wait_ms": 4000,
+          "failed_busy_ms": 2000,
+          "cache_miss_turns": 3,
+          "models": {"model-audit-1": 12}
+        }
+      }
+    ],
+    "efficiency": {
+      "warm_schedule": true,
+      "label_after_prefix": true,
+      "batch_long_cache": true,
+      "result_cache": true,
+      "truncation_retry": true,
+      "fix_prefilter": true,
+      "fix_on_haiku": true,
+      "terse_output": true,
+      "batch_default": true,
+      "applies_to_routing": true,
+      "candidates_prefilter": true,
+      "batch_warm": true
+    },
+    "fix_outcome": {
+      "sent_to_model": 4,
+      "answered": 3,
+      "gave_up": 1,
+      "cap_stopped": 0,
+      "transport_failed": 0,
+      "authored_without_model": 1
+    },
+    "routing": {"pairs_total": 40, "pairs_skipped": 10},
+    "candidates": {
+      "rules": {
+        "RUST-DOMAIN-2": {
+          "locator": "fn charge_card(",
+          "chunks_narrowed": 2,
+          "chunks_without_sites": 1,
+          "chunks_not_narrowed": 0,
+          "chunks_fallback": 0,
+          "digest_bytes_whole": 9000,
+          "digest_bytes_sent": 3000
+        }
+      },
+      "fallbacks": [
+        {"repo": "acme-web", "group": "src/billing", "chunk": 2, "locator": "fn charge_card(", "reason": "the locator matched no line"}
+      ]
+    },
+    "detail_rejections": {
+      "mismatch": 0,
+      "drops_named_token": 1,
+      "invented_precondition": 0,
+      "missing_id": 0,
+      "truncated": 0,
+      "left_out": 0
+    },
+    "review_flags": {"detail": 1, "fix": 0, "by_kind": {"invented_precondition": 1}},
+    "repo_maps": {
+      "calls": [
+        {"repo": "acme-web", "group": "src/billing", "chunk": 1, "files_in_map": 40, "files_with_symbols": 30, "outlined_files": 5}
+      ],
+      "fallbacks": [{"repo": "acme-web", "files": 400, "tree_tokens": 90000, "budget": 60000}],
+      "splits": {"chunks_split": 1, "parts_added": 1, "files_split_by_lines": 0}
+    }
+  },
+  "ai_key": {
+    "audit_model": "model-audit-1",
+    "calibration_model": "",
+    "prompt_schema_version": 12,
+    "directives_fingerprint": "beefcafe4567",
+    "terse_output": true,
+    "applies_to_routing": true
+  },
+  "efficiency": {
+    "warm_schedule": true,
+    "label_after_prefix": true,
+    "batch_long_cache": true,
+    "result_cache": true,
+    "truncation_retry": true,
+    "fix_prefilter": true,
+    "fix_on_haiku": true,
+    "terse_output": true,
+    "batch_default": true,
+    "applies_to_routing": true,
+    "candidates_prefilter": true,
+    "batch_warm": true
+  },
+  "cost_cap": {
+    "cap_usd": 40.0,
+    "spent_usd": 12.0,
+    "not_run_passes": [
+      {
+        "repo": "acme-web",
+        "group": "src/billing",
+        "chunk": 3,
+        "n_chunks": 3,
+        "rule_batch": 1,
+        "n_rule_batches": 2,
+        "rule_ids": ["RUST-DOMAIN-2", "ACME-BILLING-7"],
+        "files": ["src/billing/charge.ts"],
+        "class": "spend_limit"
+      }
+    ],
+    "not_run_stages": [{"repo": "acme-web", "stage": "fix-specific generation", "partial": true, "class": "spend_limit"}],
+    "notes": ["the spend limit set for this run was reached"],
+    "repos_not_finished": ["acme-web"],
+    "cost_unknown": false,
+    "checkpoint": {
+      "approved_usd": 40.0,
+      "spent_usd": 12.0,
+      "projected_usd": 44.0,
+      "pieces_done": 3,
+      "pieces_left": 1,
+      "stopped": true,
+      "new_estimate_usd": 44.0,
+      "difference_usd": 4.0,
+      "stopped_before": "piece 4 of 4",
+      "reserve_usd": 2.0
+    }
+  },
+  "outage": {
+    "trigger": {"class": "transport", "detail": "3 transport failures in 60 seconds", "at": "2026-11-24T10:41:00Z"},
+    "not_run_passes": [
+      {
+        "repo": "acme-web",
+        "group": "src/billing",
+        "chunk": 2,
+        "n_chunks": 3,
+        "rule_batch": 1,
+        "n_rule_batches": 1,
+        "rule_ids": ["RUST-DOMAIN-2"],
+        "files": ["src/billing/charge.ts"],
+        "class": "outage_stop"
+      }
+    ],
+    "not_run_stages": [{"repo": "acme-web", "stage": "detail regeneration", "partial": false, "class": "outage_stop"}],
+    "repos_not_finished": ["acme-web"]
+  },
+  "engagement": {
+    "client_engagement": true,
+    "backend": "api",
+    "provider": "anthropic",
+    "models": [{"role": "audit", "model": "model-audit-1"}],
+    "client_tooling_opt_in": false,
+    "client_tooling_allowed": false
+  },
+  "incremental": {"changed": 3, "carried_files": 100, "carried_findings": 7, "prior_sha": "0a1b2c3d4e5f"},
+  "client_suppressions_found": 2,
+  "rule_scopes": {"RUST-DOMAIN-2": ["acme-web"], "ACME-BILLING-7": []},
+  "runner_notes": ["batch msgbatch_acme01 is no longer held by the provider"],
+  "finder_coverage": [
+    {
+      "repo": "acme-web",
+      "pieces": [
+        {
+          "piece": "src/billing (12 files)",
+          "files_owed": 12,
+          "read_in_full": 10,
+          "read_in_part": 1,
+          "sent_again": 1,
+          "not_reviewed": 1,
+          "context_files_read": 3,
+          "agent_list_matched": true,
+          "not_reviewed_files": ["src/billing/charge.ts"]
+        }
+      ]
+    }
+  ],
+  "duplicate_checks": {
+    "pairs": [
+      {
+        "key_a": "acme-web:src/billing/charge.ts:41",
+        "key_b": "acme-web:src/billing/refund.ts:12",
+        "fix_a": "fix-acme-1",
+        "fix_b": "fix-acme-2",
+        "verdict": "same",
+        "reason": "both validate chargeAmount before the call",
+        "model": "model-review-1"
+      }
+    ],
+    "not_run": "the duplicate check ran"
+  }
+}

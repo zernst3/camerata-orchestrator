@@ -20,6 +20,35 @@ async fn health_returns_ok() {
     assert_eq!(json["status"], "ok");
 }
 
+/// The health route names the build the server came from, so the app can refuse to run against a
+/// server from a different build. `commit` is the same value the exports carry (`ENGINE_COMMIT`),
+/// `null` only for a build outside a git checkout; `dirty` says whether the tree had uncommitted
+/// changes when it was built.
+#[tokio::test]
+async fn health_reports_the_build_identity() {
+    let app = router(AppState::seeded());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["service"], "camerata-server", "the service name stays");
+    assert_eq!(
+        json["commit"],
+        serde_json::json!(crate::ENGINE_COMMIT),
+        "the health route reports the commit this binary was built from"
+    );
+    assert!(
+        json["dirty"].is_boolean(),
+        "the health route says whether the build was dirty: {json}"
+    );
+}
+
 /// `/api/usage` returns the cumulative ledger snapshot in the documented shape, and
 /// reflects calls recorded on the shared ledger (proving the endpoint reads the same
 /// state the chokepoint writes). Provider-agnostic: records an Anthropic-shaped (cost
@@ -33,6 +62,7 @@ async fn usage_endpoint_shape_and_accumulation() {
         &crate::llm::LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-opus-5".to_string(),
             backend: "cli".to_string(),
@@ -51,6 +81,7 @@ async fn usage_endpoint_shape_and_accumulation() {
         &crate::llm::LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-sonnet-5".to_string(),
             backend: "api".to_string(),

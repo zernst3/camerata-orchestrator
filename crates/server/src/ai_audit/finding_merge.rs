@@ -432,7 +432,7 @@ pub(super) fn snippet_value_is_template(snippet: &str) -> bool {
 /// ellipsis is left only where a real value was). A real key pasted into `.env.example` is a
 /// leak, whatever the file is called.
 pub(super) fn snippet_holds_real_secret(snippet: &str) -> bool {
-    snippet.contains('\u{2026}')
+    camerata_secrets::has_real_redaction_marker(snippet)
         || camerata_secrets::detect_all(snippet)
             .iter()
             .any(camerata_secrets::SecretMatch::is_secret)
@@ -987,6 +987,7 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // M5: the sentence that says a row's quoted snippet was not found near its line.
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_SITES_CAPTURE,
+    crate::onboard::evidence_check::MODEL_WRITTEN_CAPTURE,
     // M4: the list of review flags the detail and fix stages wrote on the row (a wording problem
     // that shipped with a flag). The same flag on two rows says the same check fired, not that
     // the rows are about the same object.
@@ -1022,6 +1023,8 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::ai_audit::agent_finder::reply::FINDER_RULES_CAPTURE,
     // The note on a place unfolded from a ruled-out row: it names the host row's key.
     crate::report_export::unfold::UNFOLDED_FROM_CAPTURE,
+    // The convention model's departure rows name the option of the place they stand for.
+    crate::conventions::CONVENTION_PLACE_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

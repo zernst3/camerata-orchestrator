@@ -247,6 +247,7 @@ pub(super) fn degraded_context_reason(status: &str, reason: &str) -> String {
     }
     match status {
         "file_missing" => "file not found — changed since scan?",
+        "repo_unlinked" => camerata_ui_core::viewer::REPO_UNLINKED_WORDS,
         "line_gone" => "file changed since scan",
         "not_utf8" => "file is not valid UTF-8 (binary?)",
         "too_large" => "file too large to load",
@@ -310,9 +311,9 @@ pub(in crate::cockpit) fn audited_origins(
 }
 
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
-/// mounts; the caller keys this component by `repo`/`path`/`line` (see the finding-detail
-/// modal) so opening a DIFFERENT finding remounts it fresh rather than showing stale content
-/// left over from the previous one.
+/// mounts. The caller mounts it through [`FindingDetailSections`], which keys it by finding so a
+/// DIFFERENT finding is a fresh section (a re-run `use_resource` would keep the previous
+/// finding's answer on screen until the new one arrives).
 ///
 /// Degradation floor (design §5): the stored `finding.snippet` is already rendered above this
 /// section by the caller. ANY failure here — file moved/deleted, line gone, non-UTF8,
@@ -363,7 +364,11 @@ pub(super) fn FindingCodeContext(
         // stored snippet above already covers the finding, so say nothing further here
         // rather than showing a confusing empty error box.
         Some(None) => rsx! {},
-        Some(Some(v)) => rsx! { FindingContextBlock { view: v } },
+        // Keyed by the block's lines so "Show full block" does not carry over to another block.
+        // The arm's element lands in a dynamic slot, where the differ honours the key.
+        Some(Some(v)) => {
+            rsx! { FindingContextBlock { key: "{v.start_line}-{v.violation_line}", view: v } }
+        }
     };
     rsx! {
         if let Some(door) = door {
@@ -489,8 +494,7 @@ pub(super) async fn fetch_finding_fix(rule_id: &str) -> Option<FindingFixView> {
 }
 
 /// The "Recommended fix" block of the finding-detail modal. Fetches ON-DEMAND every time it
-/// mounts; the caller keys this component by `rule_id` (see the finding-detail modal) so
-/// switching to a different finding remounts it fresh.
+/// mounts. The caller mounts it through [`FindingDetailSections`], which keys it by finding.
 ///
 /// Degradation floor (matches `FindingCodeContext`'s discipline): no corpus entry, no
 /// adopted default option, a blank directive, a request that fails outright, or a response
@@ -520,5 +524,28 @@ pub(super) fn FindingRecommendedFix(rule_id: String) -> Element {
         },
         // No corpus directive for this rule — omit the block entirely, never an empty one.
         Some(Some(_)) => rsx! {},
+    }
+}
+
+/// The finding-detail modal's two on-demand sections for one finding. Each is rendered as a
+/// keyed list of one: `key` is honoured only among list children, and a fresh mount is what
+/// brings back "loading…", drops the previous finding's answer and resets "Show full block".
+#[component]
+pub(super) fn FindingDetailSections(
+    finding: FindingView,
+    #[props(default)] on_open_viewer: Option<Callback<()>>,
+) -> Element {
+    let context_key = format!(
+        "{}\u{1f}{}\u{1f}{}",
+        finding.repo, finding.path, finding.line
+    );
+    let fix_key = format!("{context_key}\u{1f}{}", finding.rule_id);
+    rsx! {
+        for k in [context_key] {
+            FindingCodeContext { key: "{k}", finding: finding.clone(), on_open_viewer }
+        }
+        for k in [fix_key] {
+            FindingRecommendedFix { key: "{k}", rule_id: finding.rule_id.clone() }
+        }
     }
 }

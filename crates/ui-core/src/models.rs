@@ -53,6 +53,16 @@ impl ModelsResp {
     }
 }
 
+/// True when `id` is one of the registry's models. The only ids the chat selector may persist:
+/// a placeholder ("default", blank) or a model of an unloaded registry is never saved.
+pub fn is_registry_model(models: &Option<ModelsResp>, id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty()
+        && models
+            .as_ref()
+            .is_some_and(|m| m.models.iter().any(|o| o.id == id))
+}
+
 /// Build the option groups for the in-chatbox model selector. This ALWAYS returns at least one
 /// option, so the `<select>` can never render empty/invisible — the recurring "the chat model
 /// selector disappeared" regression. When the model registry has not loaded yet (resource `None`)
@@ -74,19 +84,23 @@ pub fn chat_model_groups(
         }
     }
     // Registry absent or empty: never leave the selector without an option.
-    let id = if current.trim().is_empty() {
-        "default".to_string()
-    } else {
-        current.to_string()
-    };
-    vec![(
-        "Current".to_string(),
-        vec![ModelOption {
-            label: id.clone(),
-            id,
+    // The fallback is never the word "default": with no real current model it is an id-less
+    // "Loading models" option that the change handler must not save.
+    let cur = current.trim();
+    let option = if cur.is_empty() || cur.eq_ignore_ascii_case("default") {
+        ModelOption {
+            label: "Loading models\u{2026}".to_string(),
+            id: String::new(),
             provider: String::new(),
-        }],
-    )]
+        }
+    } else {
+        ModelOption {
+            label: cur.to_string(),
+            id: cur.to_string(),
+            provider: String::new(),
+        }
+    };
+    vec![("Current".to_string(), vec![option])]
 }
 
 #[cfg(test)]
@@ -142,6 +156,35 @@ mod tests {
         // Even with no current model and no registry, offer a placeholder so the <select> renders.
         let groups = chat_model_groups(&None, "");
         assert!(total_options(&groups) >= 1);
+    }
+
+    #[test]
+    fn chat_model_groups_fallback_is_labelled_loading_not_default() {
+        // The registry has not loaded and no real model is chosen: the one fallback option must
+        // say it is loading, carry NO id (so it can never be mistaken for a model), and never be
+        // the self-named word "default".
+        for current in ["", "default", " Default "] {
+            let groups = chat_model_groups(&None, current);
+            let all: Vec<&ModelOption> = groups.iter().flat_map(|(_, o)| o.iter()).collect();
+            assert_eq!(all.len(), 1, "current {current:?}");
+            assert_eq!(all[0].id, "", "current {current:?}");
+            assert!(all[0].label.to_lowercase().contains("loading"));
+            assert!(!all[0].label.eq_ignore_ascii_case("default"));
+        }
+    }
+
+    #[test]
+    fn is_registry_model_only_accepts_ids_in_the_registry() {
+        let resp = ModelsResp {
+            models: vec![opt("claude-opus-5", "claude")],
+            default: String::new(),
+            backend: String::new(),
+        };
+        let some = Some(resp);
+        assert!(is_registry_model(&some, "claude-opus-5"));
+        assert!(!is_registry_model(&some, "default"));
+        assert!(!is_registry_model(&some, ""));
+        assert!(!is_registry_model(&None, "claude-opus-5"));
     }
 
     #[test]

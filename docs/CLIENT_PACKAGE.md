@@ -4,7 +4,7 @@ This page says what a Codebase Inspection delivers: every file in the package, w
 
 ## What the package is and who reads it
 
-The package is one ZIP. It holds a PDF, an Excel workbook, files for tools and a README. Every file comes from the same inspection of the same commit, and the release gate refuses the export if the files disagree with each other.
+The package is one ZIP. It holds a PDF, an Excel workbook, files for tools and a README. The PDF, the workbook, `README.txt` and `manifest.json` sit at the top level; every JSON file is in `json/` and every CSV file is in `csv/`. The path of each file is written once, in `crates/api-types/src/package_paths.rs`, and every other part of the product names a file through it. Every file comes from the same inspection of the same commit, and the release gate refuses the export if the files disagree with each other.
 
 Three kinds of reader use it, each with a different file:
 
@@ -20,10 +20,10 @@ The words are the same in every file: a **fix** is one cause and one change that
 |---|---|---|
 | `<stem>.pdf` | The summary report: cover, executive summary, the three things to do first, the scorecard by area, the most serious problems, one line for every other fix, conventions, what is healthy, dependencies, next steps and the method with its limits | Leadership |
 | `<stem>-findings.xlsx` | The workbook: every problem, every fix, every rule checked and everything not checked. Sheets are listed below | Engineers, then the architect |
-| `findings.json` | Every row that was not ruled out, of every kind: the rows behind All problems, Your conventions and Not checked together, before All problems shows each problem once. Wrapped with provenance, summary counts, coverage, the grouping tree and the fixes. A project of several repos adds a `patterns_across_services` key. An `open_beside_ruled_out` key is a backstop and is absent from a normal export: a place of another rule that a ruled-out row carried becomes a row of its own, held for a decision, and the release gate refuses a package whose key lists anything | Scripts, CI and other tools |
-| `decisions.json` | Every decision record the report was reviewed with. The workbook's Reviewer decisions sheet is the same list | Tools; the architect |
+| `json/inspection.json` | Every row that was not ruled out, of every kind: the rows behind All problems, Your conventions and Not checked together, before All problems shows each problem once. Wrapped with provenance, summary counts, coverage, the grouping tree and the fixes. A project of several repos adds a `patterns_across_services` key. An `open_beside_ruled_out` key is a backstop and is absent from a normal export: a place of another rule that a ruled-out row carried becomes a row of its own, held for a decision, and the release gate refuses a package whose key lists anything | Scripts, CI and other tools |
+| `json/decisions.json` | Every decision record the report was reviewed with. The workbook's Reviewer decisions sheet is the same list | Tools; the architect |
 | `csv/tickets.csv` | One ticket for each fix that still has places to change, ready to import into Jira, Linear or GitHub Issues | Engineers and project managers |
-| `csv/all-findings.csv` and `json/all-findings.json` | The same rows as `findings.json`, as a flat table | Tools |
+| `csv/all-findings.csv` and `json/all-findings.json` | The same rows as `json/inspection.json`, as a flat table | Tools |
 | `csv/deviations.csv` and `json/deviations.json` | The same rows as the Departures sheet | Tools |
 | `csv/conventions.csv` and `json/conventions.json` | The same rows as the Your conventions sheet | Tools |
 | `csv/not-assessed.csv` and `json/not-assessed.json` | The rules that could not be completed, which are also listed on the Not checked sheet | Tools |
@@ -31,7 +31,7 @@ The words are the same in every file: a **fix** is one cause and one change that
 | `csv/false-positives.csv` and `json/false-positives.json` | The same rows as the Ruled out sheet | Tools |
 | `csv/coverage.csv` and `json/coverage.json` | The same rows as the Rules checked sheet | Tools |
 | `csv/rules-applied.csv` and `json/rules-applied.json` | For each rule with several accepted ways to do a thing, the way the inspection judged the code against, with the evidence | Tools |
-| `manifest.json` | The list of the files in the ZIP, each with its purpose, its schema version and a checksum, and the facts of the inspection: the commit of each repo, the engine version, the rule library version and the models used | Anyone checking that the package is whole and unchanged |
+| `manifest.json` | At the top level, because it describes the whole ZIP: the list of the files in the ZIP, each with its purpose, its schema version and a checksum, and the facts of the inspection: the commit of each repo, the engine version, the rule library version and the models used | Anyone checking that the package is whole and unchanged |
 | `README.txt` | What each file is and how to import the tickets | Whoever opens the ZIP first |
 
 `<stem>` is `camerata-inspection-<repo>-<short commit>`, so the file names the repo and the commit it describes. A project of several repos is named `camerata-inspection-<project>-<N>-repos`.
@@ -101,7 +101,7 @@ A report that no human reviewer has signed off carries a draft banner on every p
 
 The inspection finds more problems than a person can read one by one. A group reviewer first reads each rule's problems together and splits them into fixes. It then ranks the places that most need a person's eyes. A budget decides how many of those places the architect reads in person. By default it is one place for every 1,000 counted lines of code, with a minimum of 20. The places above that line are the escalated places. A critical place whose reason is one of the severe kinds (unauthenticated reach, a secret exposed, data loss, cross-tenant access, authorization bypass, injection, unverified evidence) is escalated even past the budget. A high place passes the budget too when its reason is a secret exposed, data loss, cross-tenant access, authorization bypass or injection. Each one is read in person, and the workbook marks it "Reviewed in person".
 
-A place below the line is not left unchecked. The engine checked it against the code, and it is on the workbook like any other problem, with the Reviewed in person cell blank. The PDF's "The most serious problems" section prints the escalated places, worst first. The budget itself is the operator's setting and is not printed in a client file.
+A place below the line is not left unchecked. The engine checked it against the code, and it is on the workbook like any other problem, with the Reviewed in person cell blank. The PDF's "The most serious problems" section prints the escalated places, worst first. The Start here sheet and the PDF's most serious problems section print how many places were reviewed in person and the review budget, so a blank cell is explained. A critical place and a place the review marked unsure are never left below the line unread: the release gate refuses a package until each carries a reviewer's decision. Changing the severity of a place is a decision too. Every open row whose severity the reviewer changed carries the label, whatever bucket it sits in: the Decision so far column of Fix plan and All problems reads "Severity set by the reviewer", and the disposition of the row in json/inspection.json and the CSV files reads "Severity set by the reviewer (recommended: ...)" with the fix order. A row the reviewer also confirmed or ruled on keeps that ruling's own label. The Reviewer decisions sheet and json/decisions.json record the edit as a `severity_set` row with no reason text. In the PDF the place counts as reviewed in person in the review line of the "most serious problems" section, and it is listed there like any other escalated place; the PDF does not print the label itself. The doubt the engine had about an unsure row stays as the engine stated it in every export.
 
 ## What is not in the package
 
@@ -110,6 +110,10 @@ A place below the line is not left unchecked. The engine checked it against the 
 - Fixes already applied. The package says what to change and where. It changes no code.
 - The reviewer's working notes, the group reviewer's reasons and ranks, the escalation budget, the time spent on review and any cost figure. These are the operator's and are left out of every client file.
 - Problems the engine or the reviewer ruled out, apart from a count and the Ruled out sheet that gives the reason for each.
+
+## What changed in the layout
+
+The whole inspection moved from `findings.json` at the top level to `json/inspection.json`, and `decisions.json` moved to `json/decisions.json`. Every JSON file is now in `json/`, and only `manifest.json` and `README.txt` stay at the top level beside the PDF and the workbook. The manifest lists `json/inspection.json` with the schema version `inspection/1.0` (it was `findings/1.0`). Packages exported before this change no longer pass `camerata release-gate`, because the gate looks for the files at their new paths.
 
 ## Glossary
 
@@ -130,7 +134,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Problem | What was found at a place. A problem lists every rule it breaks. | All problems; the Problem column |
 | Area | The part of your system a rule belongs to, such as security or testing. | Area columns; the scorecard on Start here |
 | Rule | One thing we looked for. | Rules checked; the Rule and Rules columns |
-| Also matches | A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision. | All problems; the Rules column; the also_matches field of findings.json |
+| Also matches | A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision. | All problems; the Rules column; the also_matches field of json/inspection.json |
 | Rule id | The short code that names a rule. Tools read it, and you can quote it when you ask us about a rule. | The technical columns at the right of every table |
 | Fix order | When to do a fix: First, Next or Later. First is every critical and high fix and the quick medium ones. Next is the rest of the medium fixes. Later is the low ones. | Fix plan; All problems; Needs a decision |
 | First | Fix order: do this fix before the others. Every critical and high fix, and the medium fixes that are quick. | Fix plan; All problems |
@@ -140,7 +144,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Info | A severity for an observation that is not a defect, such as a convention noted. It counts in the Low column of the scorecard. | The Severity column; the scorecard on Start here |
 | Effort | A rough size of the change for one place: low, medium or high. | Fix plan; All problems |
 | Estimated hours | The range of hours the effort stands for, for one place. | All problems |
-| Confidence | How sure the review is that the problem is real: High, Low or Disputed. Low means the review was unsure; Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision. | All problems; Needs a decision |
+| Confidence | How sure the review is that the problem is real: High, Low or Disputed. Low has three causes. One is that the review marked the problem unsure. Another is that no published standard backs it. The third is that it reads as a convention to consider. Only the first means the review was unsure, and only those problems are always read in person. Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision. | All problems; Needs a decision |
 | Needs a decision | A reviewer must rule on the problem before you act on it. | The Needs a decision sheet; the column of that name on All problems |
 | Ruled out | Looked at and not a problem. The reason is on the Ruled out sheet. | The Ruled out sheet |
 | Convention | A habit your code already follows consistently. | Your conventions; Departures |
@@ -152,6 +156,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Related standard | A published standard matched to a model-reviewed problem by topic. It is not a rule we checked. | The Standard cited column |
 | Standard cited | The published standard, such as an OWASP or CWE entry, behind the rule. | All problems; Rules checked |
 | Reviewed in person | Yes when a person read the problem in your code. Blank means the engine checked it against your files without a person reading it. | All problems; Dependencies |
+| Review budget | How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the review marked unsure is read whatever the budget. | Start here; the PDF's most serious problems |
 | Engine verified | Checked by the engine against your files, without a person reading it. | How problems were grouped |
 | Example from your code | A fix written for the code at one place in your repo. | Fix plan |
 | Standard fix | The rule's own guidance, not written for your code. | The Fix type column |
@@ -199,6 +204,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | How consistently | Whether your code follows the convention everywhere we looked. | Your conventions |
 | Places looked at | How many places we looked at to see the convention. | Your conventions |
 | More detail | The longer explanation behind a row. | All problems; Your conventions; Not checked |
+| Where the convention came from | Whether your code follows the convention or the reviewer set it, with the number of places that depart. | Departures |
 | Places departing | How many places depart from the convention. | Departures |
 | Places checked | How many places we checked against the convention. | Departures |
 | Worst severity | The highest severity among the departing places. | Departures |

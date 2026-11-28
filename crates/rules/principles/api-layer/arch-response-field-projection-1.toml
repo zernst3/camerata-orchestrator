@@ -1,5 +1,5 @@
 id = "ARCH-RESPONSE-FIELD-PROJECTION-1"
-version = 3
+version = 4
 title = "REST and GraphQL responses expose an explicit, allowlisted set of fields the consumer needs, not a serialize-the-whole-model default"
 domain = "api-layer"
 layer = "universal"
@@ -8,7 +8,7 @@ kind = "defect"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Deterministically checkable, but no off-the-shelf linter enforces it: the predicate is 'does this endpoint/resolver's output include a field outside its documented client-facing contract,' and which fields belong in that contract is project-specific domain knowledge no generic tool carries. It requires a custom CI gate — a contract/schema test per endpoint or GraphQL type asserting the response field set against an approved allowlist, or a project-configured serializer convention (an explicit field list rather than a default-serialize-all-properties model/ORM-entity passthrough) checked by a project-specific static rule. Conformance holds when such a gate runs in CI and a response/resolver that adds a field outside the allowlist fails it; it fails when no such check exists and a model's own full property set is the only thing standing in for the API contract."
+qualifies = "Deterministically checkable, but no off-the-shelf linter enforces it: the predicate is 'does this endpoint/resolver's output include a field outside its documented client-facing contract,' and which fields belong in that contract is project-specific domain knowledge no generic tool carries. It requires a custom CI gate: a contract/schema test per endpoint or GraphQL type asserting the response field set against an approved allowlist, or a project-configured serializer convention (an explicit field list rather than a default-serialize-all-properties model/ORM-entity passthrough) checked by a project-specific static rule. Conformance holds when such a gate runs in CI and a response/resolver that adds a field outside the allowlist fails it; it fails when no such check exists and a model's own full property set is the only thing standing in for the API contract."
 
 [[sources]]
 url = "https://owasp.org/www-project-api-security/"
@@ -23,13 +23,13 @@ question = "Does an endpoint's or resolver's response contain an explicit, allow
 default = "explicit-allowlist-projection-not-default-serialize-all"
 why = """
 `ARCH-API-DTOS-1` frames the DTO-vs-domain-type choice as an architectural trade-off with no universally correct
-answer — a project may reasonably choose to return domain types directly for an internal API. This rule is
+answer: a project may reasonably choose to return domain types directly for an internal API. This rule is
 narrower and not optional in the same way: WHICHEVER wire-type strategy a project adopts, no endpoint or resolver
 should emit a field its consumer does not need, because 'the ORM's default serialization includes every column' is
 a decision made by the ORM's defaults, not by anyone reviewing what a specific endpoint's consumers should see. A
 `GET /users/:id` handler that calls a framework's default `toJSON()`/serializer on the fetched entity ships
-whatever that entity happens to hold today — a password hash, a 2FA secret, an internal risk score, another
-tenant's foreign-key id sitting in a column nobody meant to expose — and keeps shipping each new column added to
+whatever that entity happens to hold today (a password hash, a 2FA secret, an internal risk score, another
+tenant's foreign-key id sitting in a column nobody meant to expose) and keeps shipping each new column added to
 that table in the future, with no step in the development process that would ever notice, because adding a column
 to a table does not touch the endpoint's code at all.
 
@@ -37,7 +37,7 @@ The OWASP API Security project renamed this from 'Excessive Data Exposure' to 'B
 Authorization' between its 2019 and 2023 top-ten lists specifically because the pattern recurs at the PROPERTY
 level even on endpoints whose object-level and function-level authorization are otherwise correct: the caller is
 allowed to fetch this user record, and is still handed fields of it they were never meant to see. GraphQL schemas
-have the identical failure mode at the type level — a type's field list growing to match its backing model rather
+have the identical failure mode at the type level: a type's field list growing to match its backing model rather
 than being curated per the type's actual purpose. An explicit allowlist (named response fields, a schema the
 backing model must be mapped onto rather than passed through) makes 'what does this endpoint expose' a reviewable,
 version-controlled decision instead of an emergent property of whatever the ORM happens to return.

@@ -39,6 +39,7 @@ impl LlmPort for Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -153,6 +154,7 @@ impl BatchApi for FakeBatches {
                 response: Some(LlmResponse {
                     reported_model: None,
                     cli_cost_usd: None,
+                    elapsed_ms: None,
                     text: r#"{"findings":[],"needs_files":[]}"#.to_string(),
                     model: "stub".to_string(),
                     backend: "api/batch".to_string(),
@@ -214,6 +216,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     };
     // The export needs `typst`; either outcome is fine here (see the module doc).
     let _ = run_inspect_pipeline_with(

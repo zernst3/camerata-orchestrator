@@ -1630,14 +1630,19 @@ pub(super) async fn run_passes_batch(
                     _ => "missing from the batch results".to_string(),
                 };
                 if retry.refused.contains(&w.custom_id) {
-                    // The follow-up was refused by the spend limit: the item is NOT RUN on the
-                    // meter (the cap's own disclosure), and this note says it had already
-                    // failed once, so the gap is not read as a pass that never started.
+                    // The follow-up was refused by the spend limit or by the outage stop: the
+                    // item is NOT RUN on the meter (that stop's own disclosure), and this note
+                    // says it had already failed once, so the gap is not read as a pass that
+                    // never started. The note gives the real reason, in the stop's own words.
                     if let Some(m) = meter {
+                        let why = if m.outage_stopped() {
+                            format!("the run stopped because {}", m.stop_phrase())
+                        } else {
+                            "the spend limit was reached".to_string()
+                        };
                         m.record_note(format!(
                             "batch item {} (chunk {}, rule-batch {}) failed in the first \
-                             submission ({first}) and its resubmission was not run: the spend \
-                             limit was reached",
+                             submission ({first}) and its resubmission was not run: {why}",
                             w.custom_id,
                             w.ci + 1,
                             w.bi + 1

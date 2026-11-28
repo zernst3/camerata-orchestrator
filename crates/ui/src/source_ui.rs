@@ -991,6 +991,161 @@ pub fn ScanBlockNotice(block: ScanBlock) -> Element {
     }
 }
 
+/// The id prefix of each "Remove pattern" button in [`OverLimitNotice`] (`unmatched-remove-0`, ...).
+pub const UNMATCHED_REMOVE_ID_PREFIX: &str = "unmatched-remove-";
+
+/// The id prefix of each "Remove pattern" button of a warned pattern (`warned-remove-0`, ...).
+pub const WARNED_REMOVE_ID_PREFIX: &str = "warned-remove-";
+
+/// The id prefix of each "Exclude by agreement" button in [`OverLimitNotice`] (one per listed
+/// file: `over-limit-exclude-0`, `over-limit-exclude-1`, and so on), so a test drives the real
+/// button.
+pub const OVER_LIMIT_EXCLUDE_ID_PREFIX: &str = "over-limit-exclude-";
+
+/// The pre-start check of files over the read limit: what happens to them, every file with its
+/// size, and "Exclude by agreement" for each. A file over the limit is a warning and never holds
+/// Start; a pattern that matches nothing or cannot be checked does. A second block source beside
+/// [`ScanBlockNotice`], for the same Start button.
+#[component]
+pub fn OverLimitNotice(
+    block: camerata_ui_core::readiness::OverLimitBlock,
+    #[props(default)] on_exclude: Option<EventHandler<(String, String)>>,
+    /// Told the pattern when a listed pattern's "Remove pattern" is clicked.
+    #[props(default)]
+    on_remove: Option<EventHandler<String>>,
+    /// Whether this run's security floor is on; off (AI only), the warning says the files are not
+    /// searched for secrets.
+    #[props(default = true)]
+    floor_on: bool,
+) -> Element {
+    let text = camerata_ui_core::readiness::over_limit_text(&block, floor_on);
+    let unmatched_text = camerata_ui_core::readiness::unmatched_text(&block);
+    let generated_text = camerata_ui_core::readiness::generated_text(&block, floor_on);
+    let generated_paths = camerata_ui_core::readiness::generated_paths_text(&block);
+    let not_inspected_text =
+        camerata_ui_core::readiness::not_inspected_note(block.not_inspected_paths.len());
+    let not_inspected_paths =
+        camerata_ui_core::readiness::not_inspected_paths_line(&block.not_inspected_paths);
+    let versions_text = camerata_ui_core::readiness::not_inspected_versions_note(
+        block.not_inspected_versions_only_paths.len(),
+    );
+    let versions_paths = camerata_ui_core::readiness::not_inspected_paths_line(
+        &block.not_inspected_versions_only_paths,
+    );
+    rsx! {
+        div { class: "scan-block-hint over-limit-notice", role: "alert",
+            if !generated_text.is_empty() {
+                p { class: "generated-files-note", "{generated_text}" }
+            }
+            if !generated_paths.is_empty() {
+                p { class: "generated-files-paths", "{generated_paths}" }
+            }
+            if !not_inspected_text.is_empty() {
+                p { class: "not-inspected-files-note", "{not_inspected_text}" }
+            }
+            if !not_inspected_paths.is_empty() {
+                p { class: "not-inspected-files-paths", "{not_inspected_paths}" }
+            }
+            if !versions_text.is_empty() {
+                p { class: "not-inspected-versions-note", "{versions_text}" }
+            }
+            if !versions_paths.is_empty() {
+                p { class: "not-inspected-versions-paths", "{versions_paths}" }
+            }
+            if !text.is_empty() {
+                p { "{text}" }
+            }
+            ul { class: "over-limit-list",
+                for (i , file) in block.files.iter().enumerate() {
+                    li { key: "{file.repo}/{file.path}", class: "over-limit-row",
+                        span { "{camerata_ui_core::readiness::over_limit_file_line(file)}" }
+                        button {
+                            id: "{OVER_LIMIT_EXCLUDE_ID_PREFIX}{i}",
+                            class: "btn-edit-sm scan-block-link",
+                            r#type: "button",
+                            onclick: {
+                                let (repo, path) = (file.repo.clone(), file.path.clone());
+                                move |_| {
+                                    if let Some(on_exclude) = on_exclude {
+                                        on_exclude.call((repo.clone(), path.clone()));
+                                    }
+                                }
+                            },
+                            "Exclude by agreement"
+                        }
+                    }
+                }
+            }
+            if !block.warned.is_empty() {
+                p { "{camerata_ui_core::readiness::warned_text(&block)}" }
+                ul { class: "over-limit-list",
+                    for (i , (pattern , note)) in block.warned.iter().enumerate() {
+                        li { key: "{pattern}", class: "over-limit-row",
+                            span {
+                                "{pattern}"
+                                if !note.is_empty() {
+                                    " (matches no file: {note})"
+                                }
+                            }
+                            button {
+                                id: "{WARNED_REMOVE_ID_PREFIX}{i}",
+                                class: "btn-edit-sm scan-block-link",
+                                r#type: "button",
+                                onclick: {
+                                    let pattern = pattern.clone();
+                                    move |_| {
+                                        if let Some(on_remove) = on_remove {
+                                            on_remove.call(pattern.clone());
+                                        }
+                                    }
+                                },
+                                "Remove pattern"
+                            }
+                        }
+                    }
+                }
+            }
+            if !block.unchecked.is_empty() {
+                p { "{camerata_ui_core::readiness::unchecked_text(&block)}" }
+                ul { class: "over-limit-list",
+                    for pattern in block.unchecked.iter() {
+                        li { key: "{pattern}", class: "over-limit-row", span { "{pattern}" } }
+                    }
+                }
+            }
+            if !block.unmatched.is_empty() {
+                p { "{unmatched_text}" }
+                ul { class: "over-limit-list",
+                    for (i , pattern) in block.unmatched.iter().enumerate() {
+                        li { key: "{pattern}", class: "over-limit-row",
+                            span {
+                                "{pattern}"
+                                if let Some(note) = block.unmatched_notes.get(i).filter(|n| !n.is_empty()) {
+                                    " (matches no file: {note})"
+                                }
+                            }
+                            button {
+                                id: "{UNMATCHED_REMOVE_ID_PREFIX}{i}",
+                                class: "btn-edit-sm scan-block-link",
+                                r#type: "button",
+                                onclick: {
+                                    let pattern = pattern.clone();
+                                    move |_| {
+                                        if let Some(on_remove) = on_remove {
+                                            on_remove.call(pattern.clone());
+                                        }
+                                    }
+                                },
+                                "Remove pattern"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

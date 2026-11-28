@@ -21,6 +21,28 @@ use camerata_server::report_export::{
 };
 use serde_json::Value;
 
+/// The release gate refuses a critical or unsure finding with no decision of its own. These
+/// fixtures are about the PDF's text, so each such finding carries the reviewer's decision.
+fn decided_for_the_gate(
+    sealed: &SealedReport,
+) -> HashMap<String, camerata_server::report_export::DispositionWire> {
+    sealed
+        .findings
+        .iter()
+        .filter(|f| camerata_server::release_gate::needs_decision::why(f).is_some())
+        .map(|f| {
+            (
+                camerata_server::report_export::finding_key(f),
+                camerata_server::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "read in person".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+}
+
 fn typst_on_path() -> bool {
     camerata_test_env::typst_on_path()
 }
@@ -59,6 +81,7 @@ fn report_with_one_finding_per_shape() -> SealedReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
@@ -136,7 +159,10 @@ async fn pdf_text_contains_the_redacted_form_and_never_the_value() {
     }
     let sealed = report_with_one_finding_per_shape();
     let package = build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &sealed,
+            &decided_for_the_gate(&sealed),
+        ),
         None,
         &client_options(),
     )
@@ -216,14 +242,22 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
 }
 
 /// Set every headline of the data (the top three's and the escalated places') to `raw`: the one
-/// string of a problem the PDF prints, now that it prints no snippet.
+/// string of a problem the PDF prints, now that it prints no snippet. The template sets the
+/// headline from its `headline_segments` (Rust parses the code spans, the template parses
+/// none), so the hand-built data carries the same text as one prose run.
 fn set_every_headline(value: &mut Value, raw: &str) {
     match value {
         Value::Object(map) => {
+            let planted = format!("const key = \"{raw}\";");
+            if map.get("headline").is_some_and(Value::is_string) {
+                map.insert("headline".to_string(), Value::String(planted.clone()));
+                map.insert(
+                    "headline_segments".to_string(),
+                    serde_json::json!([{"code": false, "text": planted}]),
+                );
+            }
             for (key, item) in map.iter_mut() {
-                if key == "headline" && item.is_string() {
-                    *item = Value::String(format!("const key = \"{raw}\";"));
-                } else {
+                if key != "headline" && key != "headline_segments" {
                     set_every_headline(item, raw);
                 }
             }
@@ -257,8 +291,9 @@ async fn the_rendered_pdf_text_names_no_review_time_data() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
+    let decided = decided_for_the_gate(&sealed);
     let package = build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         None,
         &client_options(),
     )
@@ -314,7 +349,10 @@ async fn every_rendered_page_carries_the_confidentiality_line() {
     }
     let sealed = report_with_one_finding_per_shape();
     let package = build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &sealed,
+            &decided_for_the_gate(&sealed),
+        ),
         None,
         &client_options(),
     )

@@ -6,6 +6,7 @@ use crate::cost_checkpoint::{CheckpointPlan, CheckpointSettings, CheckpointSink,
 
 fn meter(limit: f64, later: f64, assumed: Option<usize>, spent: f64) -> UsageMeter {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         checkpoint: CheckpointSettings {
             plan: Some(CheckpointPlan {
@@ -96,9 +97,10 @@ fn each_checkpoint_reaches_the_job_state_the_ui_polls() {
         .expect("recorded on the job");
     assert!((cp.approved_usd - 10.0).abs() < 1e-9);
     assert!((cp.spent_usd - 2.0).abs() < 1e-9);
-    // Three pieces left at the $2.00 average: 2 + 6 = 8.
+    // Three pieces left. One finished piece weighs 4 percent against the $1.00 estimate:
+    // 0.04 x 2.00 + 0.96 x 1.00 = $1.04 each, so 2 + 3 x 1.04 = 5.12.
     assert!(
-        (cp.projected_usd - 8.0).abs() < 1e-9,
+        (cp.projected_usd - 5.12).abs() < 1e-9,
         "{}",
         cp.projected_usd
     );
@@ -120,6 +122,7 @@ fn pay(m: &UsageMeter, usd: f64) {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -136,6 +139,7 @@ fn pay(m: &UsageMeter, usd: f64) {
 
 fn plain(limit: f64, plan: CheckpointPlan, folder: Option<&std::path::Path>) -> RunControls {
     RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         checkpoint: CheckpointSettings {
             plan: Some(plan),
@@ -279,4 +283,110 @@ fn the_pause_records_the_hard_limits_reserve_for_the_resume_advice() {
         "{}",
         stop.pause_message()
     );
+}
+
+// ── a piece cut in two on a resume is still one planned piece ───────────────────────────────
+
+fn two_repo_meter(stored: f64) -> UsageMeter {
+    let controls = plain(
+        100.0,
+        CheckpointPlan {
+            per_piece_usd: 1.0,
+            pieces: 4,
+            ..CheckpointPlan::default()
+        },
+        None,
+    );
+    UsageMeter::continuing(
+        controls,
+        &ActualUsage {
+            cost_usd: stored,
+            calls: 1,
+            cost_complete: true,
+            ..ActualUsage::default()
+        },
+    )
+}
+
+fn projected(m: &UsageMeter) -> f64 {
+    m.latest_checkpoint().expect("a checkpoint").projected_usd
+}
+
+/// Two repositories of two planned pieces each, each piece costing 1.00: the projection after
+/// each finished piece when nothing splits.
+fn unsplit_projections() -> Vec<f64> {
+    let m = two_repo_meter(0.0);
+    let mut seen = Vec::new();
+    m.begin_pieces(2, 0);
+    for _ in 0..2 {
+        pay(&m, 1.0);
+        m.piece_finished(Some(1.0), 0);
+        seen.push(projected(&m));
+    }
+    m.begin_pieces(2, 0);
+    pay(&m, 1.0);
+    m.piece_finished(Some(1.0), 0);
+    seen.push(projected(&m));
+    seen
+}
+
+#[test]
+fn a_piece_that_splits_in_the_first_of_two_repositories_projects_as_if_it_never_split() {
+    let baseline = unsplit_projections();
+    let m = two_repo_meter(0.0);
+    // Repository one: piece one whole, piece two as two halves (3 works, 2 of them halves).
+    m.begin_pieces(3, 0);
+    m.begin_halves(2, 0);
+    pay(&m, 1.0);
+    m.piece_finished(Some(1.0), 0);
+    assert!(
+        (projected(&m) - baseline[0]).abs() < 1e-9,
+        "{}",
+        projected(&m)
+    );
+    // One half done: the parent is still one piece left (half a piece of it paid for).
+    pay(&m, 0.5);
+    m.half_finished();
+    m.piece_finished(Some(0.5), 0);
+    assert!(
+        (projected(&m) - baseline[0]).abs() < 1e-9,
+        "{}",
+        projected(&m)
+    );
+    // Both halves done: exactly the unsplit projection after piece two.
+    pay(&m, 0.5);
+    m.half_finished();
+    m.piece_finished(Some(0.5), 0);
+    assert!(
+        (projected(&m) - baseline[1]).abs() < 1e-9,
+        "{}",
+        projected(&m)
+    );
+    // Repository two, whole: the same as before.
+    m.begin_pieces(2, 0);
+    pay(&m, 1.0);
+    m.piece_finished(Some(1.0), 0);
+    assert!(
+        (projected(&m) - baseline[2]).abs() < 1e-9,
+        "{}",
+        projected(&m)
+    );
+}
+
+#[test]
+fn a_resume_holding_one_stored_half_projects_as_if_the_piece_never_split() {
+    let baseline = unsplit_projections();
+    // Stored: piece one (1.00) and one half (0.50). Both are held; the other half runs.
+    let m = two_repo_meter(1.5);
+    m.begin_pieces(3, 2);
+    m.begin_halves(2, 1);
+    pay(&m, 0.5);
+    m.half_finished();
+    m.piece_finished(Some(0.5), 0);
+    assert!(
+        (projected(&m) - baseline[1]).abs() < 1e-9,
+        "{}",
+        projected(&m)
+    );
+    assert_eq!(m.latest_checkpoint().unwrap().pieces_left, 2);
 }

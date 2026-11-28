@@ -1,5 +1,5 @@
 id = "GO-SQL-PARAMETERIZED-1"
-version = 3
+version = 4
 title = "SQL is parameterized via prepared statements or ORM query builders; query strings are never built from interpolated values"
 domain = "go"
 layer = "language"
@@ -15,7 +15,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "Enforced by a static-analysis gate (Bandit-equivalent or sqlc-integration) that flags string concatenation, fmt.Sprintf, or raw query strings feeding values into db.Query(...), db.Exec(...), rows.Scan(...), or ORM method calls. Conformance holds when the gate runs in CI and an interpolated query fails the build."
+qualifies = "Enforced by a static-analysis gate (Bandit-equivalent or sqlc-integration) that flags string concatenation, fmt.Sprintf, or raw query strings feeding values into db.Query(...), db.Exec(...), rows.Scan(...) or ORM method calls. Conformance holds when the gate runs in CI and an interpolated query fails the build."
 
 [[sources]]
 url = "https://securego.io/docs/rules/g201-g202.html"

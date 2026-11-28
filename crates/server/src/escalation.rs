@@ -129,6 +129,30 @@ impl EscalationStore {
         self.items.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
+    /// Remove the entries with these ids and persist. When the write fails nothing is removed
+    /// and the error is returned. Returns how many were removed.
+    pub fn remove_ids(&self, ids: &[String]) -> std::io::Result<usize> {
+        let mut items = self
+            .items
+            .lock()
+            .map_err(|_| std::io::Error::other("store mutex poisoned"))?;
+        let kept: Vec<Escalation> = items
+            .iter()
+            .filter(|c| !ids.iter().any(|i| i == &c.id))
+            .cloned()
+            .collect();
+        let removed = items.len() - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        if let Some(p) = &self.path {
+            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(p.as_ref(), json)?;
+        }
+        *items = kept;
+        Ok(removed)
+    }
+
     pub fn list_open(&self) -> Vec<Escalation> {
         self.items
             .lock()

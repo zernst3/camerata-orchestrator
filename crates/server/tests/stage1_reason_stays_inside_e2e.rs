@@ -2,7 +2,7 @@
 //! END-TO-END (WO4): what stage 1 said about a site stays inside the engine. The scripted stage 1
 //! reply carries a distinctive reason and lowers a critical finding to low, which records a
 //! severity adjustment on the row. The real pipeline (`ai_audit::audit_repo`, the grouping, the
-//! report, workbook, `findings.json`, CSV and JSON builders) then runs, and every client-visible
+//! report, workbook, `json/inspection.json`, CSV and JSON builders) then runs, and every client-visible
 //! surface is read: the reason is on none of them, while the adjustment itself (the fixed
 //! sentence naming the two severities) is on at least one, so the test is not vacuous.
 //!
@@ -49,6 +49,7 @@ impl LlmPort for StubModel {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -84,6 +85,7 @@ fn report(findings: Vec<Finding>, ledger: ScanLedger) -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/webhooks".to_string()],
@@ -122,6 +124,7 @@ async fn surfaces() -> (Vec<(String, String)>, Vec<Finding>) {
     let mut efficiency = EfficiencyConfig::default();
     efficiency.set("terse_output", false).unwrap();
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -197,7 +200,7 @@ async fn surfaces() -> (Vec<(String, String)>, Vec<Finding>) {
         &HashMap::new(),
     );
     out.push((
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_string_pretty(&export).unwrap(),
     ));
     for (name, bytes) in xlsx_export::build_csv_exports(
@@ -244,7 +247,7 @@ async fn no_client_facing_output_carries_the_stage_1_reason() {
         .get(ai_audit::STAGE1_CAPTURE)
         .expect("the stage 1 verdict is kept on the row");
     assert!(kept.contains("ZEBRA-REASON-7731"), "{kept}");
-    for name in ["PDF data", "report json", "findings.json"] {
+    for name in ["PDF data", "report json", "json/inspection.json"] {
         assert!(
             surfaces.iter().any(|(n, _)| n == name),
             "{name} was not built"

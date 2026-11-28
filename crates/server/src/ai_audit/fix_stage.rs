@@ -99,6 +99,10 @@ Rules, every fix:
   app/auth/signout/route.ts does") instead of describing the pattern generically.
 - 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight;
   the snippet is yours to write, only the existing names it uses must come from the evidence.
+- Code that itself contains a backtick (a shell command substitution, a Markdown fence) goes
+  inside a LONGER run of backticks, with a space inside each end: `` echo `date` ``. A
+  JavaScript tagged template is written as it is in code, with its tag glued to the opening
+  backtick: sql`select id from posts limit 30`.
 - Say WHAT to change and WHERE — NEVER how this finding was detected. Do not mention
   Camerata, a scanner, a linter, a rule id, a regex, "the audit", or any detection mechanism.
 - NEVER assert something about the codebase's current state that contradicts the finding's own
@@ -236,6 +240,41 @@ pub(super) fn build_fix_specific_block(
     nonce: &crate::prompt_frame::FrameNonce,
 ) -> String {
     let mut out = String::new();
+    // The generic remediation of each finding (the text of the rule's resolved option).
+    let remediation_of = |f: &Finding| -> Option<String> {
+        let rule = corpus?.get_by_id(&f.rule_id)?;
+        let opt = rule.resolved_option(f.evaluated_option_id.as_deref())?;
+        opt.remediation
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+    };
+    // A rule's remediation that several findings of this call share is printed once, under a
+    // rule heading, and each of those findings refers to it. That needs every finding of the rule
+    // in this call to resolve to one text; a rule seen with two texts keeps each finding's own
+    // line, so no two headings carry the same rule name. One finding keeps its own line too.
+    let mut shared: Vec<(String, String)> = Vec::new();
+    for f in findings {
+        if shared.iter().any(|(rule_id, _)| *rule_id == f.rule_id) {
+            continue;
+        }
+        let texts: Vec<Option<String>> = findings
+            .iter()
+            .filter(|g| g.rule_id == f.rule_id)
+            .map(|g| remediation_of(g))
+            .collect();
+        if let Some(Some(rem)) = texts.first() {
+            if texts.len() > 1 && texts.iter().all(|t| t.as_deref() == Some(rem.as_str())) {
+                shared.push((f.rule_id.clone(), rem.clone()));
+            }
+        }
+    }
+    for (rule_id, rem) in &shared {
+        out.push_str(&format!(
+            "Rule {rule_id}: generic remediation (inspiration only; your fix must be SPECIFIC \
+             to each finding, not a restatement of this): {rem}\n\n"
+        ));
+    }
     for (i, f) in findings.iter().enumerate() {
         let id = &ids[i];
         out.push_str(&format!(
@@ -278,14 +317,17 @@ pub(super) fn build_fix_specific_block(
             &format!("finding {id}"),
             &evidence,
         ));
-        if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
-            if let Some(opt) = rule.resolved_option(f.evaluated_option_id.as_deref()) {
-                if let Some(rem) = opt.remediation.as_deref().filter(|s| !s.trim().is_empty()) {
-                    out.push_str(&format!(
-                        "This rule's generic remediation (inspiration only — your fix must be \
-                         SPECIFIC to this finding, not a restatement of this): {rem}\n"
-                    ));
-                }
+        if let Some(rem) = remediation_of(f) {
+            if shared.contains(&(f.rule_id.clone(), rem.clone())) {
+                out.push_str(&format!(
+                    "This rule's generic remediation is given above under rule {}.\n",
+                    f.rule_id
+                ));
+            } else {
+                out.push_str(&format!(
+                    "This rule's generic remediation (inspiration only — your fix must be \
+                     SPECIFIC to this finding, not a restatement of this): {rem}\n"
+                ));
             }
         }
         if let Some(reason) = feedback.get(&i) {
@@ -593,6 +635,31 @@ impl<'a> RepoNames<'a> {
     }
 }
 
+/// The text and code runs the grounding check reads. The one code-span parser may call a text
+/// ambiguous (a backtick glued to a word) and return it as ONE literal prose run; for grounding
+/// that would hide every code span and let a platform name in a snippet (`req.json()`) hit the
+/// file-name scan as prose. So a literal text is read by its backtick-delimited regions: the
+/// pieces between backticks alternate prose, code. Nothing is rendered from this.
+fn grounding_segments(fix: &str) -> Vec<crate::report_export::fix_text::Seg> {
+    use crate::report_export::fix_text::Seg;
+    let segs = crate::report_export::fix_text::segments(fix);
+    match segs.as_slice() {
+        [Seg::Text(t)] if t.contains('`') => t
+            .split('`')
+            .enumerate()
+            .filter(|(_, piece)| !piece.is_empty())
+            .map(|(i, piece)| {
+                if i % 2 == 1 {
+                    Seg::Code(piece.to_string())
+                } else {
+                    Seg::Text(piece.to_string())
+                }
+            })
+            .collect(),
+        _ => segs,
+    }
+}
+
 /// [`find_ungrounded_identifier`] with the repository to look a name up in when the finding's
 /// evidence does not hold it. `None` is the evidence alone.
 pub(crate) fn find_ungrounded_identifier_in(
@@ -600,21 +667,26 @@ pub(crate) fn find_ungrounded_identifier_in(
     evidence: &str,
     repo: Option<&RepoNames<'_>>,
 ) -> Option<String> {
-    let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
     let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
 
     let mut candidates: Vec<String> = Vec::new();
     // The fix with its snippet spans blanked: a `console.error` or `process.exit` inside a
     // snippet is code, not a file name, and the snippet's own file names are collected from
-    // the snippet itself.
-    let mut prose = fix.to_string();
-    for cap in backtick_re.captures_iter(fix) {
-        let span = &cap[1];
-        if is_code_snippet(span) {
-            candidates.extend(snippet_names(span));
-            prose = prose.replace(&cap[0], " ");
-        } else {
-            candidates.push(span.to_string());
+    // the snippet itself. The spans come from the one code-span parser (`fix_text::segments`),
+    // so double-backtick code and a tagged template are grounded like any other span.
+    let mut prose = String::new();
+    for seg in grounding_segments(fix) {
+        match seg {
+            crate::report_export::fix_text::Seg::Text(t) => prose.push_str(&t),
+            crate::report_export::fix_text::Seg::Code(span) => {
+                if is_code_snippet(&span) {
+                    candidates.extend(snippet_names(&span));
+                    prose.push(' ');
+                } else {
+                    candidates.push(span.clone());
+                    prose.push_str(&span);
+                }
+            }
         }
     }
     for m in path_re.find_iter(&prose) {
@@ -864,6 +936,12 @@ pub(super) fn fix_failures(
     }
     if let Some(leak) = fix_leaks_methodology(text) {
         out.push(FixFailure::MethodologyLeak(leak));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if crate::test_defects::rejecting_fix_replies() {
+        out.push(FixFailure::MethodologyLeak(
+            "injected stricter check".to_string(),
+        ));
     }
     out
 }
@@ -1326,6 +1404,8 @@ async fn resume_held_fixes(
         job: route.job,
         checkpoint: Some(&checkpoint),
         settings: stage_batch::StageSettings::default(),
+        // resume_held replays stored replies and ignores this row; the rounds that follow show their own.
+        feedback: None,
     };
     let mut stage = FixRound {
         llm,
@@ -1492,6 +1572,7 @@ pub(super) async fn run_fix_specifics_round(
         job: route.job,
         checkpoint: checkpoint.as_ref(),
         settings: stage_batch::StageSettings::default(),
+        feedback: route.feedback_for("Fix"),
     };
     let outcome = stage_batch::run_stage(Stage::FixGeneration, &mut stage, mode, &ctx).await;
     // What the runner could not get a reply for: those findings stay pending. The spend limit

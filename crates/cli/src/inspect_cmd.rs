@@ -39,6 +39,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod finder;
+pub mod plan_only;
+pub mod recheck;
+pub use recheck::{
+    plan_saved_inspect, recheck_saved_inspect, run_recheck_saved, run_recheck_saved_with_store,
+};
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
@@ -73,7 +78,7 @@ pub struct InspectArgs {
     /// [`camerata_api_types::uow::validate_repo_name`] and must be unique: the name tags every
     /// finding and keys the incremental cache, so two repos sharing one would merge.
     pub repo_names: Vec<String>,
-    /// Where to write the product-export ZIP (PDF + xlsx + findings.json + README.txt). Its
+    /// Where to write the product-export ZIP (the PDF, the workbook, the JSON and CSV files and the README). Its
     /// parent directory must already exist.
     pub export: PathBuf,
     /// The compliance-safety backend setting (`docs/design/2026-09-22_per-project-backend.md`)
@@ -100,7 +105,7 @@ pub struct InspectArgs {
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
     /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
-    /// default, Fable 5.2 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// default, Opus 5.5 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
@@ -153,6 +158,31 @@ pub struct InspectArgs {
     /// the scan passes (`engine`); a run saved before the flags existed loads with the default.
     #[serde(default)]
     pub finder: finder::FinderArgs,
+    /// `--exclude PATTERN` (repeatable): files the client and the operator agreed are not part of
+    /// the inspection, the headless form of a project's exclusion list. A glob matched against
+    /// `<repo name>/<path within the repo>`, for example `acme-field-data/seeds/**`. An
+    /// excluded file is not read, counted or billed, and Coverage lists it as excluded by
+    /// agreement. An invalid pattern is refused by name before anything is read.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// The name a repo goes by: `--repo-name` (validated), else the folder's own name. The ONE rule
+/// `camerata inspect` and `camerata count` share, so an exclusion pattern means the same files in
+/// both.
+pub fn source_name(dir: &std::path::Path, repo_name: Option<&str>) -> Result<String, String> {
+    match repo_name {
+        Some(name) => {
+            camerata_api_types::uow::validate_repo_name(name)
+                .map_err(|e| format!("--repo-name: {e}"))?;
+            Ok(name.to_string())
+        }
+        None => Ok(dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo")
+            .to_string()),
+    }
 }
 
 impl InspectArgs {
@@ -196,19 +226,7 @@ impl InspectArgs {
         }
         let mut sources: Vec<(String, PathBuf)> = Vec::with_capacity(dirs.len());
         for (i, dir) in dirs.iter().enumerate() {
-            let name = match self.repo_names.get(i) {
-                Some(name) => {
-                    camerata_api_types::uow::validate_repo_name(name)
-                        .map_err(|e| format!("--repo-name: {e}"))?;
-                    name.clone()
-                }
-                // A single unnamed repo: the folder's own name, as before.
-                None => dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("repo")
-                    .to_string(),
-            };
+            let name = source_name(dir, self.repo_names.get(i).map(String::as_str))?;
             if let Some((_, other)) = sources.iter().find(|(n, _)| *n == name) {
                 return Err(format!(
                     "--repo-name {name} is used for both {} and {}; each repo needs its own name",
@@ -280,6 +298,8 @@ impl InspectArgs {
             }
         };
         Ok(camerata_server::cost_cap::RunControls {
+            scope: camerata_server::onboard::scope::ScanScope::from_patterns(&self.exclude)
+                .map_err(|e| format!("--exclude: {e}"))?,
             stored_spend_usd: 0.0,
             review: camerata_api_types::project::ReviewSettings {
                 escalation_rate_per_kloc,
@@ -303,6 +323,13 @@ impl InspectArgs {
             finder_force_pieces: self.finder.force_pieces,
             checkpoint: camerata_server::cost_checkpoint::CheckpointSettings::default(),
         })
+    }
+}
+
+/// Print each start warning as `warning: <text>`, the line the operator sees on stderr.
+pub fn write_start_warnings(out: &mut impl std::io::Write, warnings: &[String]) {
+    for w in warnings {
+        let _ = writeln!(out, "warning: {w}");
     }
 }
 
@@ -481,11 +508,39 @@ impl InspectError {
     }
 }
 
+/// What to tell the operator when the gate refused because a rule is split between options with no
+/// decision: the rules are named, and the decision is made in the desktop app, then exported.
+/// `camerata inspect` cannot make it (convention model design, ruling A3).
+fn split_rule_hint(failure: &camerata_server::release_gate::GateFailure) -> Option<String> {
+    use camerata_server::release_gate::CheckId;
+    let rules: Vec<&str> = failure
+        .report
+        .problems()
+        .filter(|(check, _)| *check == CheckId::SplitRuleWithoutDecision)
+        .map(|(_, p)| p.location.as_str())
+        .collect();
+    if rules.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "A client package cannot be exported while a rule is split between options with no \
+         decision: {}. Decide each split in the desktop app (accept an option, or leave it to the \
+         client), then export from there. `camerata inspect` cannot make that decision.",
+        rules.join(", ")
+    ))
+}
+
 impl std::fmt::Display for InspectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InspectError::Failed(message) => write!(f, "{message}"),
-            InspectError::ReleaseBlocked(failure) => write!(f, "{failure}"),
+            InspectError::ReleaseBlocked(failure) => {
+                write!(f, "{failure}")?;
+                if let Some(hint) = split_rule_hint(failure) {
+                    write!(f, "\n{hint}")?;
+                }
+                Ok(())
+            }
             InspectError::Incomplete(refusal) => write!(f, "{refusal}"),
             InspectError::IncompleteRun(run) => write!(
                 f,
@@ -749,6 +804,37 @@ fn save_ledger(path: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
     }
 }
 
+/// Where the operator's triage log goes for the export zip at `export`: in the zip's own folder,
+/// named for the zip and marked internal (`out.zip` gives `out-triage-log-INTERNAL.csv`).
+pub fn triage_log_path_beside(export: &Path) -> PathBuf {
+    let stem = export.file_stem().map_or_else(
+        || "export".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    export.with_file_name(format!("{stem}-triage-log-INTERNAL.csv"))
+}
+
+/// Write the operator's triage log beside the export zip at `export` (see
+/// [`triage_log_path_beside`]) and return where it went. The same file the review screen's
+/// "Download triage log" saves, built by the same function: its first line marks it internal. It
+/// is never put in the zip.
+pub fn write_triage_log_beside_zip(
+    report: &camerata_server::onboard::SealedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    export: &Path,
+) -> Result<PathBuf, String> {
+    let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
+        HashMap::new();
+    let reviewed =
+        camerata_server::report_export::ReviewedReport::unreviewed(report, &dispositions);
+    let csv =
+        camerata_server::xlsx_export::triage_log::operator_csv(&reviewed, corpus, &HashMap::new())
+            .map_err(|e| format!("{e:#}"))?;
+    let path = triage_log_path_beside(export);
+    std::fs::write(&path, csv).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Build the product-export ZIP bytes for `report`, via the EXACT SAME `report_export` /
 /// `xlsx_export` / zip-assembly functions the `POST /api/projects/:id/product-export` HTTP
 /// handler (`export_product`) calls, in the same order, with the same "nothing manually
@@ -766,7 +852,7 @@ pub async fn build_product_export_bytes(
     corpus: Option<&camerata_rules::RuleSet>,
     client: &str,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus, None, client, false).await?;
+    let released = release_product_export(report, corpus, None, client, false, &[]).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -778,6 +864,7 @@ async fn release_product_export(
     model: Option<camerata_server::ModelRecord>,
     client: &str,
     internal: bool,
+    repo_dirs: &[PathBuf],
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
@@ -788,6 +875,8 @@ async fn release_product_export(
     // `--internal` is the operator's own review: only then may an export come from a run that
     // did not complete, and it is marked INTERNAL INCOMPLETE.
     options.internal = internal;
+    // The folders the run read: no client file may name one.
+    options.operator_roots = repo_dirs.to_vec();
 
     let package = camerata_server::release_gate::build_product_package(
         &camerata_server::report_export::ReviewedReport::unreviewed(report, &dispositions),
@@ -919,14 +1008,59 @@ pub async fn run_inspect_pipeline_with(
     creds: &dyn camerata_server::credentials::CredentialStore,
     seams: Seams<'_>,
 ) -> Result<InspectOutcome, InspectError> {
+    // Boxed: the pipeline is one very large future, and callers (a test thread, the command line)
+    // hold this one on a small stack. The box keeps theirs a pointer.
+    Box::pin(run_inspect_pipeline_as(
+        args,
+        has_api_key,
+        creds,
+        seams,
+        false,
+    ))
+    .await
+}
+
+/// The one pipeline, as a new run or a resume (`rerun` false) or as a rerun of a saved run's
+/// deterministic stages on this build (`rerun` true, #588). A rerun is a resume whose model seam
+/// has no client behind it: every stage runs again from the saved inputs, every model reply comes
+/// from the run's store, and a reply the store does not hold refuses the whole rerun.
+async fn run_inspect_pipeline_as(
+    args: InspectArgs,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+    rerun: bool,
+) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
+    // A rerun makes no model call, so no spend gate may stop a stage of it: the run's limit is
+    // cleared for the rerun (and the stored spend is not counted against nothing).
+    if rerun {
+        controls.max_cost_usd = None;
+    }
 
     // The `(name, folder)` sources: one per `--repo`, named by `--repo-name` (a lone repo with
     // no name keeps its folder's name). The name tags every finding and provenance entry, the
     // role `spec` plays in `resolve_local_sources`. Several repos are ONE project: one scan,
     // one report, one cache and one ledger.
     let sources = args.resolve_sources()?;
+    // A pattern that starts with a repo name two repos share is refused, naming both: it must
+    // never silently exclude in both.
+    let names: Vec<String> = sources.iter().map(|(n, _)| n.clone()).collect();
+    controls.scope = controls
+        .scope
+        .clone()
+        .check_names(&names)
+        .map_err(|why| InspectError::Failed(format!("--exclude: {why}")))?;
+    // A file over the read limit that is not excluded by agreement, and a pattern that matches
+    // only files never read anyway, are warnings printed below, never refusals. A pattern that
+    // matches nothing still refuses the run.
+    let (refusal, warnings) =
+        camerata_server::onboard::scope::start_checks(&sources, &controls.scope).await;
+    if let Some(why) = refusal {
+        return Err(InspectError::Failed(why));
+    }
+    write_start_warnings(&mut std::io::stderr(), &warnings);
     let (manifest_path, ledger_file) = args.state_paths();
     // A multi-repo run's one cache and one ledger cover several folders; record which, so that
     // deleting any one of them can find and remove the files (see `project_files_covering`).
@@ -943,7 +1077,7 @@ pub async fn run_inspect_pipeline_with(
     }
 
     // ── Phase 1: stack detection + rule proposal ────────────────────────────────────────
-    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
+    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new(), &controls.scope).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
 
     // ── Phase 2: load the corpus ONCE + derive the preview list ─────────────────────────
@@ -962,7 +1096,8 @@ pub async fn run_inspect_pipeline_with(
         camerata_server::split_scannable_rules(selected.clone()).await;
 
     // ── Backend resolution + the process-local usage ledger ────────────────────────────
-    let backend_resolution = resolve_backend(args.backend, has_api_key);
+    // A rerun asks no model, so it needs no key: the backend resolves as the run's own did.
+    let backend_resolution = resolve_backend(args.backend, has_api_key || rerun);
     // The mode: forced by `--batch` / `--realtime`, else the run's default (rank 2: a Message
     // Batch on the API backend). The CLI backend cannot batch; that is said once, here, before
     // any model call.
@@ -1022,26 +1157,62 @@ pub async fn run_inspect_pipeline_with(
     } else {
         camerata_server::scan_cache::state_dir::project_state_key(&args.repo_dirs())
     };
+    // The build and rule library this run starts on, read from the running binary and the rules it
+    // loaded, never from the folder it runs in.
+    let engine_pin =
+        camerata_server::run_store::engine_pin::EnginePin::for_run(corpus.as_ref(), &controls);
     let resumed: Option<(Arc<camerata_server::run_store::RunStore>, String)> = match &seams.resume {
+        Some(run_id) if rerun => Some(
+            camerata_server::run_store::open_for_rerun(
+                run_id,
+                &sources,
+                &ai_scan_key,
+                &models_record,
+                &engine_pin,
+                args.client_engagement,
+            )
+            .map_err(|e| match e {
+                camerata_server::run_store::RunStoreError::AlreadyComplete(m) => {
+                    InspectError::AlreadyComplete(m)
+                }
+                other => InspectError::Failed(other.to_string()),
+            })?,
+        ),
         Some(run_id) => Some(open_for_resume(
             run_id,
             &sources,
             &ai_scan_key,
             &models_record,
+            &engine_pin,
         )?),
         None => None,
     };
+    // The replies a rerun needed and the run did not hold; every model seam below records here.
+    let rerun_misses = resumed
+        .as_ref()
+        .and_then(|(store, _)| store.rerun_misses().cloned());
     // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
     // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
     // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
     let mut group_review_notice: Option<String> = None;
     if let Some((store, _)) = &resumed {
-        controls.stored_spend_usd = store.stored_usd();
+        controls.stored_spend_usd = if rerun { 0.0 } else { store.stored_usd() };
         // The group reviewer stays on the model the run started with, whatever the default is now.
         let notice = store
             .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
             .map_err(InspectError::Failed)?;
         group_review_notice = Some(notice);
+        // The clone check stays on the model the run started with.
+        if let Some(line) = store.hold_clone_judge_model(&mut controls) {
+            group_review_notice = group_review_notice.map(|n| format!("{n}\n{line}"));
+        }
+        // An agent finder run finishes its remaining pieces on the finder model it started with.
+        if let Some(line) = store
+            .hold_finder_model(&mut controls)
+            .map_err(InspectError::Failed)?
+        {
+            group_review_notice = group_review_notice.map(|n| format!("{n}\n{line}"));
+        }
         // The kept model was not part of the pick the client lock checked at the top of this
         // run, so it is checked here, on every model the resumed run will call, before any call.
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1077,6 +1248,16 @@ pub async fn run_inspect_pipeline_with(
     )
     .map_err(InspectError::Failed)?;
 
+    // A rule file that did not load is a rule the agent finder would silently not check. An agent
+    // finder run stops here, before the estimate and before anything is spent (an engine run
+    // goes on and records the failure, see `record_corpus_load_failures` below).
+    camerata_server::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &controls,
+        !matches!(backend_resolution, BackendResolution::Blocked { .. }),
+        &corpus_load_failures,
+    )
+    .map_err(InspectError::Failed)?;
+
     // A spend limit needs every model priced; refuse before the estimate, before any model call.
     if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1095,7 +1276,7 @@ pub async fn run_inspect_pipeline_with(
         // failed calls. A scripted model (tests) launches no program, so nothing to check.
         if let Some(why) = cli_version_refusal(
             matches!(backend_resolution, BackendResolution::Cli),
-            seams.llm.is_some(),
+            seams.llm.is_some() || rerun,
             &models,
             camerata_server::claude_version::check_run_models,
         ) {
@@ -1124,9 +1305,13 @@ pub async fn run_inspect_pipeline_with(
         (seams.preflight_sink)(&text);
         preflight_text = Some(text);
     } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
-        let facts =
-            camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
-                .await;
+        let facts = camerata_server::preflight::gather_scan_facts(
+            &sources,
+            &selected,
+            corpus.as_ref(),
+            &controls.scope,
+        )
+        .await;
         // A repo that cannot be read is a repo the inspection would silently leave out. Refuse
         // before any model call, naming it, rather than price (and later run) a smaller job.
         if let Some(bad) = facts.iter().find(|f| f.read_error.is_some()) {
@@ -1167,7 +1352,7 @@ pub async fn run_inspect_pipeline_with(
         )
         .iter()
         .any(|(roles, _)| roles.contains("the clone judge"));
-        let pf = preflight::build(&preflight::PreflightInputs {
+        let preflight_inputs = preflight::PreflightInputs {
             backend: args.backend,
             batch,
             fix_model: Some(camerata_server::ai_audit::resolve_audit_model(
@@ -1186,7 +1371,14 @@ pub async fn run_inspect_pipeline_with(
             exact,
             terse_output: controls.efficiency.terse_output,
             consensus: controls.consensus,
-        });
+        };
+        // The agent finder is priced by its own formula, never by the engine's scan passes.
+        let pf = if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+        {
+            preflight::build_agent_finder(&preflight_inputs, controls.finder_force_pieces)
+        } else {
+            preflight::build(&preflight_inputs)
+        };
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
         // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
@@ -1238,6 +1430,7 @@ pub async fn run_inspect_pipeline_with(
                 include_alternatives: corpus.is_some(),
                 origin: camerata_server::run_store::RunOrigin::Cli,
                 project_id: None,
+                pin: engine_pin.clone(),
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {
@@ -1248,6 +1441,18 @@ pub async fn run_inspect_pipeline_with(
                         camerata_server::run_store::DEFAULT_KEEP_RUNS,
                     );
                     Some(store)
+                }
+                // A client engagement is paid for: without its run folder an interruption or a
+                // failed part could not be resumed and its sealed report would have no home, so it
+                // does not start. Only an internal run goes on without one.
+                Err(e) if args.client_engagement => {
+                    return Err(InspectError::Failed(format!(
+                        "this client inspection did not start: its run folder could not be \
+                         created ({e}). A client inspection is saved as it goes, so that an \
+                         interruption or a failed part can be resumed and its report is kept. \
+                         Nothing was sent to a model. Make the state folder writable, then \
+                         start again."
+                    )));
                 }
                 Err(e) => {
                     eprintln!(
@@ -1288,22 +1493,32 @@ pub async fn run_inspect_pipeline_with(
             camerata_server::llm::Backend::Cli
         }
     };
-    let real = match seams.llm {
-        Some(_) => None,
-        None => Some(
+    // A rerun has no model client at all: the seam is the store-only provider, whatever a test
+    // handed in, so no call can reach a real or scripted model.
+    let store_only_seam = rerun_misses.clone().map(|misses| {
+        camerata_server::run_store::store_only::seam(
+            misses,
+            matches!(backend_resolution, BackendResolution::Api),
+        )
+    });
+    let real = match (seams.llm, &store_only_seam) {
+        (Some(_), _) | (_, Some(_)) => None,
+        (None, None) => Some(
             camerata_server::onboard::build_llm(creds, llm_backend, Some(ledger.clone()))
                 .with_session_sink(sessions.clone()),
         ),
     };
-    let base: &dyn camerata_server::llm::LlmPort = match (seams.llm, real.as_ref()) {
-        (Some(llm), _) => llm,
-        (None, Some(real)) => real,
-        (None, None) => {
-            return Err(InspectError::Failed(
-                "no model client could be built for this run".to_string(),
-            ))
-        }
-    };
+    let base: &dyn camerata_server::llm::LlmPort =
+        match (&store_only_seam, seams.llm, real.as_ref()) {
+            (Some(seam), _, _) => seam,
+            (None, Some(llm), _) => llm,
+            (None, None, Some(real)) => real,
+            (None, None, None) => {
+                return Err(InspectError::Failed(
+                    "no model client could be built for this run".to_string(),
+                ))
+            }
+        };
     let journaled = store
         .as_ref()
         .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
@@ -1314,48 +1529,59 @@ pub async fn run_inspect_pipeline_with(
     // The agent finder's setup: one value, built once here and carried into the audit. The run
     // builds the agent from it on its own shared meter. A test that already stands an agent in
     // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
-    let finder_setup = camerata_server::ai_audit::agent_finder::run::finder_setup_for_run(
-        &controls,
-        ai_review_blocked,
-        llm_backend,
-        creds,
-        store.as_ref().map(|s| s.dir()),
-        args.client_engagement,
-    )
-    .map_err(InspectError::Failed)?;
+    // A rerun builds no agent (and needs no key): the finder answers from its stored pieces.
+    let finder_setup = if rerun {
+        None
+    } else {
+        camerata_server::ai_audit::agent_finder::run::finder_setup_for_run(
+            &controls,
+            ai_review_blocked,
+            llm_backend,
+            creds,
+            store.as_ref().map(|s| s.dir()),
+            args.client_engagement,
+        )
+        .map_err(InspectError::Failed)?
+    };
     let no_chosen_options: HashMap<String, String> = HashMap::new();
     let (mut report, manifest) = {
-        let audit = Box::pin(camerata_server::checkpoint::with_run_checkpoints(
-            store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(
-                token_seed,
-                camerata_server::onboard::audit_repos_with_llm_controlled(
-                    model_seam,
-                    &sources,
-                    &selected,
-                    Vec::new(),
-                    model,
-                    calibration_model,
-                    mode,
-                    false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
-                    None,  // feedback: no live transcript sink headlessly
-                    None,  // job: no job store headlessly (this call blocks until done)
-                    incremental_prior.as_ref(),
-                    false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
-                    true,  // soc2_enabled: irrelevant with `deep` off
-                    true,  // run_ai_review
-                    true,  // run_deterministic
-                    backend_resolution,
-                    corpus.as_ref(),
-                    &no_chosen_options,
-                    controls.clone(),
+        let audit = Box::pin(camerata_server::checkpoint::with_rerun_scope(
+            rerun,
+            camerata_server::checkpoint::with_run_checkpoints(
+                store.as_ref().map(|s| s.checkpoint_dir()),
+                camerata_server::prompt_frame::with_seed(
+                    token_seed,
+                    camerata_server::onboard::audit_repos_with_llm_controlled(
+                        model_seam,
+                        &sources,
+                        &selected,
+                        Vec::new(),
+                        model,
+                        calibration_model,
+                        mode,
+                        false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+                        None,  // feedback: no live transcript sink headlessly
+                        None,  // job: no job store headlessly (this call blocks until done)
+                        incremental_prior.as_ref(),
+                        false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+                        true,  // soc2_enabled: irrelevant with `deep` off
+                        true,  // run_ai_review
+                        true,  // run_deterministic
+                        backend_resolution,
+                        corpus.as_ref(),
+                        &no_chosen_options,
+                        controls.clone(),
+                    ),
                 ),
             ),
         ));
         let (mut report, manifest) =
-            camerata_server::ai_audit::agent_finder::run::with_optional_finder_setup(
-                finder_setup,
-                audit,
+            camerata_server::ai_audit::agent_finder::run::with_optional_store_only(
+                rerun_misses.clone(),
+                camerata_server::ai_audit::agent_finder::run::with_optional_finder_setup(
+                    finder_setup,
+                    audit,
+                ),
             )
             .await;
         if seams.llm.is_none() {
@@ -1379,6 +1605,7 @@ pub async fn run_inspect_pipeline_with(
         corpus.as_ref(),
         None,
         args.client_tooling(),
+        &controls.scope,
     )
     .await;
     // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
@@ -1387,15 +1614,21 @@ pub async fn run_inspect_pipeline_with(
     // Runtime and framework end of life and known runtime vulnerabilities, before the dependency
     // pass so that the KEV / EPSS enrichment below covers these rows too.
     let runtime_rows_in = report.findings.len();
-    camerata_server::runtime_audit::run_runtime_audit(&mut report, &sources).await;
+    camerata_server::runtime_audit::run_runtime_audit(&mut report, &sources, &controls.scope).await;
     let dep_audit_rows_in = report.findings.len();
     let mut osv_runs: Vec<camerata_server::vuln_intel::OsvRun> = Vec::new();
     for (spec, dir) in &sources {
-        let (dep_findings, dep_note) = camerata_server::dep_audit::run_dep_audit(spec, dir).await;
+        let (dep_findings, dep_note, dep_files) = camerata_server::dep_audit::run_dep_audit_listed(
+            spec,
+            dir,
+            &controls.scope.for_repo(spec),
+        )
+        .await;
         osv_runs.push(camerata_server::vuln_intel::OsvRun::from_note(
             spec,
             dep_note.as_ref(),
         ));
+        camerata_server::dep_audit::record_audited_files(&mut report, dep_files, osv_runs.last());
         if !dep_findings.is_empty() {
             report.findings.extend(dep_findings);
         }
@@ -1442,33 +1675,45 @@ pub async fn run_inspect_pipeline_with(
             .iter()
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
-        camerata_server::checkpoint::with_run_checkpoints(
-            store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(token_seed, async {
-                camerata_server::ai_audit::group_review::review_scan_report(
-                    &mut report,
-                    model_seam,
-                    &controls,
-                    &rules,
-                    llm_backend == camerata_server::llm::Backend::Cli,
-                    None,
-                    corpus.as_ref(),
-                )
-                .await;
-                // The possible-duplicate check reads the Fix ids the group reviewer just
-                // made; a failure of it is a note, never a failed part.
-                camerata_server::possible_duplicate::check::check_possible_duplicates(
-                    &mut report,
-                    model_seam,
-                    &controls,
-                    llm_backend == camerata_server::llm::Backend::Cli,
-                    None,
-                )
-                .await;
-            }),
+        camerata_server::checkpoint::with_rerun_scope(
+            rerun,
+            camerata_server::checkpoint::with_run_checkpoints(
+                store.as_ref().map(|s| s.checkpoint_dir()),
+                camerata_server::prompt_frame::with_seed(token_seed, async {
+                    camerata_server::ai_audit::group_review::review_scan_report(
+                        &mut report,
+                        model_seam,
+                        &controls,
+                        &rules,
+                        llm_backend == camerata_server::llm::Backend::Cli,
+                        batch,
+                        None,
+                        None,
+                        corpus.as_ref(),
+                    )
+                    .await;
+                    // The possible-duplicate check reads the Fix ids the group reviewer just
+                    // made; a failure of it is a note, never a failed part.
+                    camerata_server::possible_duplicate::check::check_possible_duplicates(
+                        &mut report,
+                        model_seam,
+                        &controls,
+                        llm_backend == camerata_server::llm::Backend::Cli,
+                        batch,
+                        None,
+                        None,
+                    )
+                    .await;
+                }),
+            ),
         )
         .await;
     }
+    // The group reviewer and the duplicate check were the last model stages. A rerun that needed
+    // a reply the run does not hold is refused here as a whole, naming every missing reply of
+    // every model stage (the stages above ran on, answered by the store alone, so the list is
+    // complete), before anything is sealed, saved or exported.
+    refuse_rerun_with_misses(&store)?;
     // The tool causes are decided after the group reviewer, which re-sorts the rows of a rule.
     camerata_server::settle_tool_causes(&mut report, corpus.as_ref());
 
@@ -1511,6 +1756,11 @@ pub async fn run_inspect_pipeline_with(
             &model_record,
             args.client_tooling(),
         ));
+    // A rerun names both builds in the ledger: the model work and the deterministic checks.
+    // Only a rerun that got here (every reply served from the store) is recorded.
+    if let Some(rerun) = store.as_ref().and_then(|s| s.commit_rerun()) {
+        report.ledger.record_rerun(rerun);
+    }
     save_ledger(&ledger_file, &report.ledger);
     // The operator's failure report, next to the ledger (never in the export): every failed part
     // with every attempt's status, provider error, request id and waits.
@@ -1543,6 +1793,33 @@ pub async fn run_inspect_pipeline_with(
     // establishes).
     report.run_id.clone_from(&run_id);
     let report = report.seal();
+
+    // The sealed report, saved in the run's own folder (never in the export) so the app can
+    // review a command line run. Saved before anything can mark the run complete. A complete run
+    // whose report could not be saved ends here, incomplete and resumable, and its resume saves
+    // it. A run that did not complete ends as it would have, with its own exit code and account,
+    // and says the report was not saved too; it is never marked complete either.
+    let report_path = match &store {
+        Some(store) => store.dir().join(camerata_server::run_store::REPORT_FILE),
+        // Only an internal run has no run folder (a client engagement does not start without one).
+        None => saved_report_beside(&ledger_file),
+    };
+    let not_saved = camerata_server::run_store::write_report(&report_path, &report)
+        .err()
+        .map(|e| report_not_saved(&report_path, &e, run_id.as_deref()));
+    let ledger_summary = match &not_saved {
+        None => format!(
+            "{ledger_summary}\nsaved report (never exported): {}",
+            report_path.display()
+        ),
+        Some(message) if report.incomplete_reasons().is_empty() => {
+            finish_run(store.as_ref(), &report, false);
+            return Err(InspectError::Failed(format!(
+                "{message}\nNo export was written."
+            )));
+        }
+        Some(message) => format!("{ledger_summary}\n{message}"),
+    };
 
     // The operator's rewrite advisory, beside the failure report in the state directory and never
     // in any zip (owner ruling: fix or rewrite is the architect's call alone). Computed from the
@@ -1603,6 +1880,7 @@ pub async fn run_inspect_pipeline_with(
         Some(model_record),
         &args.client,
         !args.client_engagement,
+        &args.repo_dirs(),
     )
     .await
     {
@@ -1621,7 +1899,14 @@ pub async fn run_inspect_pipeline_with(
                         run_notes,
                     }))
                 }
-                other => other,
+                other => {
+                    // The refusal keeps its own exit code; the report that was not saved is said
+                    // beside it.
+                    if let Some(message) = &not_saved {
+                        eprintln!("camerata inspect: {message}");
+                    }
+                    other
+                }
             });
         }
     };
@@ -1633,6 +1918,21 @@ pub async fn run_inspect_pipeline_with(
     let written = std::fs::write(&args.export, &zip_bytes);
     let run_notes = finish_run(store.as_ref(), &report, written.is_ok());
     written.map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
+    // `CAMERATA_EXPORT_TRIAGE_LOG` asks for the operator's triage log. It is written beside the
+    // zip, never inside it: the client package carries no triage log, whatever is set.
+    if camerata_server::report_export::triage_log_env_on(
+        std::env::var(camerata_server::report_export::EXPORT_TRIAGE_LOG_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        match write_triage_log_beside_zip(&report, corpus.as_ref(), &args.export) {
+            Ok(path) => eprintln!(
+                "camerata inspect: triage log (internal, not part of the client package): {}",
+                path.display()
+            ),
+            Err(e) => eprintln!("camerata inspect: could not write the triage log: {e}"),
+        }
+    }
 
     Ok(InspectOutcome {
         export_path: args.export,
@@ -1656,6 +1956,28 @@ pub async fn run_inspect_pipeline_with(
     })
 }
 
+/// Refuse a rerun (#588) that needed a model reply its saved run does not hold, naming every
+/// one. Nothing is exported and nothing was sent. A run that is not a rerun has no list.
+fn refuse_rerun_with_misses(
+    store: &Option<Arc<camerata_server::run_store::RunStore>>,
+) -> Result<(), InspectError> {
+    let refusal = store
+        .as_ref()
+        .and_then(|s| s.rerun_misses())
+        .and_then(camerata_server::run_store::store_only::StoreOnlyMisses::refusal);
+    match refusal {
+        Some(text) => {
+            // The tools of the stages above may have left files in the checkout: record where
+            // the tree ended, as any run does, so the next attempt is not refused on them.
+            if let Some(s) = store {
+                s.record_tree_end();
+            }
+            Err(InspectError::Failed(text))
+        }
+        None => Ok(()),
+    }
+}
+
 /// Open the saved run `run_id` to resume it (the one implementation lives in
 /// [`camerata_server::run_store::open_for_resume`]; the cockpit's button uses it too).
 fn open_for_resume(
@@ -1663,15 +1985,47 @@ fn open_for_resume(
     sources: &[(String, PathBuf)],
     ai_scan_key: &camerata_server::scan_cache::AiScanKey,
     models: &camerata_server::run_store::ModelsRecord,
+    pin: &camerata_server::run_store::engine_pin::EnginePin,
 ) -> Result<(Arc<camerata_server::run_store::RunStore>, String), InspectError> {
-    camerata_server::run_store::open_for_resume(run_id, sources, ai_scan_key, models).map_err(|e| {
-        match e {
+    camerata_server::run_store::open_for_resume(run_id, sources, ai_scan_key, models, pin).map_err(
+        |e| match e {
             camerata_server::run_store::RunStoreError::AlreadyComplete(m) => {
                 InspectError::AlreadyComplete(m)
             }
             other => InspectError::Failed(other.to_string()),
-        }
-    })
+        },
+    )
+}
+
+/// Where the sealed report goes for a run with no run folder (its store could not be created):
+/// beside the ledger, as `<stem>.report.json`.
+fn saved_report_beside(ledger_file: &Path) -> PathBuf {
+    let name = ledger_file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".ledger.json").unwrap_or(&name);
+    ledger_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.report.json"))
+}
+
+/// The plain message of a run whose sealed report could not be saved.
+fn report_not_saved(path: &Path, error: &std::io::Error, run_id: Option<&str>) -> String {
+    let next = match run_id {
+        Some(id) => format!(
+            "Run {id} is kept and is not complete: `camerata inspect --resume {id}` saves the \
+             report and finishes the run, once that folder can be written to."
+        ),
+        None => "This run has no saved run to resume: run it again once that folder can be \
+                 written to."
+            .to_string(),
+    };
+    format!(
+        "the report was not saved: could not write {} ({error}). {next}",
+        path.display()
+    )
 }
 
 /// The end of an attempt: tell the store which parts failed and whether the run is complete.
@@ -1768,6 +2122,77 @@ pub async fn resume_inspect(
             ..seams
         },
     )
+    .await
+}
+
+/// Production entry point for `camerata inspect --rerun-deterministic <RUN>` (#588): rerun the
+/// deterministic stages of a saved run on this build with no model calls. No key is read and none
+/// is needed. Everything a stored reply depends on must be unchanged; a reply the run does not
+/// hold refuses the whole rerun. The shared work is in
+/// [`camerata_server::run_store::open_for_rerun`].
+pub async fn run_rerun_deterministic(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+) -> Result<InspectOutcome, InspectError> {
+    rerun_deterministic_inspect(
+        run,
+        repos,
+        export,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            resume: None,
+            llm: None,
+            preflight_sink: &|text| print!("{text}"),
+        },
+    )
+    .await
+}
+
+/// [`run_rerun_deterministic`] with its credential store and seams explicit. A model handed in
+/// through `seams.llm` is never called: a rerun's model seam is the store-only provider.
+pub async fn rerun_deterministic_inspect(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    use camerata_server::run_store as rs;
+    let project_key = match repos {
+        [] => None,
+        [one] => Some(camerata_server::scan_cache::state_dir::repo_state_key(one)),
+        many => Some(camerata_server::scan_cache::state_dir::project_state_key(
+            many,
+        )),
+    };
+    let run_id = rs::resolve_run(run, project_key.as_deref(), rs::RunOrigin::Cli)
+        .map_err(|e| InspectError::Failed(e.to_string()))?;
+    let record = rs::read_record(&run_id).map_err(|e| InspectError::Failed(e.to_string()))?;
+    if record.origin == rs::RunOrigin::Cockpit {
+        return Err(InspectError::Failed(format!(
+            "run {run_id} was started from the cockpit; `camerata inspect --rerun-deterministic` \
+             reruns runs started from the command line"
+        )));
+    }
+    let mut args: InspectArgs = serde_json::from_value(record.args.clone()).map_err(|e| {
+        InspectError::Failed(format!(
+            "run {run_id} did not save the arguments it was started with ({e}); start a new run"
+        ))
+    })?;
+    if let Some(export) = export {
+        args.export = export;
+    }
+    Box::pin(run_inspect_pipeline_as(
+        args,
+        true,
+        creds,
+        Seams {
+            resume: Some(run_id),
+            ..seams
+        },
+        true,
+    ))
     .await
 }
 
@@ -2059,6 +2484,20 @@ pub fn api_key_present(store: &dyn camerata_server::credentials::CredentialStore
     camerata_server::credentials::anthropic_api_key(store).is_some()
 }
 
+/// A client inspection is not started on a build with uncommitted changes or no commit, so the
+/// build that starts it can be named exactly. `client_engagement` is false for `--internal`, which
+/// is never refused. Checked at the production starts only (after the key check); a resume goes
+/// through [`resume_inspect`], and the scripted test entries are not refused.
+pub fn refuse_unfit_build_for_client(
+    client_engagement: bool,
+    build: &camerata_server::run_store::engine_pin::BuildId,
+) -> Result<(), InspectError> {
+    match camerata_server::run_store::engine_pin::client_start_refusal(client_engagement, build) {
+        Some(why) => Err(InspectError::Failed(why)),
+        None => Ok(()),
+    }
+}
+
 /// Production entry point: resolves the Anthropic key from the REAL Keychain (the one the app's
 /// Settings writes), with `ANTHROPIC_API_KEY` as the fallback, then runs
 /// [`run_inspect_with_store`].
@@ -2078,6 +2517,10 @@ pub async fn run_inspect_with_store(
 ) -> Result<InspectOutcome, InspectError> {
     let has_api_key = api_key_present(store);
     require_api_key_for_client_inspection(args.backend, has_api_key)?;
+    refuse_unfit_build_for_client(
+        args.client_engagement,
+        &camerata_server::run_store::engine_pin::BuildId::current(),
+    )?;
     run_inspect_pipeline(args, has_api_key, store).await
 }
 
@@ -2229,6 +2672,95 @@ mod tests {
     use super::*;
     use camerata_server::scan_ledger::StageAccounting;
 
+    /// A run with no run folder saves its report beside the ledger, under the ledger's stem.
+    #[test]
+    fn a_run_with_no_run_folder_saves_its_report_beside_the_ledger() {
+        assert_eq!(
+            saved_report_beside(Path::new("/state/camerata/acme-one-1234abcd.ledger.json")),
+            PathBuf::from("/state/camerata/acme-one-1234abcd.report.json")
+        );
+    }
+
+    /// The message says the report was not saved, where, and how to finish the run.
+    #[test]
+    fn the_report_not_saved_message_says_what_happened_and_what_to_do() {
+        let e = std::io::Error::other("read-only folder");
+        let saved = report_not_saved(Path::new("/state/runs/r1/report.json"), &e, Some("r1"));
+        assert!(saved.starts_with("the report was not saved"), "{saved}");
+        assert!(saved.contains("/state/runs/r1/report.json"), "{saved}");
+        assert!(saved.contains("read-only folder"), "{saved}");
+        assert!(
+            saved.contains("`camerata inspect --resume r1` saves the report and finishes the run"),
+            "{saved}"
+        );
+        assert!(saved.contains("can be written to."), "{saved}");
+        assert!(!saved.contains("stored replies"), "{saved}");
+        let unsaved = report_not_saved(Path::new("/x.report.json"), &e, None);
+        assert!(unsaved.contains("no saved run to resume"), "{unsaved}");
+    }
+
+    /// A refusal for a split rule names the rule and says where it is decided.
+    #[test]
+    fn a_split_rule_refusal_names_the_rule_and_points_to_the_desktop_app() {
+        use camerata_server::release_gate::{CheckId, GateFailure, GateReport, Problem};
+        let mut report = GateReport::default();
+        report.record(
+            CheckId::SplitRuleWithoutDecision,
+            vec![Problem::new(
+                "json/all-findings.json",
+                "acme/app ARCH-TRIGGER-ENV-1",
+                "the rule ARCH-TRIGGER-ENV-1 is split between options and has no decision.",
+                None,
+            )],
+        );
+        let shown = InspectError::ReleaseBlocked(GateFailure {
+            stem: "acme-app".into(),
+            report,
+        })
+        .to_string();
+        assert!(shown.contains("ARCH-TRIGGER-ENV-1"), "{shown}");
+        assert!(shown.contains("desktop app"), "{shown}");
+        assert!(shown.contains("then export"), "{shown}");
+    }
+
+    #[test]
+    fn the_triage_log_is_named_for_the_zip_and_marked_internal_in_its_folder() {
+        assert_eq!(
+            triage_log_path_beside(Path::new("/out/run.zip")),
+            PathBuf::from("/out/run-triage-log-INTERNAL.csv")
+        );
+        assert_eq!(
+            triage_log_path_beside(Path::new("run.zip")),
+            PathBuf::from("run-triage-log-INTERNAL.csv")
+        );
+    }
+
+    #[test]
+    fn the_operator_triage_log_is_written_beside_the_zip_and_never_touches_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("run.zip");
+        std::fs::write(&zip, b"zip bytes").unwrap();
+        let report =
+            camerata_server::onboard::ScanReport::gated(&["acme/portal".to_string()]).seal();
+        let written = write_triage_log_beside_zip(&report, None, &zip).unwrap();
+        assert_eq!(written, dir.path().join("run-triage-log-INTERNAL.csv"));
+        let text = std::fs::read_to_string(&written).unwrap();
+        let mut lines = text.lines();
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with(camerata_server::xlsx_export::triage_log::INTERNAL_MARK),
+            "{text}"
+        );
+        assert!(lines.next().unwrap().starts_with("Rule ID,"), "{text}");
+        assert_eq!(
+            std::fs::read(&zip).unwrap(),
+            b"zip bytes",
+            "the zip is untouched"
+        );
+    }
+
     fn base_args(repo: PathBuf, export: PathBuf) -> InspectArgs {
         InspectArgs {
             repo,
@@ -2256,6 +2788,7 @@ mod tests {
             run_client_tooling: false,
             consensus: false,
             finder: Default::default(),
+            exclude: Vec::new(),
         }
     }
 
@@ -3199,6 +3732,7 @@ mod tests {
             &camerata_server::llm::LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: String::new(),
                 model: "m".to_string(),
                 backend: "api".to_string(),
@@ -3250,7 +3784,7 @@ mod tests {
         let defaults = args.run_controls().unwrap();
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
-        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
+        assert_eq!(defaults.group_review_model_for(), "claude-opus-5-5");
         assert_eq!(defaults.dup_check_model_for(), "claude-sonnet-5-5");
         args.dup_check_model = Some("claude-opus-5-5".to_string());
         assert_eq!(
@@ -3271,7 +3805,7 @@ mod tests {
         args.group_review_model = Some("  ".to_string());
         assert_eq!(
             args.run_controls().unwrap().group_review_model_for(),
-            "claude-fable-5-2"
+            "claude-opus-5-5"
         );
     }
 

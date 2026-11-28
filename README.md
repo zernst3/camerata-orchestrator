@@ -4,7 +4,7 @@
 
 Camerata is a governed engineering platform for working on code with AI. It is built on one library of written, versioned rules, and two products use it: the **Codebase Inspection**, which reads a codebase against the rules and reports what it finds, and the **governed development console**, where AI agents change code only through a deterministic gate that enforces the same rules.
 
-The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so every check Camerata makes is readable in plain text. The library holds 446 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every problem names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation): 445 of the 446 rules cite at least one published source, 914 sources in all, each with its link. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
+The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so every check Camerata makes is readable in plain text. The library holds 455 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every problem names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation): 454 of the 455 rules cite at least one published source, 965 sources in all, each with its link. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
 
 ## The Codebase Inspection
 
@@ -15,14 +15,14 @@ Two kinds of check run. A deterministic scan answers the questions that have a p
 - **A complete client package in one ZIP**, marked "Confidential, prepared for" the client and pinned to the exact commit inspected:
   - a **PDF report** for decision makers, a summary of 20 pages at most: executive summary, area scorecard, a severity by effort matrix, the most serious problems, one line for every other fix, what is healthy, dependencies and the method with its limits, stated plainly as an assessment and not a certification;
   - an **Excel workbook** for the engineers that holds every row: a Fix plan in the order to do the fixes, All problems (every problem once, at its place), Needs a decision, the code's conventions and departures from them, dependencies, Rules checked (found or clean), Ruled out with the reason for each and Not checked, then the reviewers' sheets (All source rows, Reviewer decisions and How problems were grouped);
-  - **`findings.json`, `decisions.json` and CSV and JSON copies of every dataset**, including a `tickets.csv` with one ticket per fix ready to import into Jira, Linear or GitHub Issues, plus a manifest and a README. [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md) lists every file, sheet and PDF section.
+  - **`json/inspection.json`, `json/decisions.json` and CSV and JSON copies of every dataset**, including a `csv/tickets.csv` with one ticket per fix ready to import into Jira, Linear or GitHub Issues, plus a manifest and a README. [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md) lists every file, sheet and PDF section.
 
   Before anything is written, a release gate runs more than a dozen checks: no secret survives in any file, every dataset agrees with every other, every problem that needs a decision has one and the report's claims match the scan's own ledger. One failure refuses the export.
 - **Several repositories as one project.** Every problem names its repo, each service's conventions are read separately and a **Patterns across services** section shows where services differ. It is an observation, never a problem.
 - **Run to completion.** A call that fails on network or server trouble is retried, an outage stops the run cleanly and a client export is never written with a part that failed or did not run. Every inspection is saved part by part, so after any interruption **Run what remains** (or `camerata inspect --resume`) sends only the work that is left. Every model reply is kept, including one the engine turned down, so after a parser fix a resume reuses any reply the fixed parser accepts instead of paying for it again.
 - **Accuracy checks on the client-facing text.** The explanation and the fix written for each problem are checked against the code, and a name the code does not contain is turned down.
 - **Runtime end-of-life and vulnerability checks** on the runtime a repository declares, beyond the lockfile audit.
-- **Cost under the operator's control.** An estimate is printed before any model call, a spend limit stops a run at the amount set, models come from project settings or command-line flags only (defaults: Sonnet 5.5 for the scan, Opus 5.5 for calibration, Fable 5.2 for the group reviewer and Haiku 5.5 for fixes) and every token-saving measure can be switched off for a run.
+- **Cost under the operator's control.** An estimate is printed before any model call, a spend limit stops a run at the amount set, models come from project settings or command-line flags only (defaults: Sonnet 5.5 for the scan, Opus 5.5 for calibration, Opus 5.5 for the group reviewer and the agent finder, and Haiku 5.5 for fixes) and every token-saving measure can be switched off for a run.
 
 **The honest boundary.** This repository shows the engine's behavior on fixture repositories with planted defects and the test suite that pins it. It makes no claim, and holds no published measurement, of how precise or complete the AI pass is on a large real-world codebase; results at that scale stay unproven until they are measured. Every client report is reviewed by a person before it is delivered. [`DATA_HANDLING.md`](DATA_HANDLING.md) covers what leaves the operator's machine during an inspection and how to delete what stays.
 
@@ -88,10 +88,10 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 
 | | |
 |---|---|
-| Rust | over 700,000 lines of Rust across 29 crates and one maintainer tool, including tests |
+| Rust | over 700,000 lines of Rust across 30 crates and one maintainer tool, including tests |
 | Tests | 12,000+ automated tests; roughly half the lines are test code |
 | Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
-| Rule library | 446 rules across 22 domains; 445 cite at least one published source (914 sources in all) |
+| Rule library | 455 rules across 22 domains; 454 cite at least one published source (965 sources in all) |
 | Commits | 2,800+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
 The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so deterministic detectors ship with a positive test and a "safe twin" that proves each stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
@@ -117,6 +117,8 @@ A sample report costs nothing: `cargo test -p camerata-server --test generate_sa
 ## Status
 
 The Codebase Inspection and brownfield onboarding are built and run end to end on fixture repositories, and the gate is proven standalone against a real agent. **V1 accuracy testing has started, on fixture repositories with planted defects and decoys, graded blind against answer keys the engine never sees.** How precise and complete the AI pass is on large real-world codebases, and what each token-saving measure does to cost and to the problems found, have not been measured yet. The governed development console is wired end to end and unit-tested, but a live model doing multi-step work through the gate has not been run yet. The consumer app-builder, the architect surface for Jira, Azure DevOps and GitHub boards and the standing maintenance agent are earlier still. [`PLATFORM.md`](PLATFORM.md#status) separates what is proven from what is staged.
+
+Roadmap: [Camerata roadmap](https://github.com/users/zernst3/projects/1) shows what is in progress, in review and next.
 
 ## Where to read next
 

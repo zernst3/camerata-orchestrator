@@ -130,6 +130,46 @@ pub(in crate::cockpit) struct AlternativeControlsRow {
     pub hallucinated: bool,
 }
 
+/// The badge for a rule that has a convention record (convention model design, section 8): where
+/// the standard came from, in words. "AI recommended" is never one of them.
+pub(in crate::cockpit) fn convention_badge(
+    c: &camerata_api_types::audit::RuleConvention,
+) -> (&'static str, &'static str) {
+    use camerata_api_types::audit::StandardSource;
+    if c.standard.left_to_client {
+        return ("rec-badge", "Left to the client");
+    }
+    match (&c.standard.option_id, c.standard.source) {
+        (Some(_), StandardSource::Reviewer) => ("rec-badge rec-badge-yours", "Set by you"),
+        (Some(_), StandardSource::RuleDefault) => ("rec-badge", "The rule's default"),
+        (Some(_), StandardSource::EarlierChoice) => ("rec-badge", "Your project's earlier choice"),
+        (Some(_), StandardSource::MostCommon) => ("rec-badge", "The option most places follow"),
+        (Some(_), _) => ("rec-badge", "Observed in the code"),
+        (None, _) => ("rec-badge rec-badge-pending", "Proposal, no convention yet"),
+    }
+}
+
+/// The convention record a rule's row rules on. The row shows the by-rule recommendation, which
+/// is the one of the repo scanned last (`ScanReport::recommendations`), so with several repos the
+/// record is that repo's, never the first repo's by accident: a pick rules on the (repo, rule) the
+/// row is about.
+pub(in crate::cockpit) fn record_for_rule<'a>(
+    conventions: &'a [camerata_api_types::audit::RuleConvention],
+    repos: &[String],
+    rule_id: &str,
+    recommendation_repo: &str,
+) -> Option<&'a camerata_api_types::audit::RuleConvention> {
+    let of_rule = conventions
+        .iter()
+        .filter(|c| c.rule_id.eq_ignore_ascii_case(rule_id));
+    if recommendation_repo.is_empty() {
+        // A report from before the recommendation carried its repo: the repo scanned last.
+        return of_rule.max_by_key(|c| repos.iter().position(|r| r == &c.repo));
+    }
+    // The row shows this repo's recommendation, so it rules on this repo's record.
+    of_rule.rev().find(|c| c.repo == recommendation_repo)
+}
+
 /// Build one rule's control line out of the scan's three sources. PURE, so the priority order
 /// below is unit-testable rather than buried in a render body.
 ///
@@ -244,6 +284,7 @@ pub(in crate::cockpit) fn RuleAlternativeControls(
             }
             select {
                 class: "rec-select",
+                "data-rule": "{row.rule_id}",
                 value: "{evaluated_id}",
                 onchange: move |e: Event<FormData>| on_pick.call(e.value()),
                 for (id , label) in row.options.iter() {
@@ -383,8 +424,13 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
     repos: Vec<String>,
     recommendations: std::collections::HashMap<String, RuleRecommendationView>,
     audit: Signal<Option<ScanReportView>>,
+    /// The scan's convention records. A rule with one is ruled on through the standards routes:
+    /// the Change select saves a ruling and no override is staged for a rescan.
+    #[props(default)]
+    conventions: Vec<camerata_api_types::audit::RuleConvention>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let shell_refresh = try_use_context::<crate::cockpit::tree::ShellRefresh>();
     // The architect's per-repo alternative choices (ScanResults provides this via context) —
     // updated here too after a successful rescan, so Arm's directive resolution matches the
     // operator's forced choice rather than the pre-override default.
@@ -475,12 +521,43 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
                             accepted_ids.read().contains(&rid),
                         );
                         let evaluated_id = row.evaluated_option_id.clone();
+                        // A rule with a convention record is ruled on, not staged for a rescan.
+                        let record = record_for_rule(&conventions, &repos, &rid, &rec.repo).cloned();
+                        let mut row = row;
+                        if let Some(c) = &record {
+                            (row.badge_class, row.badge_text) = convention_badge(c);
+                            row.staged = false;
+                            // With several repos the row says which repo it rules on.
+                            if repos.len() > 1 {
+                                row.title = format!("{} ({})", row.title, c.repo);
+                            }
+                        }
+                        let pid_for_pick = project_id.clone();
                         rsx! {
                             RuleAlternativeControls {
                                 key: "{rid}",
                                 row,
                                 on_why: Callback::new(move |()| why_open.set(Some(rid_for_why.clone()))),
                                 on_pick: Callback::new(move |picked: String| {
+                                    if let Some(c) = record.clone() {
+                                        let pid = pid_for_pick.clone();
+                                        spawn(async move {
+                                            let action = super::queue_table::RulingAction::Accept(picked);
+                                            match super::wire::post_ruling(&pid, &c.repo, &c.rule_id, &action).await {
+                                                Ok(_) => {
+                                                    if let Some(mut r) = shell_refresh {
+                                                        r.0 += 1;
+                                                    }
+                                                }
+                                                Err(msg) => crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Error,
+                                                    msg,
+                                                ),
+                                            }
+                                        });
+                                        return;
+                                    }
                                     stage_or_clear_override(
                                         &mut pending.write(),
                                         &rid_for_select,

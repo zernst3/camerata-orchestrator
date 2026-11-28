@@ -101,6 +101,11 @@ pub struct SourceFileView {
     pub requested_around: Option<usize>,
 }
 
+/// What the UI says for a `repo_unlinked` answer that carries no reason of its own. Never "file
+/// not found": no file was looked for.
+pub const REPO_UNLINKED_WORDS: &str =
+    "This repo is not linked to a project, or it has no local folder.";
+
 /// What a response means for the viewer's body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceOutcome {
@@ -112,6 +117,9 @@ pub enum SourceOutcome {
     TooLarge(String),
     NotUtf8(String),
     FileMissing(String),
+    /// The repo is not linked to the project, or has no local folder: no file was looked for.
+    /// The text is ready to show (the server's reason, else [`REPO_UNLINKED_WORDS`]).
+    RepoUnlinked(String),
     /// Anything else (path refused, an unknown status).
     Unavailable(String),
 }
@@ -214,6 +222,7 @@ impl SourceFileView {
             "too_large" => SourceOutcome::TooLarge(self.reason_or("File is too large to view")),
             "not_utf8" => SourceOutcome::NotUtf8(self.reason_or("File is not valid UTF-8")),
             "file_missing" => SourceOutcome::FileMissing(self.reason_or("File not found")),
+            "repo_unlinked" => SourceOutcome::RepoUnlinked(self.reason_or(REPO_UNLINKED_WORDS)),
             "path_traversal" => {
                 SourceOutcome::Unavailable(self.reason_or("This file path was refused"))
             }
@@ -521,7 +530,7 @@ pub fn scroll_top_for_line(line: usize, line_h: u32, viewport_px: f64, total_lin
 /// Lines of a window left unrendered at its edges before the viewer asks for a new window.
 pub const PAGE_MARGIN_LINES: usize = 50;
 
-/// For a file delivered as a window (400 KB to 4 MB): the line to centre a new window on when
+/// For a file delivered as a window (1 MB to 4 MB): the line to centre a new window on when
 /// the viewport has come within [`PAGE_MARGIN_LINES`] of a window edge that is not the file's
 /// edge. `None` for a whole file or when the viewport is well inside the window.
 pub fn page_request(
@@ -1498,6 +1507,14 @@ mod tests {
         assert_eq!(
             o("file_missing", "gone"),
             SourceOutcome::FileMissing("gone".into())
+        );
+        assert_eq!(
+            o("repo_unlinked", "not linked here"),
+            SourceOutcome::RepoUnlinked("not linked here".into())
+        );
+        assert_eq!(
+            o("repo_unlinked", ""),
+            SourceOutcome::RepoUnlinked(REPO_UNLINKED_WORDS.into())
         );
         assert_eq!(
             o("path_traversal", "no"),

@@ -159,6 +159,19 @@ fn evidence_unverified() -> (crate::AppState, String) {
     state_with(report)
 }
 
+fn critical_without_decision() -> (crate::AppState, String) {
+    let mut report = scan_report();
+    report.findings[0].severity = "critical".to_string();
+    state_with(report)
+}
+
+fn unsure_without_decision() -> (crate::AppState, String) {
+    let mut report = scan_report();
+    report.findings[0].needs_review = true;
+    report.findings[0].confidence = Some("needs-review".to_string());
+    state_with(report)
+}
+
 fn junk_content() -> (crate::AppState, String) {
     let mut report = scan_report();
     report.findings[0].detail = "A title \u{2014} I cannot assist.".to_string();
@@ -241,7 +254,7 @@ fn node_decision_missing_a_member() -> (crate::AppState, String) {
     (state, id)
 }
 
-const HELD: [Held; 8] = [
+const HELD: [Held; 10] = [
     Held {
         name: "evidence unverified",
         check: CheckId::EvidenceUnverified,
@@ -270,6 +283,18 @@ const HELD: [Held; 8] = [
         name: "engine check no without correction",
         check: CheckId::EngineCheckNoWithoutCorrection,
         build: engine_check_no_without_correction,
+        request,
+    },
+    Held {
+        name: "critical without decision",
+        check: CheckId::CriticalOrUnsureWithoutDecision,
+        build: critical_without_decision,
+        request,
+    },
+    Held {
+        name: "unsure without decision",
+        check: CheckId::CriticalOrUnsureWithoutDecision,
+        build: unsure_without_decision,
         request,
     },
     Held {
@@ -408,7 +433,7 @@ async fn the_pdf_route_refuses_each_held_kind_the_package_route_refuses() {
 
 /// A held package that also leaks a secret is refused naming BOTH, on both routes, with no
 /// Typst: the reviewer fixes everything in one pass, not one refusal at a time (Fable wave 12 F1).
-/// The finding's path carries the secret, so it is in `findings.json` and every other file, and
+/// The finding's path carries the secret, so it is in `json/inspection.json` and every other file, and
 /// the row also has an Engine Check No nobody corrected.
 #[tokio::test]
 async fn a_held_package_that_also_has_a_secret_is_refused_naming_both() {
@@ -461,8 +486,8 @@ async fn a_held_package_that_also_has_a_secret_is_refused_naming_both() {
         assert!(
             named
                 .iter()
-                .any(|(c, f, _)| c == CheckId::Secrets.label() && f == "findings.json"),
-            "{route}: the secret is found in every package file, findings.json among them: {body}"
+                .any(|(c, f, _)| c == CheckId::Secrets.label() && f == "json/inspection.json"),
+            "{route}: the secret is found in every package file, json/inspection.json among them: {body}"
         );
     }
 }
@@ -635,11 +660,14 @@ const FILE_ROUTES: [(&str, &str); 2] = [
 /// a client deliverable. Each is named here so it cannot escape the scan, and each must say so in
 /// its first line, its panel and its saved filename (below). `(route, saved filename)`.
 ///
-/// `export_deep_report` is the only one: the deep-tier lenses are model-written prose with no
-/// reviewer overlay and no gate. Making it a gated package artifact is a later work order; until
-/// then it is labelled for what it is.
-const OPERATOR_ONLY_ROUTES: [(&str, &str); 1] =
-    [("export_deep_report", "camerata-deep-report-INTERNAL.md")];
+/// `export_deep_report`: the deep-tier lenses are model-written prose with no reviewer overlay
+/// and no gate. Making it a gated package artifact is a later work order; until then it is
+/// labelled for what it is. `export_triage_log`: the triage log left the client package; it is the
+/// operator's file, marked internal on its first line and in its filename.
+const OPERATOR_ONLY_ROUTES: [(&str, &str); 2] = [
+    ("export_deep_report", "camerata-deep-report-INTERNAL.md"),
+    ("export_triage_log", "camerata-triage-log-INTERNAL.csv"),
+];
 
 /// What the operator-only deep report says on its first line, in the cockpit panel and on its
 /// saved name.
@@ -804,9 +832,8 @@ async fn the_deep_report_says_it_is_operator_only_on_its_first_line_and_in_its_f
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_default();
-    for (_, filename) in OPERATOR_ONLY_ROUTES {
-        assert!(disposition.contains(filename), "{disposition}");
-    }
+    let (_, filename) = OPERATOR_ONLY_ROUTES[0];
+    assert!(disposition.contains(filename), "{disposition}");
     use http_body_util::BodyExt;
     let bytes = resp.into_body().collect().await.expect("body").to_bytes();
     let markdown = String::from_utf8(bytes.to_vec()).expect("Markdown");
@@ -833,5 +860,61 @@ fn the_cockpit_panel_and_saved_name_of_the_deep_report_say_it_is_operator_only()
     assert!(
         panel.contains(OPERATOR_ONLY_LABEL),
         "the panel carries the label"
+    );
+}
+
+// ---- the operator-only triage log (work order E) -----------------------------------------------
+
+/// The triage log route hands the operator the CSV: marked internal on its first line and in its
+/// saved filename, outside the client package. A project with no scan has none to hand over.
+#[tokio::test]
+async fn the_triage_log_route_says_it_is_internal_on_its_first_line_and_in_its_filename() {
+    use http_body_util::BodyExt;
+    let state = crate::AppState::new(std::sync::Arc::new(crate::InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Acme", vec!["acme/portal".to_string()])
+        .expect("project created");
+
+    let none = crate::export_triage_log(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(project.id.clone()),
+    )
+    .await;
+    assert_eq!(
+        none.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "no scan results, no log"
+    );
+
+    state.set_last_scan_in_memory(
+        project.id.clone(),
+        crate::onboard::ScanReport::gated(&["acme/portal".to_string()]),
+    );
+    let resp =
+        crate::export_triage_log(axum::extract::State(state), axum::extract::Path(project.id))
+            .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let disposition = resp
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_default();
+    let (_, filename) = OPERATOR_ONLY_ROUTES[1];
+    assert!(disposition.contains(filename), "{disposition}");
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let csv = String::from_utf8(bytes.to_vec()).expect("CSV text");
+    let mut lines = csv.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap_or_default()
+            .starts_with(crate::xlsx_export::triage_log::INTERNAL_MARK),
+        "the first line marks it internal: {csv}"
+    );
+    assert!(
+        lines.next().unwrap_or_default().starts_with("Rule ID,"),
+        "then the header: {csv}"
     );
 }

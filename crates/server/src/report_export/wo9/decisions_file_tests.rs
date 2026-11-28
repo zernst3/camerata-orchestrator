@@ -1,4 +1,4 @@
-//! WO9: the package's `decisions.json` and Decisions sheet, and the release gate reading them.
+//! WO9: the package's `json/decisions.json` and Decisions sheet, and the release gate reading them.
 
 use camerata_api_types::decisions::DecisionState;
 use serde_json::Value;
@@ -22,7 +22,8 @@ fn the_package_carries_decisions_json_and_a_decisions_sheet() {
     let reviewed = apply_overlay(&sealed, &records, &edits, &[]);
     let entries = released_entries(&reviewed, &client_options());
 
-    let file: Value = serde_json::from_slice(&entries["decisions.json"]).expect("decisions.json");
+    let file: Value =
+        serde_json::from_slice(&entries["json/decisions.json"]).expect("json/decisions.json");
     let rows = file["decisions"].as_array().expect("a decisions array");
     // The group decision: its node record and one record for each site it covers; the false
     // positive.
@@ -52,7 +53,7 @@ fn the_package_carries_decisions_json_and_a_decisions_sheet() {
     // others are recorded as present and not printed; a reviewer's name never is.
     assert_eq!(fp["reason"], "the layer is allowed here");
     assert!(node["reason"].as_str().unwrap_or_default().is_empty());
-    let text = String::from_utf8_lossy(&entries["decisions.json"]).into_owned();
+    let text = String::from_utf8_lossy(&entries["json/decisions.json"]).into_owned();
     assert!(!text.contains("SECRET-REVIEWER"), "{text}");
     assert!(!text.contains("the same query helper"), "{text}");
 
@@ -75,7 +76,7 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     );
     let reviewed = apply_overlay(&sealed, std::slice::from_ref(&merge), &[], &[]);
     let package = package_of(&reviewed, &client_options());
-    // In memory the merge has its record. The package's own decisions.json is what the gate
+    // In memory the merge has its record. The package's own json/decisions.json is what the gate
     // reads, so a record struck from that file is a merge with no decision.
 
     let rebuilt = |datasets: Vec<(String, Vec<u8>)>| {
@@ -103,7 +104,7 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     // The record is struck from the file the client receives: the gate refuses the package.
     let mut stripped = package.datasets.clone();
     for (name, bytes) in &mut stripped {
-        if name == "decisions.json" {
+        if name == "json/decisions.json" {
             let mut file: Value = serde_json::from_slice(bytes).unwrap();
             file["decisions"] = Value::Array(Vec::new());
             *bytes = serde_json::to_vec_pretty(&file).unwrap();
@@ -118,7 +119,7 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     // A record with no reason recorded does not count either.
     let mut unreasoned = package.datasets.clone();
     for (name, bytes) in &mut unreasoned {
-        if name == "decisions.json" {
+        if name == "json/decisions.json" {
             let mut file: Value = serde_json::from_slice(bytes).unwrap();
             for row in file["decisions"].as_array_mut().unwrap() {
                 row["has_reason"] = Value::Bool(false);
@@ -150,7 +151,7 @@ fn a_revoked_false_positive_prints_no_reason() {
     let reviewed = apply_overlay(&sealed, &[fp, live], &[], &[]);
     let entries = released_entries(&reviewed, &client_options());
 
-    let file: Value = serde_json::from_slice(&entries["decisions.json"]).unwrap();
+    let file: Value = serde_json::from_slice(&entries["json/decisions.json"]).unwrap();
     let rows = file["decisions"].as_array().unwrap();
     let revoked = rows.iter().find(|r| r["id"] == "dec-000001").unwrap();
     assert_eq!(revoked["revoked"], true);
@@ -168,4 +169,58 @@ fn a_revoked_false_positive_prints_no_reason() {
         text.contains("LIVE-REASON"),
         "a live ruling's reason prints"
     );
+}
+
+/// Convention model design section 11, test 21: decisions.json carries a live ruling on a
+/// standard, with the rule and the option's label, and a withdrawn one is not printed.
+#[test]
+fn decisions_json_carries_a_standard_ruling_and_not_a_withdrawn_one() {
+    use camerata_api_types::audit::{OptionCensus, RuleConvention};
+    use camerata_api_types::decisions::{StandardChoice, StandardRuling};
+    let mut report = crate::onboard::ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.conventions = vec![RuleConvention {
+        repo: "acme/app".into(),
+        rule_id: "ARCH-X-1".into(),
+        options: vec![OptionCensus {
+            option_id: "a".into(),
+            label: "Option A".into(),
+            ..OptionCensus::default()
+        }],
+        ..RuleConvention::default()
+    }];
+    let sealed = report.seal();
+    let ruling = |id: &str, choice: StandardChoice, revoked: bool| StandardRuling {
+        id: id.into(),
+        repo: "acme/app".into(),
+        rule_id: "ARCH-X-1".into(),
+        choice,
+        reason: "r".into(),
+        decided_by: "SECRET-REVIEWER".into(),
+        decided_at: "2026-11-20T00:00:00Z".into(),
+        run_id: "run".into(),
+        engine_version: "0".into(),
+        revoked_at: revoked.then(|| "t".to_string()),
+    };
+    let rulings = [
+        ruling(
+            "std-1",
+            StandardChoice::Accept {
+                option_id: "a".into(),
+            },
+            false,
+        ),
+        ruling("std-2", StandardChoice::LeaveToClient, true),
+    ];
+    let reviewed =
+        crate::report_export::apply_overlay_with_standards(&sealed, &[], &[], &[], &rulings);
+    let bytes = crate::report_export::decisions_file::decisions_json(&reviewed).unwrap();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let file: Value = serde_json::from_slice(&bytes).unwrap();
+    let rows = file["decisions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{text}");
+    assert_eq!(rows[0]["state"], "standard_set");
+    assert_eq!(rows[0]["rule_id"], "ARCH-X-1");
+    assert_eq!(rows[0]["option_label"], "Option A");
+    assert!(!text.contains("SECRET-REVIEWER"), "{text}");
 }

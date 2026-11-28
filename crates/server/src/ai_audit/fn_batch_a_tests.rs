@@ -47,6 +47,7 @@ fn response(text: &str, truncated: bool) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -1230,7 +1231,7 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
 
 /// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
 /// from the one shared list fails this test instead of passing it.
-const BOOKKEEPING_KEY_NAMES: [&str; 39] = [
+const BOOKKEEPING_KEY_NAMES: [&str; 41] = [
     // The agent finder's operator-only marks.
     "finder-business",
     "finder-unsure-why",
@@ -1257,6 +1258,8 @@ const BOOKKEEPING_KEY_NAMES: [&str; 39] = [
     "also_seen_by",
     "evidence_unverified",
     "evidence_unverified_sites",
+    // #546: the birth mark the model-row parser writes, read by the evidence check.
+    "model_written",
     "review_flags",
     "junk_content",
     "engine_discarded",
@@ -1273,6 +1276,8 @@ const BOOKKEEPING_KEY_NAMES: [&str; 39] = [
     "unfolded_from",
     "severity_hold_detail",
     "undoubted_source_folded",
+    // The convention model's departure rows (design 2026-11-20, section 4).
+    "convention-place",
 ];
 
 /// A value that would read as identity if it were counted: three or more characters, and shaped

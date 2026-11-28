@@ -90,6 +90,21 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
         Ok(read) => read,
         Err(refusal) => return no_store(refusal.into_response()),
     };
+    // A file the project's exclusion list names is not shown: the inspection did not read it.
+    if matches!(
+        read,
+        SourceRead::Git { .. } | SourceRead::WorkingTree { .. }
+    ) && crate::onboard::scope::scope_for_read(state, params.project.as_deref())
+        .excludes(&params.repo, &params.path)
+    {
+        return no_store(
+            (
+                StatusCode::OK,
+                Json(FindingContextOutcome::ExcludedByAgreement.to_json()),
+            )
+                .into_response(),
+        );
+    }
     let expect = params.expect.as_deref();
     let (status, body) = match read {
         SourceRead::Deleted {
@@ -103,11 +118,12 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
             }
             .to_json(),
         ),
-        // Not linked / not on disk: indistinguishable from "file missing" to the UI, which falls
-        // back to the stored snippet (design 5).
-        SourceRead::Unresolved { .. } => {
-            (StatusCode::OK, FindingContextOutcome::FileMissing.to_json())
-        }
+        // Not linked / no local folder: its own status, with the reason in plain words. The UI
+        // keeps `file_missing` for a file really absent at a resolved folder.
+        SourceRead::Unresolved { reason } => (
+            StatusCode::OK,
+            FindingContextOutcome::RepoUnlinked { reason }.to_json(),
+        ),
         SourceRead::WorkingTree { dir } => {
             let outcome =
                 lookup_at(Origin::WorkingTree(&dir), &params.path, params.line, expect).await;
@@ -188,19 +204,80 @@ pub enum SourceRead {
     Unresolved { reason: String },
 }
 
-/// The project that owns `repo` for a read: the named one, else the active project if it has the
-/// repo, else the first project that does.
+/// Whether `project` owns `repo` for reading its code: the repo is in `project.repos`, or one of
+/// the project's own saved inspections audited it. Onboarding adds a repo to `project.repos` only
+/// when the rules are applied, which is after triage, so a project still in onboarding owns its
+/// repos through its inspections. The ONE ownership test every code-reading endpoint uses.
+pub(crate) fn project_owns_repo(
+    state: &AppState,
+    project: &crate::project::Project,
+    repo: &str,
+) -> bool {
+    project.repos.iter().any(|r| r.eq_ignore_ascii_case(repo))
+        || state.inspections.any_audits(&project.id, repo)
+}
+
+/// The project that owns `repo` for a read: the named one (and only that one), else the active
+/// project if it owns the repo, else the first project that does. See [`project_owns_repo`].
 fn owning_project(state: &AppState, project_hint: Option<&str>, repo: &str) -> Option<String> {
-    let has = |p: &crate::project::Project| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo));
+    let owns = |p: &crate::project::Project| project_owns_repo(state, p, repo);
     if let Some(id) = project_hint {
-        return state.projects.get(id).filter(|p| has(p)).map(|p| p.id);
+        return state.projects.get(id).filter(|p| owns(p)).map(|p| p.id);
     }
+    // The project that holds the deletion record answers first: its record is what says the
+    // source was deleted, so a project that merely inspected the repo must not shadow it.
+    let owners: Vec<crate::project::Project> = state
+        .projects
+        .list()
+        .into_iter()
+        .filter(|p| owns(p))
+        .collect();
+    owners
+        .iter()
+        .find(|p| deleted_record(state, &p.id, repo).is_some())
+        .or_else(|| {
+            state
+                .projects
+                .active()
+                .and_then(|a| owners.iter().find(|p| p.id == a.id))
+        })
+        .or_else(|| owners.first())
+        .map(|p| p.id.clone())
+}
+
+/// Every repo `project` owns: its own `repos` plus every repo its saved inspections audited
+/// (a plain `owner/name` only), without duplicates (case-insensitive). The ONE answer deletion
+/// uses for "this project's repos", matching [`project_owns_repo`].
+pub(crate) fn owned_repos(state: &AppState, project: &crate::project::Project) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in &project.repos {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(r)) {
+            out.push(r.clone());
+        }
+    }
+    for r in state.inspections.audited_repos(&project.id) {
+        if is_owner_name(&r) && !out.iter().any(|o| o.eq_ignore_ascii_case(&r)) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// The OTHER projects that use `repo`: it is in their `repos` or one of their saved inspections
+/// audited it ([`project_owns_repo`]). A checkout any of them uses is not this project's to
+/// remove.
+pub(crate) fn other_projects_using(
+    state: &AppState,
+    project_id: &str,
+    repo: &str,
+) -> Vec<crate::project::Project> {
     state
         .projects
-        .active()
-        .filter(|p| has(p))
-        .or_else(|| state.projects.list().into_iter().find(|p| has(p)))
-        .map(|p| p.id)
+        .list()
+        .into_iter()
+        .filter(|p| p.id != project_id)
+        .filter(|p| project_owns_repo(state, p, repo))
+        .collect()
 }
 
 /// Whether `repo` is exactly `owner/name` made of the characters a GitHub login and repository
@@ -249,17 +326,34 @@ pub async fn source_for_read(
     // that a project owns. A traversal ("../../etc"), an absolute path or a repo no project has
     // is refused here, before any directory is built or any file is read: the path jail of the
     // readers is relative to the directory this resolves, so it cannot catch this itself.
-    let project_id = match owning_project(state, project_hint, repo) {
-        Some(id) if is_owner_name(repo) => id,
-        _ => {
+    // The name is checked first, so a junk name never triggers the inspection scan.
+    let owner = if is_owner_name(repo) {
+        owning_project(state, project_hint, repo)
+    } else {
+        None
+    };
+    let project_id = match owner {
+        Some(id) => id,
+        None => {
             return Ok(SourceRead::Unresolved {
-                reason: "no project owns a repo with that name".to_string(),
+                reason: if project_hint.is_some() {
+                    format!("{repo} is not linked to this project, so its code cannot be shown.")
+                } else {
+                    format!("{repo} is not linked to any project, so its code cannot be shown.")
+                },
             })
         }
     };
 
     // Deleted wins over everything: the directory is gone by construction.
-    if let Some(record) = deleted_record(state, &project_id, repo) {
+    // A project that only inspected the repo has no record of its own: another project that owns
+    // the repo may have deleted it, and the checkout is gone for both.
+    let record = deleted_record(state, &project_id, repo).or_else(|| {
+        other_projects_using(state, &project_id, repo)
+            .iter()
+            .find_map(|p| deleted_record(state, &p.id, repo))
+    });
+    if let Some(record) = record {
         return Ok(SourceRead::Deleted {
             deleted_at: record.completed_at,
             record_id: record.id,
@@ -268,12 +362,17 @@ pub async fn source_for_read(
 
     let Some(dir) = resolve_dir(state, repo) else {
         return Ok(SourceRead::Unresolved {
-            reason: "no local folder is recorded for this repo".to_string(),
+            reason: format!(
+                "{repo} has no local folder: no folder is set for it and no workspace folder is configured. Set its folder in Settings."
+            ),
         });
     };
     if !dir.is_dir() {
         return Ok(SourceRead::Unresolved {
-            reason: format!("{} does not exist", dir.display()),
+            reason: format!(
+                "{repo} has no local folder at {}. Set its folder in Settings or fetch the repo again.",
+                dir.display()
+            ),
         });
     }
 

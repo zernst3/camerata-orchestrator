@@ -70,7 +70,7 @@ pub const SHOW_NEXT_SUFFIX: &str = "-show-next";
 /// States whose page is a full-window overlay (the code viewer is sized to the viewport), so a
 /// taller window only makes the overlay taller: the first WO16c re-approval found
 /// `detail/viewer-commit` "reaching the cap" in the 4800 window for that reason, not content.
-pub const VIEWPORT_SIZED: &[&str] = &["detail/viewer-commit"];
+pub const VIEWPORT_SIZED: &[&str] = &["detail/viewer-commit", "inspection/help-open"];
 
 /// Whether the capture of state `id` (`screen/state`) is the short kind: `CAPTURE_HEIGHT` tall, in
 /// a window that tall. That is every `shell/*` state (whose gradient background is drawn across

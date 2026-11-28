@@ -98,12 +98,6 @@ pub struct ReportOptions {
     /// provenance. Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub model: Option<crate::ModelRecord>,
-    /// H4: also export the triage log (per rule, what the AI pass proposed, what review kept
-    /// and threw out, and why) as a workbook sheet and `csv/triage-log.csv`. OFF by default:
-    /// the export dialog (or `camerata inspect` via [`EXPORT_TRIAGE_LOG_ENV`]) asks for it.
-    /// See `xlsx_export::triage_log`.
-    #[serde(default)]
-    pub triage_log: bool,
     /// Every repo the project holds, in the project's order. Server-populated from the project,
     /// never client-supplied (`serde(skip)`). The package assembly refuses a report that covers
     /// fewer repos than this ([`require_all_repos`]); empty means the caller names no project
@@ -118,14 +112,21 @@ pub struct ReportOptions {
     pub unsynced_changes: Vec<camerata_api_types::decisions::UnsyncedChange>,
     /// The export is for the operator's own review (the project is not a client engagement, or
     /// `camerata inspect --internal`). Only an internal export may be made from a run that did not
-    /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `findings.json`.
+    /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `json/inspection.json`.
     /// Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub internal: bool,
+    /// The folders on the operator's machine that hold a clone or a scan copy of the project's
+    /// repos. The release gate refuses a client package that names one of them, beside the home
+    /// directory, the state folders and the temp folder it works out for itself. Server-populated,
+    /// never client-supplied (`serde(skip)`); empty for a caller that knows none.
+    #[serde(skip)]
+    pub operator_roots: Vec<std::path::PathBuf>,
 }
 
-/// Env var that turns the optional triage log on for an export when set to `1` or `true`
-/// (folded in by [`ReportOptions::apply_env_defaults`], like the brand). Unset means off.
+/// Env var that makes `camerata inspect` write the operator's triage log beside the export zip
+/// when set to `1` or `true`. It never adds anything to the package: the client package carries no
+/// triage log, whatever is set (see `xlsx_export::triage_log`). Unset means no file.
 pub const EXPORT_TRIAGE_LOG_ENV: &str = "CAMERATA_EXPORT_TRIAGE_LOG";
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
@@ -212,14 +213,12 @@ impl ReportOptions {
             .unwrap_or_default();
         self.prepared_by =
             resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
-        self.triage_log = self.triage_log
-            || triage_log_env_on(std::env::var(EXPORT_TRIAGE_LOG_ENV).ok().as_deref());
     }
 }
 
-/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value turns the triage log on: `1` or `true` (any
-/// case), nothing else. Split out so it is testable without touching the process environment.
-pub(crate) fn triage_log_env_on(value: Option<&str>) -> bool {
+/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value asks for the operator's triage log file: `1` or
+/// `true` (any case), nothing else. Split out so it is testable without touching the process environment.
+pub fn triage_log_env_on(value: Option<&str>) -> bool {
     value.is_some_and(|v| {
         let v = v.trim();
         v == "1" || v.eq_ignore_ascii_case("true")
@@ -227,14 +226,15 @@ pub(crate) fn triage_log_env_on(value: Option<&str>) -> bool {
 }
 
 /// C4-R3: zero-width and byte-order-mark code points. None of these carry any visual
-/// information in ANY of the three report artifacts (the Typst-rendered PDF, `findings.json`,
+/// information in ANY of the three report artifacts (the Typst-rendered PDF, `json/inspection.json`,
 /// the xlsx workbook) — their only observable effect is to silently corrupt an otherwise
 /// identical-looking string for exact-match search/grep/diff/copy-paste. A scanned repo CAN
 /// legitimately contain one of these in a file name or a pasted snippet (adversarial or just
 /// odd source encoding); this list is also what the PDF template's own `breakable()` helper
 /// must never introduce as a side effect of wrapping a long path (see that function's doc
 /// comment in `templates/audit_report.typ`).
-const ZERO_WIDTH_CODEPOINTS: [char; 5] = [
+const ZERO_WIDTH_CODEPOINTS: [char; 6] = [
+    '\u{00AD}', // soft hyphen: invisible unless a line breaks at it
     '\u{200B}', // zero width space
     '\u{200C}', // zero width non-joiner
     '\u{200D}', // zero width joiner
@@ -292,7 +292,7 @@ pub(crate) fn client_detail(detail: &str) -> String {
 
 /// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
 /// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
-/// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
+/// rendering, the xlsx "Location" column, `json/inspection.json`'s `path` field), `snippet` (the PDF's
 /// code block, and — for a dependency-advisory finding — the package name), `detail` (the
 /// curated-finding body), and every `captures` value (substituted into authored remediation
 /// text by [`instantiate_remediation`]). This is the ONE ingestion point both
@@ -367,7 +367,7 @@ pub fn finding_key(f: &Finding) -> String {
 /// module's doc comment.
 ///
 /// `Serialize`: so `xlsx_export::FindingRow` (whose `disposition_kind: Option<Disposition>`
-/// field feeds `findings.json`, the product export's machine-readable sibling of the
+/// field feeds `json/inspection.json`, the product export's machine-readable sibling of the
 /// workbook) can serialize this classification verbatim rather than re-deriving a string
 /// form for JSON specifically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -579,6 +579,10 @@ pub(crate) fn waiting_reason(
 
 /// [`waiting_reason`] for one finding: the three gates computed from the finding itself, so the
 /// workbook reads the same reason the PDF's held rows print.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the row, its gates' inputs and the project's chosen options"
+)]
 pub(crate) fn row_waiting_reason(
     finding: &Finding,
     disposition: Disposition,
@@ -586,17 +590,19 @@ pub(crate) fn row_waiting_reason(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
     chosen_option: Option<&str>,
+    chosen_options: &std::collections::HashMap<String, String>,
     bucket: &str,
 ) -> Option<&'static str> {
     waiting_reason(
         is_uncited_ai_finding(finding, corpus),
-        is_action_row_missing_a_fix(
+        is_action_row_missing_a_fix_with(
             finding,
             disposition,
             severity,
             corpus,
             test_file_count,
             chosen_option,
+            chosen_options,
         ),
         is_action_row_missing_an_estimate(
             finding,
@@ -607,6 +613,33 @@ pub(crate) fn row_waiting_reason(
             chosen_option,
         ) && (bucket == "held" || bucket == "informational"),
     )
+}
+
+/// The disposition label of a row as the exports print it: a merged row's pointer, else a row the
+/// reviewer decided by changing its severity themselves ("Severity set by the reviewer"), else
+/// [`disposition_label`]. A severity edit is the row's decision (Zach, 2026-11-20), so it must not
+/// read "Open". A row held for unverified evidence, junk text or a put-back cannot ship without a decision record, so
+/// the label never hides those holds from the gate.
+pub(crate) fn row_disposition_label(
+    f: &Finding,
+    disposition: Disposition,
+    reason: &str,
+    bucket: &str,
+    confirmed_by_client: bool,
+) -> String {
+    if let Some(label) = overlay::merged_label(f) {
+        return label.to_string();
+    }
+    if disposition == Disposition::Unresolved
+        && overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
+    {
+        return format!(
+            "{} (recommended: {})",
+            crate::xlsx_export::vocabulary::SEVERITY_SET_BY_REVIEWER,
+            bucket_title(bucket)
+        );
+    }
+    disposition_label(disposition, reason, bucket, confirmed_by_client)
 }
 
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
@@ -744,7 +777,7 @@ mod marking;
 
 pub use citations_fixes::*;
 pub use classification::*;
-pub use counts::{report_counts, ReportCounts};
+pub use counts::{report_counts, ReportCounts, ReviewCounts};
 pub use json_types::*;
 pub use marking::*;
 
@@ -892,13 +925,14 @@ pub fn build_report_json_with_counts(
             .get(&f.rule_id.to_ascii_uppercase())
             .map(String::as_str);
         let gate_uncited = is_uncited_ai_finding(f, corpus);
-        let gate_no_fix = is_action_row_missing_a_fix(
+        let gate_no_fix = is_action_row_missing_a_fix_with(
             f,
             *disposition,
             severity,
             corpus,
             report.test_file_count,
             chosen_option_for_rule,
+            &opts.chosen_options,
         );
         // C6-B4: computed independently (same pattern as `gate_no_fix` just above) purely so
         // the headline below can say WHICH held-for-review reason applied — `effective_bucket`
@@ -913,13 +947,14 @@ pub fn build_report_json_with_counts(
             report.test_file_count,
             chosen_option_for_rule,
         );
-        let bucket = effective_bucket(
+        let bucket = effective_bucket_with(
             f,
             *disposition,
             severity,
             corpus,
             report.test_file_count,
             chosen_option_for_rule,
+            &opts.chosen_options,
         );
         // C4-P2: `title_for_finding` (not a bare corpus-or-rule_id join) so an AI-tier finding
         // grounded via the P3 class fallback gets a human-readable title too, instead of a
@@ -1041,7 +1076,7 @@ pub fn build_report_json_with_counts(
     // `"held"` instead — a severity-unbounded bucket the "Held for review" PDF section (and the
     // cover/scorecard/xlsx counts, all of which tally `code_findings` directly) already expect
     // to see rendered. Skipping the row here left it counted in `matrix.held`, the cover severity
-    // strip, the category scorecard and `findings.json`/the workbook, while the PDF renderer
+    // strip, the category scorecard and `json/inspection.json`/the workbook, while the PDF renderer
     // never emitted it anywhere — not the matrix (expected: held is out of scope for the
     // severity x effort grid), not curated (expected: this gate's whole point), and NOT Held for
     // review either, because no site ever existed for it to render. Every `code_findings` row
@@ -1098,26 +1133,28 @@ pub fn build_report_json_with_counts(
                 // consider", never "Open (recommended: Later)". `effective_bucket` is the SAME
                 // call the matrix-building pass above makes for this finding, so the two can
                 // never compute a different answer for the same row.
-                let bucket = effective_bucket(
+                let bucket = effective_bucket_with(
                     f,
                     *disposition,
                     severity,
                     corpus,
                     report.test_file_count,
                     chosen_option_for_rule,
+                    &opts.chosen_options,
                 );
                 // C5-8: a no-fix-held row still appears here — same rule, same group, just this
                 // one site's `bucket` is `"held"` instead of an action tier. Disclose WHY in its
                 // own headline too, not only via `disposition_label`'s generic held-for-review
                 // wording, so a reader scanning this site within its rule's curated group sees
                 // the concrete reason right next to it.
-                let gate_no_fix = is_action_row_missing_a_fix(
+                let gate_no_fix = is_action_row_missing_a_fix_with(
                     f,
                     *disposition,
                     severity,
                     corpus,
                     report.test_file_count,
                     chosen_option_for_rule,
+                    &opts.chosen_options,
                 );
                 // C6-B4: same disclosure pattern as `gate_no_fix` just above — see that gate's
                 // sibling-ordering note in the matrix-bucketing loop for why `gate_no_fix` wins
@@ -1179,8 +1216,12 @@ pub fn build_report_json_with_counts(
                     // "held for a human reviewer's judgment call" framing instead of printing
                     // "high"/blank next to a row that is, by construction, not curated.
                     confidence: hedge_confidence(f, bucket),
-                    disposition: overlay::merged_label(f).map(str::to_string).unwrap_or_else(
-                        || disposition_label(*disposition, reason, bucket, confirmed_by_client),
+                    disposition: row_disposition_label(
+                        f,
+                        *disposition,
+                        reason,
+                        bucket,
+                        confirmed_by_client,
                     ),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
@@ -1214,8 +1255,13 @@ pub fn build_report_json_with_counts(
                     // `fix_for_this_finding`, so the template's secondary line only ever adds
                     // information, never echoes the primary line back.
                     fix: {
-                        let generic =
-                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
+                        let generic = resolve_fix_for_row_chosen(
+                            &rule_id,
+                            corpus,
+                            f,
+                            chosen_option_for_rule,
+                            &opts.chosen_options,
+                        );
                         if generic == specific_fix {
                             None
                         } else {
@@ -1225,8 +1271,13 @@ pub fn build_report_json_with_counts(
                     // D8: the label beside the fix, from the same two facts the fields above
                     // were built from (the specific fix and the rule's own authored one).
                     fix_type: {
-                        let authored =
-                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
+                        let authored = resolve_fix_for_row_chosen(
+                            &rule_id,
+                            corpus,
+                            f,
+                            chosen_option_for_rule,
+                            &opts.chosen_options,
+                        );
                         fix_type_label(
                             f,
                             specific_fix.is_some(),
@@ -1592,7 +1643,7 @@ pub fn build_report_json_with_counts(
         .coverage_notes
         .iter()
         .filter(|n| n.tool == "osv-scanner")
-        .map(|n| n.message.clone())
+        .map(|n| crate::dep_audit::client_note_message(&n.message))
         .collect();
     // M11: "clean" means checked and nothing found. A dependency audit that did not run (no
     // network, a timeout, an unreadable result) or that left manifests unaudited used to leave
@@ -1608,6 +1659,9 @@ pub fn build_report_json_with_counts(
             .filter(|n| n.tool == "osv-scanner")
             .all(crate::dep_audit::note_proves_clean);
     let (dep_summary_line, dep_worst, dep_more_line) = dependency_summary(&dep_rows);
+    let audited_files = report.ledger.audited_dependency_files();
+    let (checked_line, checked_listed, checked_more_line) =
+        audited_dependency_summary(audited_files, report.repos.len() > 1);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
@@ -1615,6 +1669,17 @@ pub fn build_report_json_with_counts(
         summary_line: dep_summary_line,
         worst: dep_worst,
         more_line: dep_more_line,
+        audited_files: audited_files
+            .iter()
+            .map(|f| AuditedDependencyFileJson {
+                repo: f.repo.clone(),
+                path: f.path.clone(),
+                vendored: f.vendored,
+            })
+            .collect(),
+        checked_line,
+        checked_listed,
+        checked_more_line,
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
@@ -2014,22 +2079,36 @@ pub fn build_report_json_with_counts(
     // A project of several repos is several independent services, so the prose that speaks of
     // "the repository" or "the codebase" speaks of the repositories and the services instead.
     let multi_repo = report.repos.len() > 1;
+    // Which finder ran, from the run record, and what a person read, from the review store (the
+    // counts): the method text says only what happened.
+    let method_facts = MethodFacts {
+        finder: finder_of(report),
+        review: counts.review.clone(),
+    };
     let methodology = MethodologyJson {
         reconciliation: counts_prose::methodology_line(counts, review_state),
         candidates_reviewed: counts.rows.total,
         excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
-        next_steps: counts_prose::next_steps(counts, multi_repo, review_state),
-        deterministic_note:
-            "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
-             SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
-             produces findings that either hold or do not, with no model judgment. These are \
-             labeled deterministic in the report."
-                .to_string(),
+        next_steps: counts_prose::next_steps(counts, multi_repo, review_state, opts.internal),
+        deterministic_note: {
+            let base = deterministic_note_for(method_facts.finder);
+            let base = if pom_checked(report.ledger.audited_dependency_files()) {
+                format!("{base} {MAVEN_DECLARED_ONLY}")
+            } else {
+                base
+            };
+            // A rerun of the deterministic stages on another build (#588) names both builds.
+            match report.ledger.rerun() {
+                Some(rerun) => format!("{base} {}", rerun.report_sentence()),
+                None => base,
+            }
+        },
         ai_tier_note: ai_tier_note_for(
             review_state,
             coverage_gaps::repos_without_ai_review(report).len(),
             report.repos.len(),
+            &method_facts,
         ),
         citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
@@ -2058,14 +2137,9 @@ pub fn build_report_json_with_counts(
             "No review of organizational controls, identity and access management or \
              infrastructure configuration."
                 .to_string(),
+            NOT_ASSESSED_LINE.to_string(),
         ],
-        severity_scale_note:
-            "Severity is bimodal by design. Deterministic floor findings are proven defects \
-             rated by impact; advisory findings are rated by likely impact together with \
-             calibrated confidence. There is deliberately no single numeric score or letter \
-             grade: a grade hides which specific object is exposed, which is exactly what a \
-             remediation team needs to know."
-                .to_string(),
+        severity_scale_note: severity_scale_note_for(method_facts.finder),
         failed_passes: failed_pass_notes,
         failed_passes_more_line,
     };
@@ -2122,6 +2196,7 @@ pub fn build_report_json_with_counts(
                 },
                 crate::xlsx_export::vocabulary::ALL_PROBLEMS
             ),
+            review_line: crate::xlsx_export::vocabulary::review_line(&counts.review),
         },
         other_fixes,
         conventions,
@@ -2207,18 +2282,228 @@ fn dependency_summary(
     (summary, worst, more)
 }
 
-/// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`.
+/// The most audited dependency files the PDF lists; the workbook lists them all.
+pub(crate) const PDF_MAX_AUDITED_FILES: usize = 12;
+
+/// The Maven sentence, said once in the dependency section and once in the method text (and so in
+/// the workbook note), whenever a pom.xml was checked. osv-scanner, run without network
+/// resolution, reads the dependencies a pom.xml declares with an explicit version: a version that
+/// comes from a parent POM is not resolved, and neither are the dependencies pulled in.
+pub(crate) const MAVEN_DECLARED_ONLY: &str = "Dependencies declared with an explicit version in pom.xml files were checked. Dependencies whose version comes from a parent POM, and the dependencies they pull in, were not.";
+
+/// Whether any audited dependency file is a pom.xml.
+pub(crate) fn pom_checked(files: &[crate::scan_ledger::AuditedDependencyFile]) -> bool {
+    files
+        .iter()
+        .any(|f| f.path.rsplit('/').next() == Some("pom.xml"))
+}
+
+/// The audited dependency files in the one order the PDF and the workbook both list them:
+/// vendored files first (so the mark is visible even when the PDF lists only some), each group in
+/// the order recorded.
+pub(crate) fn audited_in_display_order(
+    files: &[crate::scan_ledger::AuditedDependencyFile],
+) -> Vec<&crate::scan_ledger::AuditedDependencyFile> {
+    let mut ordered: Vec<&crate::scan_ledger::AuditedDependencyFile> = files.iter().collect();
+    ordered.sort_by_key(|f| !f.vendored);
+    ordered
+}
+
+/// One audited dependency file as a line: its path, led by the repo when the scan has several,
+/// and ending "(vendored)" when it sits inside a folder of bundled outside code.
+pub(crate) fn audited_file_label(
+    f: &crate::scan_ledger::AuditedDependencyFile,
+    multi_repo: bool,
+) -> String {
+    let lead = if multi_repo {
+        format!("{}: ", f.repo)
+    } else {
+        String::new()
+    };
+    let mark = if f.vendored { " (vendored)" } else { "" };
+    format!("{lead}{}{mark}", f.path)
+}
+
+/// The client-visible disclosure of which dependency files the audit was given: one sentence
+/// (empty when none were), the first [`PDF_MAX_AUDITED_FILES`] as lines, and the "more in the
+/// Dependencies sheet" line when some are left out.
+pub(crate) fn audited_dependency_summary(
+    files: &[crate::scan_ledger::AuditedDependencyFile],
+    multi_repo: bool,
+) -> (String, Vec<String>, String) {
+    if files.is_empty() {
+        return (String::new(), Vec::new(), String::new());
+    }
+    let vendored = files.iter().filter(|f| f.vendored).count();
+    let mut line = format!("Dependency files checked: {}.", files.len());
+    if vendored > 0 {
+        line.push_str(&format!(
+            " {vendored} of them {} vendored, meaning inside a folder of bundled outside code \
+             such as a vendor folder.",
+            if vendored == 1 { "is" } else { "are" }
+        ));
+    }
+    if pom_checked(files) {
+        line.push(' ');
+        line.push_str(MAVEN_DECLARED_ONLY);
+    }
+    let listed: Vec<String> = audited_in_display_order(files)
+        .into_iter()
+        .take(PDF_MAX_AUDITED_FILES)
+        .map(|f| audited_file_label(f, multi_repo))
+        .collect();
+    let more = if files.len() > PDF_MAX_AUDITED_FILES {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            files.len() - PDF_MAX_AUDITED_FILES,
+            crate::xlsx_export::vocabulary::DEPENDENCIES,
+        )
+    } else {
+        String::new()
+    };
+    (line, listed, more)
+}
+
+/// The workbook's version of the disclosure: the sentence and EVERY audited file, one per line,
+/// or `None` when no dependency file was checked.
+pub(crate) fn audited_dependencies_note(
+    files: &[crate::scan_ledger::AuditedDependencyFile],
+    multi_repo: bool,
+) -> Option<String> {
+    let (line, _, _) = audited_dependency_summary(files, multi_repo);
+    if line.is_empty() {
+        return None;
+    }
+    let mut note = line;
+    for f in audited_in_display_order(files) {
+        note.push('\n');
+        note.push_str(&audited_file_label(f, multi_repo));
+    }
+    Some(note)
+}
+
+/// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`. `text` is
+/// plain: it is never parsed for code spans.
 pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = flat.chars().collect();
-    let mut end = chars.len();
-    let mut seen = 0;
-    for (i, c) in chars.iter().enumerate() {
-        let ends_sentence = matches!(c, '.' | '!' | '?')
-            && chars.get(i + 1).is_none_or(|next| next.is_whitespace())
+    fix_text::join_plain(&cut_segments(
+        vec![fix_text::Seg::Text(flat)],
+        sentences,
+        max_chars,
+    ))
+}
+
+/// [`first_sentences`] of RAW fix text (code-span backticks intact), as text and code runs. A "."
+/// inside code never ends a sentence, and the character limit never cuts inside a code span or a
+/// tagged template: it cuts before the span, or after it when the span fits.
+pub(crate) fn first_sentences_raw(
+    raw: &str,
+    sentences: usize,
+    max_chars: usize,
+) -> Vec<fix_text::Seg> {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let segs = fix_text::segments(&flat);
+    // An ambiguous text is ONE prose run that holds backticks: the literal cut applies. Every
+    // other caller of `cut_segments` behaves as before.
+    if let [fix_text::Seg::Text(t)] = segs.as_slice() {
+        if t.contains('`') {
+            return cut_literal(t, sentences, max_chars);
+        }
+    }
+    cut_segments(segs, sentences, max_chars)
+}
+
+/// The cut of a LITERAL fix text (the ambiguity rule's one prose run), for the PDF card only: the
+/// workbook keeps the full text. The code between the first and the last backtick is never cut
+/// inside, and no more than twice the cap is ever emitted.
+/// - The region (first to last backtick) ends within twice the cap: show through the end of the
+///   sentence that holds the last backtick (a "." or "?" inside the region is not a sentence end);
+///   if that passes twice the cap, cut at a word after the region and add "...".
+/// - The region ends beyond twice the cap: cut BEFORE the first backtick, at a word within the
+///   cap, with "..." (even if only a few words remain). A first backtick at the very start leaves
+///   nothing to show: the result is "..." alone.
+fn cut_literal(t: &str, sentences: usize, max_chars: usize) -> Vec<fix_text::Seg> {
+    let chars: Vec<char> = t.chars().collect();
+    let first = chars.iter().position(|c| *c == '`').unwrap_or(0);
+    let last = chars.iter().rposition(|c| *c == '`').unwrap_or(0);
+    let hard = max_chars * 2;
+    let ends_sentence = |i: usize| {
+        matches!(chars[i], '.' | '!' | '?')
+            && chars.get(i + 1).is_none_or(|n| n.is_whitespace())
             && chars
                 .get(i + 2)
-                .is_none_or(|n| n.is_uppercase() || !n.is_alphabetic());
+                .is_none_or(|n| n.is_uppercase() || !n.is_alphabetic())
+    };
+    let trim = |s: String| s.trim_end_matches([',', ';', ':', ' ']).to_string();
+    let text = if last < hard {
+        let mut end = chars.len();
+        let mut seen = 0;
+        for i in (0..chars.len()).filter(|i| *i < first || *i > last) {
+            if ends_sentence(i) {
+                seen += 1;
+                if seen == sentences {
+                    end = i + 1;
+                    break;
+                }
+            }
+        }
+        let after_last = (last + 1..chars.len())
+            .find(|&i| ends_sentence(i))
+            .map_or(chars.len(), |i| i + 1);
+        end = end.max(after_last);
+        if end > hard {
+            let at = (last + 1..hard)
+                .rev()
+                .find(|&i| chars[i] == ' ')
+                .unwrap_or(hard);
+            trim(chars[..at].iter().collect()) + "..."
+        } else {
+            chars[..end].iter().collect()
+        }
+    } else if first == 0 {
+        "...".to_string()
+    } else {
+        let head = &chars[..first];
+        let cut = if head.len() > max_chars {
+            head[..max_chars]
+                .iter()
+                .rposition(|c| *c == ' ')
+                .unwrap_or(max_chars)
+        } else {
+            head.len()
+        };
+        trim(head[..cut].iter().collect()) + "..."
+    };
+    vec![fix_text::Seg::Text(text)]
+}
+
+fn cut_segments(
+    segs: Vec<fix_text::Seg>,
+    sentences: usize,
+    max_chars: usize,
+) -> Vec<fix_text::Seg> {
+    use fix_text::Seg;
+    // One entry per character: the character, whether it is code, and its segment's index.
+    let mut chars: Vec<(char, bool, usize)> = Vec::new();
+    for (si, seg) in segs.iter().enumerate() {
+        let (t, code) = match seg {
+            Seg::Text(t) => (t, false),
+            Seg::Code(t) => (t, true),
+        };
+        chars.extend(t.chars().map(|c| (c, code, si)));
+    }
+    // Guarded characters are never cut inside and never end a sentence: the code runs. `gid` says
+    // which guarded span a character belongs to.
+    let guard: Vec<bool> = chars.iter().map(|c| c.1).collect();
+    let gid: Vec<usize> = chars.iter().map(|c| c.2).collect();
+    let mut end = chars.len();
+    let mut seen = 0;
+    for (i, (c, _, _)) in chars.iter().enumerate() {
+        let ends_sentence = !guard[i]
+            && matches!(c, '.' | '!' | '?')
+            && chars.get(i + 1).is_none_or(|n| n.0.is_whitespace())
+            && chars
+                .get(i + 2)
+                .is_none_or(|n| n.0.is_uppercase() || !n.0.is_alphabetic());
         if ends_sentence {
             seen += 1;
             if seen == sentences {
@@ -2227,13 +2512,56 @@ pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) ->
             }
         }
     }
-    let mut out: String = chars[..end].iter().collect();
-    if out.chars().count() > max_chars {
-        let cut: String = out.chars().take(max_chars).collect();
-        out = match cut.rfind(' ') {
-            Some(at) => cut[..at].trim_end_matches([',', ';', ':']).to_string() + "...",
-            None => cut + "...",
-        };
+    chars.truncate(end);
+    let mut ellipsis = false;
+    let mut at_word = false;
+    if chars.len() > max_chars {
+        ellipsis = true;
+        let mut limit = max_chars;
+        // A limit inside a code span backs up to before the span (the whole span when it is first).
+        if limit < chars.len() && guard[limit] && gid[limit - 1] == gid[limit] {
+            let id = gid[limit];
+            let span_start = gid.iter().position(|g| *g == id).unwrap_or(0);
+            if span_start > 0 {
+                limit = span_start;
+            } else {
+                limit = chars.len();
+                ellipsis = false;
+            }
+        }
+        if ellipsis {
+            // Cut at the last space outside code before the limit, else at the limit.
+            let space = (0..limit).rev().find(|&i| chars[i].0 == ' ' && !guard[i]);
+            at_word = space.is_some();
+            chars.truncate(space.unwrap_or(limit));
+        }
+    }
+    // Rebuild the runs from the kept characters.
+    let mut out: Vec<Seg> = Vec::new();
+    let mut last: Option<usize> = None;
+    for (c, code, si) in &chars {
+        if last != Some(*si) {
+            out.push(if *code {
+                Seg::Code(String::new())
+            } else {
+                Seg::Text(String::new())
+            });
+            last = Some(*si);
+        }
+        if let Some(Seg::Text(t) | Seg::Code(t)) = out.last_mut() {
+            t.push(*c);
+        }
+    }
+    if ellipsis {
+        if let Some(Seg::Text(t)) = out.last_mut() {
+            if at_word {
+                let trimmed = t.trim_end_matches([',', ';', ':']).len();
+                t.truncate(trimmed);
+            }
+            t.push_str("...");
+        } else {
+            out.push(Seg::Text("...".to_string()));
+        }
     }
     out
 }
@@ -2324,6 +2652,33 @@ pub fn render_data_json(json: &AuditReportJson) -> anyhow::Result<String> {
     if let Some(map) = value.as_object_mut() {
         for unread in UNREAD_BY_THE_TEMPLATE {
             map.remove(unread);
+        }
+    }
+    // The template parses no backticks: Rust hands it the text and code runs, the same ones the
+    // plain-text artifacts print (`fix_text::segments`), so the surfaces cannot drift.
+    let seg_values = |segs: &[fix_text::Seg]| -> serde_json::Value {
+        segs.iter()
+            .map(|s| match s {
+                fix_text::Seg::Text(t) => serde_json::json!({"code": false, "text": t}),
+                fix_text::Seg::Code(t) => serde_json::json!({"code": true, "text": t}),
+            })
+            .collect::<Vec<_>>()
+            .into()
+    };
+    for (i, item) in json.escalations.items.iter().enumerate() {
+        let segs = if item.what_to_do_segments.is_empty() && !item.what_to_do.is_empty() {
+            vec![fix_text::Seg::Text(item.what_to_do.clone())]
+        } else {
+            item.what_to_do_segments.clone()
+        };
+        if let Some(entry) = value.pointer_mut(&format!("/escalations/items/{i}")) {
+            entry["what_to_do_segments"] = seg_values(&segs);
+            entry["headline_segments"] = seg_values(&fix_text::segments(&item.headline));
+        }
+    }
+    for (i, item) in json.three_things.items.iter().enumerate() {
+        if let Some(entry) = value.pointer_mut(&format!("/three_things/items/{i}")) {
+            entry["headline_segments"] = seg_values(&fix_text::segments(&item.headline));
         }
     }
     serde_json::to_string(&value).context("could not serialize the report to JSON")
@@ -2597,8 +2952,9 @@ pub mod row_facts;
 pub mod tree_view;
 pub mod unfold;
 pub use overlay::{
-    apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, re_mark_line,
-    summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote, SupersededNote,
+    apply_overlay, apply_overlay_with_standards, edit_ids_of, is_reviewer_edited, key_for_added,
+    re_mark_line, summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote,
+    SupersededNote,
 };
 pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};
 
@@ -2671,6 +3027,9 @@ mod fn_batch_c_dep_tests;
 
 #[cfg(test)]
 mod fn_batch_c_followup_tests;
+
+#[cfg(test)]
+mod method_truth_tests;
 
 #[cfg(test)]
 mod fn_batch_c_incremental_tests;

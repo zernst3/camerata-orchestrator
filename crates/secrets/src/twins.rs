@@ -72,6 +72,45 @@ impl Twin {
     }
 }
 
+impl Twin {
+    /// Whether a match with this twin may reach a client file UNMASKED (the release gate's
+    /// decision, one arm per twin so a twin added tomorrow forces a decision here).
+    ///
+    /// Allowed because the value is public by design or is not a value at all: a Supabase `anon`
+    /// or `authenticated` JWT, a publishable key, a Firebase web API key, an environment variable
+    /// name, a path, a readable name, a label, a module path, a template token, an already
+    /// redacted form, a PEM header with no key material, and a sealed secret's ciphertext
+    /// (encrypted for committing). A placeholder word (`sk_live_your_key_here`) is allowed too
+    /// when it is delimited or the body is single-case (the client path checks that, see
+    /// [`crate::SecretMatch::is_client_visible_secret`]): it is a fake by its own spelling, and
+    /// the placeholder is the documented way to show a key slot without a key.
+    ///
+    /// Refused: a key a vendor publishes in its documentation (a value documented only as one
+    /// setting's value, a config enum, is not a key: [`crate::SecretMatch::is_client_visible_secret`]
+    /// reads the digest for that). It is real-looking, it is not
+    /// public by design (the vendor says to replace it), and a reader who finds it unmasked in a
+    /// report cannot tell it from a leak. The export masks it, and the gate proves it did.
+    pub fn ships_unmasked(&self) -> bool {
+        match self {
+            Twin::PublishedExampleKey => false,
+            Twin::PlaceholderWord(_)
+            | Twin::EnvNameLiteral
+            | Twin::PublicKeyRole(_)
+            | Twin::TemplateToken
+            | Twin::PathLike
+            | Twin::RedactionMarker
+            | Twin::NoKeyMaterial
+            | Twin::ReadableName
+            | Twin::PublishableKey
+            | Twin::FirebaseWebApiKey
+            | Twin::QualifiedLabelName
+            | Twin::BlockHeaderLabel
+            | Twin::ModulePath
+            | Twin::SealedCiphertext => true,
+        }
+    }
+}
+
 /// T1 placeholder words, matched case-insensitively against the opaque body. Adding one is a
 /// one-line change with a twin test.
 pub const PLACEHOLDER_WORDS: &[&str] = &[
@@ -142,6 +181,101 @@ fn placeholder_word(body: &str, delimited_only: bool) -> Option<&'static str> {
     PLACEHOLDER_WORDS.iter().copied().find(|word| {
         lower.match_indices(word).any(|(start, _)| {
             !delimited_only || single_case || is_delimited(body, start, start + word.len(), word)
+        })
+    })
+}
+
+/// `body` with every placeholder word replaced by `_` (a separator), case kept elsewhere.
+fn without_placeholder_words(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let mut covered = vec![false; body.len()];
+    for word in PLACEHOLDER_WORDS {
+        for (start, _) in lower.match_indices(word) {
+            covered[start..start + word.len()].fill(true);
+        }
+    }
+    body.bytes()
+        .zip(covered)
+        .map(|(b, hit)| if hit { '_' } else { char::from(b) })
+        .collect()
+}
+
+/// A segment of a human-written value (split at every non-alphanumeric byte) that reads as random
+/// text, not as a word: six or more characters mixing letters and digits (`8842xQ`) or mixing
+/// case inside one word (`MyCorp`, `Kx9mQ2vLp3Zr`). `Dummy`, `PASSWORD`, `v2` and `1234` are not.
+fn is_random_segment(segment: &str) -> bool {
+    segment.len() >= 6
+        && ((segment.bytes().any(|b| b.is_ascii_alphabetic())
+            && segment.bytes().any(|b| b.is_ascii_digit()))
+            || !is_name_word(segment))
+}
+
+/// Whether a single-case body still reads as a placeholder: a placeholder word opens or closes
+/// it (`EXAMPLEONLY00000`, `IOSFODNN7EXAMPLE`: the documented AWS style), or once every
+/// placeholder word is taken out each run left is letters only or digits only (`yourkeyhere`,
+/// `CHANGE_ME_TO_A_REAL_KEY_1234`). A word buried between random runs (`kx9fake2mq8vlp3`) is
+/// neither.
+fn single_case_is_plain_placeholder(body: &str) -> bool {
+    if placeholder_word(body, false).is_none() {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    if PLACEHOLDER_WORDS
+        .iter()
+        .any(|word| lower.starts_with(word) || lower.ends_with(word))
+    {
+        return true;
+    }
+    without_placeholder_words(body)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .all(|run| {
+            run.bytes().all(|b| b.is_ascii_alphabetic()) || run.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// Whether `value` carries a placeholder word AND that word holds under the client rule (see
+/// [`placeholder_holds_for_client`]).
+pub(crate) fn has_placeholder_that_holds(shape: SecretShape, value: &str) -> bool {
+    let body = &value[prefix_of(shape, value).len()..];
+    placeholder_word(body, false).is_some() && placeholder_holds_for_client(shape, value)
+}
+
+/// Whether the placeholder twin on `value` still holds under the CLIENT rule: the body is
+/// single-case and plain placeholder text, or some placeholder word is set apart by a SEPARATOR
+/// (a non-alphanumeric byte) or by the start or end of the body. A case change or a digit next to
+/// the word is not enough, as it is for a vendor body: a word buried in mixed-case random text
+/// (`Kx9fakeT2mQ8vLp3Zr7wYn5Bd1Hs`) proves nothing, so a client package masks it.
+///
+/// A human-written value (a context shape: `password = "..."`, a bearer token) is also masked
+/// when any of its segments reads as random text: `MyCorp-Dummy-8842xQ-Prod-Main` has a delimited
+/// `Dummy` and a real-looking password around it. A vendor body is random by nature, so only the
+/// placeholder word is judged there.
+pub(crate) fn placeholder_holds_for_client(shape: SecretShape, value: &str) -> bool {
+    let body = &value[prefix_of(shape, value).len()..];
+    if is_context_shaped(shape)
+        && without_placeholder_words(body)
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(is_random_segment)
+    {
+        return false;
+    }
+    let single_case = !body.bytes().any(|b| b.is_ascii_lowercase())
+        || !body.bytes().any(|b| b.is_ascii_uppercase());
+    if single_case {
+        return single_case_is_plain_placeholder(body);
+    }
+    let bytes = body.as_bytes();
+    let lower = body.to_ascii_lowercase();
+    PLACEHOLDER_WORDS.iter().any(|word| {
+        lower.match_indices(word).any(|(start, _)| {
+            let end = start + word.len();
+            let left = start == 0
+                || word.starts_with(['_', '-'])
+                || !bytes[start - 1].is_ascii_alphanumeric();
+            let right = end == bytes.len()
+                || word.ends_with(['_', '-'])
+                || !bytes[end].is_ascii_alphanumeric();
+            left && right
         })
     })
 }
@@ -356,6 +490,218 @@ pub(crate) fn names_a_secret(before_value: &str) -> bool {
         .any(|word| lower.contains(word))
 }
 
+/// Words that make a bare `key` a credential (`api_key`, `accessKey`, `AUTH_KEY`). A bare `key` or
+/// a `STORAGE_KEY`, `queryKey` is a name in code, not a credential.
+const KEY_QUALIFIERS: &[&str] = &[
+    "api",
+    "access",
+    "auth",
+    "private",
+    "signing",
+    "encryption",
+    "license",
+    "master",
+    "session",
+    "client",
+    "consumer",
+    "app",
+    "service",
+    "role",
+    "jwt",
+    "ssh",
+    "deploy",
+    "hmac",
+    "webhook",
+    "crypto",
+    "stripe",
+    "bot",
+];
+
+/// Trailing words that say which copy of a credential an identifier names, not what it is
+/// (`API_KEY_PROD`, `API_TOKEN_STAGING`, `access_token_value`). Dropped before the last word is
+/// read, with any all-digit word and any `v<digits>` word.
+const NAME_SUFFIX_WORDS: &[&str] = &[
+    "prod",
+    "production",
+    "staging",
+    "stage",
+    "dev",
+    "test",
+    "live",
+    "value",
+    "default",
+    "primary",
+    "secondary",
+    "old",
+    "new",
+];
+
+fn is_suffix_word(word: &str) -> bool {
+    NAME_SUFFIX_WORDS.contains(&word)
+        || (!word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()))
+        || word
+            .strip_prefix('v')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Single words that already hold the qualifier (`apikey`, `accesskey`).
+const KEY_COMPOUNDS: &[&str] = &[
+    "apikey",
+    "apikeys",
+    "accesskey",
+    "accesskeys",
+    "authkey",
+    "privatekey",
+    "signingkey",
+    "encryptionkey",
+    "licensekey",
+    "masterkey",
+    "sessionkey",
+    "authtoken",
+    "accesstoken",
+    "apitoken",
+];
+
+/// The words of `text`, lowercased, split on anything that is not a letter or digit and at a
+/// camel-case boundary (`apiKey` is `api`, `key`; `APIKey` is `api`, `key`).
+fn identifier_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        let boundary = c.is_ascii_uppercase()
+            && i > 0
+            && (chars[i - 1].is_ascii_lowercase()
+                || (chars[i - 1].is_ascii_uppercase()
+                    && chars.get(i + 1).is_some_and(char::is_ascii_lowercase)));
+        if boundary && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(c.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// Whether `after_name` (the text after an identifier) assigns it: closing quotes (escaped ones
+/// too), a bracket and spaces, then `:`, `=` or `=>`.
+fn is_assigned(after_name: &str) -> bool {
+    after_name
+        .trim_start_matches(['"', '\'', '\\', ']', ' ', '\t'])
+        .starts_with([':', '='])
+}
+
+/// `before_value` without what the unquoted pattern puts in front of the name: indentation,
+/// `export ` and a list dash (`  - export API_KEY=` is `API_KEY=`).
+fn strip_line_prefix(before_value: &str) -> &str {
+    let blank = |c: char| c == ' ' || c == '\t';
+    let mut rest = before_value.trim_start();
+    loop {
+        // `export` or `-`, any case, then at least one space or tab.
+        let after = if rest.is_char_boundary(6) && rest[..6].eq_ignore_ascii_case("export") {
+            &rest[6..]
+        } else if let Some(after) = rest.strip_prefix('-') {
+            after
+        } else {
+            return rest;
+        };
+        let trimmed = after.trim_start_matches(blank);
+        if trimmed.len() == after.len() {
+            return rest;
+        }
+        rest = trimmed;
+    }
+}
+
+/// The length of the identifier `text` opens with: letters, digits, `_`, `-` and `.`.
+fn identifier_len(text: &str) -> usize {
+    text.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(text.len())
+}
+
+/// `before_value` with the identifier it starts in widened to the left: the quoted pattern's
+/// identifier class stops at `-` and `.`, so `"x-api-key": "..."` matches from `key`. The
+/// widening reads the line in front of the match over `[A-Za-z0-9_.-]`, and only when the name is
+/// being assigned (`"x-api-key": "..."`, `headers["X-Api-Key"] =`, `'api-key' => '...'`).
+fn identifier_head(before_value: &str, context: &TwinContext<'_>) -> String {
+    let head = context.line_prefix.strip_suffix(before_value).unwrap_or("");
+    let kept = head
+        .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .len();
+    let lead = &head[kept..];
+    let stripped = strip_line_prefix(before_value);
+    if is_assigned(&stripped[identifier_len(stripped)..]) {
+        format!("{lead}{before_value}")
+    } else {
+        before_value.to_string()
+    }
+}
+
+/// Whether `before_value` names something whose value may be a passphrase that READS like a name
+/// (a diceware phrase on an `api_token` or `apiKey` identifier): everything [`names_a_secret`]
+/// names, plus an identifier that ENDS in the word `token` (or `tokens`), in a compound such as
+/// `apikey`, or in a `key` qualified as a credential (`api_key`, `accessKey`, `AUTH_KEY`). Whole
+/// words only, so `monkey`, `keyboard` and `author` do not count; the identifier's last word
+/// only, so `tokenName`, `api_key_header` and `STORAGE_KEY` (names in code) stay readable.
+fn names_a_passphrase_holder(before_value: &str) -> bool {
+    if names_a_secret(before_value) {
+        return true;
+    }
+    let stripped = strip_line_prefix(before_value);
+    let end = identifier_len(stripped);
+    if is_assigned(&stripped[end..]) {
+        // A name being assigned: the whole identifier (kebab and dotted included), read without
+        // its environment or version suffix (`API_KEY_PROD`, `apiKeyV2`).
+        let mut words = identifier_words(&stripped[..end]);
+        while words.len() > 1 && words.last().is_some_and(|w| is_suffix_word(w)) {
+            words.pop();
+        }
+        return last_word_holds(words);
+    }
+    // Not assigned (a fallback `|| "..."`, a call argument, an accessor, a `case`): either the
+    // words in front of the first `:` or `=` (a name before a brace is not the credential:
+    // `class TokenStore { static apiKey = "..." }`) or the words in front of the first `{` (an
+    // accessor: `ApiKey { get; } = "..."`) name a holder. A string in a list (`"SEC-NO-TOKEN-1"`)
+    // ends in `1`, so it stays a value.
+    [[':', '='].as_slice(), ['{'].as_slice()]
+        .iter()
+        .any(|cuts| {
+            let head = stripped.split(*cuts).next().unwrap_or(stripped);
+            let mut words = identifier_words(head);
+            while words.len() > 1
+                && words
+                    .last()
+                    .is_some_and(|w| matches!(w.as_str(), "or" | "and"))
+            {
+                words.pop();
+            }
+            last_word_holds(words)
+        })
+}
+
+/// Whether the last of `words` is a credential word, or a `key` qualified as one.
+fn last_word_holds(mut words: Vec<String>) -> bool {
+    let Some(last) = words.pop() else {
+        return false;
+    };
+    matches!(
+        last.as_str(),
+        "token" | "tokens" | "pass" | "auth" | "bearer"
+    ) || KEY_COMPOUNDS.contains(&last.as_str())
+        || (matches!(last.as_str(), "key" | "keys")
+            && words
+                .last()
+                .is_some_and(|word| KEY_QUALIFIERS.contains(&word.as_str())))
+}
+
 /// The fewest characters a sealed-secret ciphertext value has (a real one is hundreds).
 const SEALED_CIPHERTEXT_MIN_LEN: usize = 200;
 
@@ -465,7 +811,7 @@ pub(crate) fn classify(
     // A readable name is code (`STORAGE_KEY`, `queryKey`); on a password-like identifier the same
     // shape is a passphrase.
     if shape == SecretShape::NamedSecretLiteral
-        && !names_a_secret(before_value)
+        && !names_a_passphrase_holder(&identifier_head(before_value, context))
         && is_readable_name(value)
     {
         return Some(Twin::ReadableName);

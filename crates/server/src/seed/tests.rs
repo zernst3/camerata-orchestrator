@@ -204,7 +204,7 @@ async fn seed_review_loads_a_fixture_run_with_its_overlays() {
             false_positive: 2,
             tech_debt: 1,
             merged: 1,
-            held: 5,
+            held: 7,
         }
     );
     assert!(shell.group_reviewed);
@@ -240,7 +240,11 @@ async fn seed_review_loads_a_fixture_run_with_its_overlays() {
     // The states the smoke checklist and the click-through tests exercise, one row each at least.
     let markers = marker_counts(&app, &seeded).await;
     let n = |m: Marker| markers.get(&m).copied().unwrap_or(0);
-    assert_eq!(n(Marker::Held), 5, "one row of each held kind");
+    assert_eq!(
+        n(Marker::Held),
+        7,
+        "one row of each held kind, and the two critical secrets nobody decided"
+    );
     assert_eq!(n(Marker::Escalated), 4, "the queue");
     assert_eq!(n(Marker::OverBudget), 2, "escalated past the budget");
     assert_eq!(n(Marker::Candidate), 2, "below the line");
@@ -292,7 +296,7 @@ async fn seed_review_loads_a_fixture_run_with_its_overlays() {
     assert_eq!(report["applied_edit_ids"].as_array().unwrap().len(), 3);
     assert_eq!(report["stale"].as_array().unwrap().len(), 0);
     assert_eq!(report["merges"].as_array().unwrap().len(), 1);
-    assert_eq!(report["held"].as_array().unwrap().len(), 5);
+    assert_eq!(report["held"].as_array().unwrap().len(), 7);
     assert_eq!(report["findings"].as_array().unwrap().len(), 32);
 }
 
@@ -717,11 +721,16 @@ fn gate_refusals(reviewed: &ReviewedReport) -> Option<Vec<Held>> {
                 for p in outcome
                     .problems
                     .iter()
-                    .filter(|p| p.file == "findings.json")
+                    .filter(|p| p.file == "json/inspection.json")
                 {
-                    let Some(reason) = reason_of(outcome.check) else {
+                    let Some(mut reason) = reason_of(outcome.check) else {
                         continue;
                     };
+                    // One check covers two reasons; the problem's words say which.
+                    if reason == HoldReason::CriticalWithoutDecision && p.message.contains("unsure")
+                    {
+                        reason = HoldReason::UnsureWithoutDecision;
+                    }
                     if let Some((path, line)) = p.location.rsplit_once(" line ") {
                         rows.push((reason, path.to_string(), line.parse().unwrap()));
                     }
@@ -741,6 +750,7 @@ fn reason_of(check: CheckId) -> Option<HoldReason> {
         CheckId::SplitOutWithoutDecision => Some(HoldReason::SplitOutWithoutDecision),
         CheckId::MergedWithoutDecision => Some(HoldReason::MergedWithoutDecision),
         CheckId::EngineCheckNoWithoutCorrection => Some(HoldReason::EngineCheckNoWithoutCorrection),
+        CheckId::CriticalOrUnsureWithoutDecision => Some(HoldReason::CriticalWithoutDecision),
         _ => None,
     }
 }
@@ -981,7 +991,13 @@ async fn uncorrected_engine_check_no_is_refused_through_every_loader() {
     // the same statement. A new loader that skips it fails here.
     let mut found = 0;
     for (file, text) in source_files() {
-        for (at, _) in text.match_indices("apply_overlay(") {
+        // Both entry points: the plain one and the one that carries the reviewer's standards. A
+        // new loader calling either must attach the evidence.
+        let calls = ["apply_overlay(", "apply_overlay_with_standards("]
+            .into_iter()
+            .flat_map(|needle| text.match_indices(needle).map(|(at, _)| at))
+            .collect::<Vec<_>>();
+        for at in calls {
             if text[..at].ends_with("fn ") || file == "report_export/overlay.rs" {
                 continue;
             }

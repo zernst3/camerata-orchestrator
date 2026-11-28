@@ -6,7 +6,8 @@
 //! ([`super::evidence::undecided_unverified`], [`super::junk::undecided_junk`],
 //! [`super::held::undecided_restored`], [`super::held::undecided_split_out`], [`super::engine_check::uncorrected_no`] and
 //! [`super::engine_check::uncorrected_no_thrown_out`],
-//! [`super::held::merge_is_backed`] and [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
+//! [`super::needs_decision::undecided`], [`super::held::merge_is_backed`] and
+//! [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
 //! turns the same rows into an [`ExportGateView`], so the panel lists exactly what the gate
 //! refuses for the same reviewed report and cannot drift from it. It adds no rule of its own.
 //!
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 
 use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason, NodeDecisionGap};
 
-use super::{engine_check, evidence, held, junk};
+use super::{engine_check, evidence, held, junk, needs_decision, split_rules};
 use crate::onboard::Finding;
 use crate::report_export::decisions_file::decision_rows;
 use crate::report_export::overlay::merged_target;
@@ -82,6 +83,16 @@ pub fn hold_set(reviewed: &ReviewedReport) -> HoldSet {
         reviewed.engine_check(),
     ));
     kept_out_of_a_batch.extend(awaiting_a_ruling.iter().cloned());
+    // A critical or unsure row is decided by name, decided already or not: a group record would
+    // overwrite the decision made in person.
+    kept_out_of_a_batch.extend(
+        reviewed
+            .report()
+            .findings
+            .iter()
+            .filter(|f| needs_decision::why(f).is_some())
+            .map(|f| f.site_key.clone()),
+    );
     let mut reasons: std::collections::BTreeMap<String, Vec<(HoldReason, String)>> =
         std::collections::BTreeMap::new();
     for held in gate.held.iter().chain(&gate.merged_without_decision) {
@@ -136,6 +147,21 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
             }),
     );
 
+    // Outside review item 2: a critical row and an unsure row need a decision of their own. A row
+    // another check already lists is listed once, under that check's reason: one decision clears
+    // both.
+    let mut listed: std::collections::HashSet<String> =
+        rows.iter().map(|r| r.key.clone()).collect();
+    for (f, why) in needs_decision::undecided(findings, reviewed) {
+        if listed.insert(f.site_key.clone()) {
+            let reason = match why {
+                needs_decision::Why::Critical => HoldReason::CriticalWithoutDecision,
+                needs_decision::Why::Unsure => HoldReason::UnsureWithoutDecision,
+            };
+            rows.push(held_row(f, reason, ""));
+        }
+    }
+
     // Merges and group decisions are checked against the decision records the package prints.
     let records = decision_rows(reviewed);
     let by_key: HashMap<&str, &Finding> =
@@ -177,5 +203,9 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
         held: rows,
         merged_without_decision,
         node_decisions_missing_members: gaps,
+        split_rules: split_rules::split_rules(reviewed)
+            .into_iter()
+            .map(|(repo, rule_id)| camerata_api_types::review_view::SplitRuleHold { repo, rule_id })
+            .collect(),
     }
 }

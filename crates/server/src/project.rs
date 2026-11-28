@@ -44,6 +44,10 @@ pub struct ProjectStore {
 /// The group review model a project seeded before Fable 5.2 became the default.
 const PREVIOUS_STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
 
+/// The model a saved Fable 5.1 group review pick moves to. It stays Fable 5.2 after the built-in
+/// default became Opus 5.5: a saved project keeps its saved model family.
+const MOVED_STAGE2_MODEL: &str = "claude-fable-5-2";
+
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     projects: Vec<Project>,
@@ -80,13 +84,11 @@ impl ProjectStore {
         let mut moved = false;
         for project in &mut state.projects {
             if project.review.group_review_model.trim() == PREVIOUS_STAGE2_DEFAULT_MODEL {
-                project.review.group_review_model =
-                    camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string();
+                project.review.group_review_model = MOVED_STAGE2_MODEL.to_string();
                 tracing::info!(
                     "project {}: the group review model {PREVIOUS_STAGE2_DEFAULT_MODEL} moved to \
-                     {}; a run already started keeps the model it began on",
+                     {MOVED_STAGE2_MODEL}; a run already started keeps the model it began on",
                     project.name,
-                    camerata_api_types::project::STAGE2_DEFAULT_MODEL
                 );
                 moved = true;
             }
@@ -187,12 +189,9 @@ impl ProjectStore {
                 client_engagement: true,
                 client_tooling_opt_in: false,
                 dev_run_spend_limit_cents: None,
+                scan_exclusions: Vec::new(),
                 // Stage 2 has a default of its own too; a new project seeds it (A15).
-                review: ReviewSettings {
-                    group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
-                        .to_string(),
-                    ..ReviewSettings::default()
-                },
+                review: ReviewSettings::for_new_project(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -310,6 +309,7 @@ impl ProjectStore {
                     client_engagement: true,
                     client_tooling_opt_in: false,
                     dev_run_spend_limit_cents: None,
+                    scan_exclusions: Vec::new(),
                     review: ReviewSettings::default(),
                 };
                 s.projects.push(project.clone());
@@ -341,6 +341,35 @@ impl ProjectStore {
             self.save();
         }
         ok
+    }
+
+    /// Delete a project like [`Self::delete`] but write the file first: when the write fails
+    /// nothing is removed and the error is returned. `Ok(false)` when there is no such project.
+    pub fn delete_checked(&self, id: &str) -> std::io::Result<bool> {
+        let mut s = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("project store mutex poisoned"))?;
+        if !s.projects.iter().any(|p| p.id == id) {
+            return Ok(false);
+        }
+        let projects: Vec<Project> = s.projects.iter().filter(|p| p.id != id).cloned().collect();
+        let active = if s.active.as_deref() == Some(id) {
+            projects.first().map(|p| p.id.clone())
+        } else {
+            s.active.clone()
+        };
+        let next = State {
+            projects,
+            active,
+            counter: s.counter,
+        };
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&next).map_err(std::io::Error::other)?;
+            std::fs::write(path.as_path(), json)?;
+        }
+        *s = next;
+        Ok(true)
     }
 
     /// Set the active project.
@@ -448,6 +477,98 @@ impl ProjectStore {
             return Err("the dev run spend limit must be more than zero".to_string());
         }
         Ok(self.update(project_id, |p| p.dev_run_spend_limit_cents = limit_cents))
+    }
+
+    /// Replace the project's exclusion list (files excluded by agreement, one glob pattern each,
+    /// matched against `<repo name>/<path within the repo>`). Blank lines and repeats are
+    /// dropped. `Err` names the first pattern that is not a valid glob and nothing is saved;
+    /// `Ok(None)` when no project has that id.
+    pub fn set_scan_exclusions(
+        &self,
+        project_id: &str,
+        patterns: &[String],
+    ) -> Result<Option<Project>, String> {
+        let patterns = crate::onboard::scope::normalize_patterns(patterns);
+        crate::onboard::scope::validate_patterns(&patterns)?;
+        if let Some(p) = self.get(project_id) {
+            crate::onboard::scope::ScanScope::from_patterns(&patterns)?.check_names(&p.repos)?;
+        }
+        Ok(self.update(project_id, |p| p.scan_exclusions = patterns))
+    }
+
+    /// [`Self::set_scan_exclusions`] that writes only when the stored list is still `based_on`
+    /// (the list the caller loaded), the comparison and the write made together inside `update`
+    /// so nothing can slip in between. `Ok(Some(Err(current)))` = the list changed since; nothing
+    /// is written.
+    pub fn set_scan_exclusions_checked(
+        &self,
+        project_id: &str,
+        based_on: &[String],
+        patterns: &[String],
+    ) -> Result<Option<Result<Project, Vec<String>>>, String> {
+        let patterns = crate::onboard::scope::normalize_patterns(patterns);
+        crate::onboard::scope::validate_patterns(&patterns)?;
+        let loaded = crate::onboard::scope::normalize_patterns(based_on);
+        if let Some(p) = self.get(project_id) {
+            crate::onboard::scope::ScanScope::from_patterns(&patterns)?.check_names(&p.repos)?;
+        }
+        let mut conflict: Option<Vec<String>> = None;
+        let updated = self.update(project_id, |p| {
+            if p.scan_exclusions == loaded {
+                p.scan_exclusions = patterns;
+            } else {
+                conflict = Some(p.scan_exclusions.clone());
+            }
+        });
+        Ok(match (updated, conflict) {
+            (None, _) => None,
+            (Some(_), Some(current)) => Some(Err(current)),
+            (Some(p), None) => Some(Ok(p)),
+        })
+    }
+
+    /// Add one file, exactly, to the project's exclusion list: the pre-start check's "Exclude by
+    /// agreement" for a file over the read limit. A file already on the list is not added twice.
+    /// `Ok(None)` when no project has that id.
+    pub fn add_scan_exclusion(
+        &self,
+        project_id: &str,
+        repo: &str,
+        path: &str,
+    ) -> Result<Option<Project>, String> {
+        if path.trim().is_empty() {
+            return Err("name the file to exclude by agreement".to_string());
+        }
+        let Some(current) = self.get(project_id) else {
+            return Ok(None);
+        };
+        if !current.repos.iter().any(|r| r == repo) {
+            return Err(format!("{repo} is not a repo of this project"));
+        }
+        // Inside `update`, so two quick additions both land: the list is read and written under
+        // one lock, never read here and written back later.
+        let mut refused: Option<String> = None;
+        let updated = self.update(project_id, |p| {
+            let pattern = crate::onboard::scope::exact_pattern_in(&p.repos, repo, path);
+            let mut patterns = p.scan_exclusions.clone();
+            patterns.push(pattern);
+            let patterns = crate::onboard::scope::normalize_patterns(&patterns);
+            match crate::onboard::scope::validate_patterns(&patterns) {
+                Ok(()) => p.scan_exclusions = patterns,
+                Err(why) => refused = Some(why),
+            }
+        });
+        match refused {
+            Some(why) => Err(why),
+            None => Ok(updated),
+        }
+    }
+
+    /// Remove one pattern from the project's Excluded by agreement list, inside `update`.
+    pub fn remove_scan_exclusion(&self, project_id: &str, pattern: &str) -> Option<Project> {
+        self.update(project_id, |p| {
+            p.scan_exclusions.retain(|x| x != pattern.trim())
+        })
     }
 
     /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the
@@ -918,7 +1039,7 @@ mod tests {
         let p = store.create("Stages", vec![]).unwrap();
         // Stage 1 is the calibration step; stage 2 is the review settings' group review model.
         assert_eq!(p.step_models.calibration, "claude-opus-5-5");
-        assert_eq!(p.review.group_review_model, "claude-fable-5-2");
+        assert_eq!(p.review.group_review_model, "claude-opus-5-5");
         // The scan keeps its own default.
         assert_eq!(p.step_models.audit, DEFAULT_MODEL);
         // The rest of the review settings are the design values.
@@ -1032,14 +1153,14 @@ mod tests {
             let b = store.create("B", vec![]).unwrap();
             // A new project carries the design values, and stage 2's own default model.
             let seeded = ReviewSettings {
-                group_review_model: "claude-fable-5-2".to_string(),
+                group_review_model: "claude-opus-5-5".to_string(),
                 ..ReviewSettings::default()
             };
             assert_eq!(a.review, seeded);
             let set = ReviewSettings {
                 escalation_rate_per_kloc: 0.5,
                 escalation_floor: 7,
-                group_review_model: "claude-opus-5-5".to_string(),
+                group_review_model: "claude-fable-5-2".to_string(),
                 ..ReviewSettings::default()
             };
             let updated = store
@@ -1070,10 +1191,10 @@ mod tests {
         let reloaded = ProjectStore::load_or_new(path);
         let a = reloaded.get(&a_id).unwrap();
         assert_eq!(a.review.escalation_floor, 7);
-        assert_eq!(a.review.group_review_model, "claude-opus-5-5");
+        assert_eq!(a.review.group_review_model, "claude-fable-5-2");
         assert_eq!(
             reloaded.get(&b_id).unwrap().review.group_review_model,
-            "claude-fable-5-2"
+            "claude-opus-5-5"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1331,8 +1452,51 @@ mod finder_setting_tests {
     use super::*;
     use camerata_api_types::project::ProjectFinder;
 
+    /// Outside review Part 1 item 3: a new project runs the agent finder on Opus 5.5 for both the
+    /// finder and the group review; a project saved before the setting existed, and one that saved
+    /// Engine, stay Engine.
     #[test]
-    fn the_finder_setting_defaults_to_engine_and_survives_a_reload() {
+    fn a_new_project_defaults_to_the_agent_finder_on_opus_5_5() {
+        let store = ProjectStore::new();
+        let p = store.create("Defaults", vec![]).unwrap();
+        assert_eq!(p.review.finder, ProjectFinder::Agent);
+        let controls = crate::cost_cap::RunControls {
+            scope: Default::default(),
+            review: p.review.clone(),
+            finder: p.review.finder.into(),
+            ..crate::cost_cap::RunControls::default()
+        };
+        assert_eq!(
+            controls.finder,
+            crate::ai_audit::agent_finder::FinderChoice::Agent
+        );
+        assert_eq!(controls.finder_model_for(), "claude-opus-5-5");
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
+        assert_eq!(p.review.group_review_model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn a_saved_project_keeps_its_saved_finder() {
+        // Saved before the finder setting existed: Engine, as it has always loaded.
+        let legacy: Project =
+            serde_json::from_value(serde_json::json!({ "id": "old", "name": "Old" })).unwrap();
+        assert_eq!(legacy.review.finder, ProjectFinder::Engine);
+        // Saved with Engine chosen: stays Engine.
+        let saved: Project = serde_json::from_value(serde_json::json!({
+            "id": "e", "name": "E", "review": { "finder": "engine" },
+        }))
+        .unwrap();
+        assert_eq!(saved.review.finder, ProjectFinder::Engine);
+        // Saved with a review block that has no finder key: Engine too.
+        let partial: Project = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "review": { "escalation_floor": 7 },
+        }))
+        .unwrap();
+        assert_eq!(partial.review.finder, ProjectFinder::Engine);
+    }
+
+    #[test]
+    fn the_finder_setting_defaults_to_agent_and_survives_a_reload() {
         let dir = std::env::temp_dir().join(format!(
             "camerata-finder-setting-{}",
             std::time::SystemTime::now()
@@ -1344,9 +1508,9 @@ mod finder_setting_tests {
         let id = {
             let store = ProjectStore::load_or_new(path.clone());
             let p = store.create("A", vec![]).unwrap();
-            assert_eq!(p.review.finder, ProjectFinder::Engine);
+            assert_eq!(p.review.finder, ProjectFinder::Agent);
             let settings = ReviewSettings {
-                finder: ProjectFinder::Agent,
+                finder: ProjectFinder::Engine,
                 ..p.review
             };
             store.set_review_settings(&p.id, settings).unwrap().unwrap();
@@ -1355,7 +1519,7 @@ mod finder_setting_tests {
         let reloaded = ProjectStore::load_or_new(path);
         assert_eq!(
             reloaded.get(&id).unwrap().review.finder,
-            ProjectFinder::Agent
+            ProjectFinder::Engine
         );
     }
 }

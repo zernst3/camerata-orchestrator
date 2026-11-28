@@ -1,0 +1,92 @@
+id = "IAC-TERRAFORM-PUBLIC-BUCKET-1"
+version = 1
+title = "Storage buckets defined in Terraform grant no public access unless public hosting is their stated purpose"
+domain = "iac:terraform"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-732"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity floor. A bucket the internet can read or write is a direct data exposure, so a located
+# finding is never rated below high.
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Applies to object storage buckets declared in Terraform: Amazon S3 buckets and the Google Cloud Storage and Azure Blob Storage equivalents. A bucket whose stated purpose is public hosting (a static website origin or a public download bucket, named or commented as such) is outside the rule, provided it holds only content meant for the public. A bucket declared with no public access block is not a fault: new Amazon S3 buckets block public access by default, and account or organization level blocks are set outside the repository. The fault is an explicit public grant or a public access block setting written as `false`. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"
+title = "Amazon S3 User Guide: Blocking public access to your Amazon S3 storage"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"
+title = "AWS Security Hub controls for Amazon S3: S3.8, S3 general purpose buckets should block public access (maps to CIS AWS Foundations Benchmark v3.0.0 recommendation 2.1.4)"
+
+[[sources]]
+url = "https://www.cisecurity.org/benchmark/amazon_web_services"
+title = "CIS Amazon Web Services Foundations Benchmark v3.0.0, recommendation 2.1.4: Ensure that S3 is configured with 'Block Public Access' enabled"
+
+[[sources]]
+url = "https://cloud.google.com/storage/docs/public-access-prevention"
+title = "Google Cloud Storage documentation: Public access prevention"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/732.html"
+title = "CWE-732: Incorrect Permission Assignment for Critical Resource"
+
+[decision]
+question = "Can anyone on the internet read or write a storage bucket this Terraform configuration creates?"
+default = "buckets-block-public-access"
+why = """
+A storage bucket is private until something grants the public access to it: a public access
+control list, a bucket policy with a wildcard principal or a grant to all users. Each of those is
+one line of Terraform, and once applied the bucket's contents can be listed and downloaded by
+anyone who finds the name. Public buckets are among the most common causes of cloud data leaks
+because the bucket keeps working normally for its owner while it is exposed. The provider level
+block public access settings exist so that a later mistake in an access list or a policy cannot
+open the bucket: with all four settings on, a public grant is refused or ignored. New Amazon S3
+buckets have them on by default, so a setting written as `false` is a deliberate step toward
+exposure.
+"""
+
+[[option]]
+id = "buckets-block-public-access"
+label = "No storage bucket carries a public grant, except buckets whose stated purpose is public hosting"
+directive = """
+Every storage bucket declared in Terraform is private. For Amazon S3, no bucket uses the
+`public-read` or `public-read-write` access control list. No bucket policy allows a wildcard
+principal without a condition that narrows who can use it. Where an
+`aws_s3_bucket_public_access_block` or an `aws_s3_account_public_access_block` is declared, its
+`block_public_acls`, `block_public_policy`, `ignore_public_acls` and `restrict_public_buckets`
+settings are `true`. For Google Cloud Storage, no binding grants a role to `allUsers` or
+`allAuthenticatedUsers`. For Azure Blob Storage, containers keep
+`container_access_type = "private"`. A bucket that must serve the public (a static website origin
+or a public download bucket) says so in its name or in a comment and holds nothing else.
+"""
+remediation = """
+Remove the public access control list, wildcard principal policy or all users grant from the
+bucket in `<path>`, and set any public access block setting that is `false` back to `true`. If
+the bucket was public on purpose, move the public content to a bucket dedicated to public hosting
+and keep everything else private. Verify by running `terraform plan` and confirming the grant is
+removed, then request an object from the bucket without credentials and confirm the request is
+denied.
+"""
+effort = "low"
+why = "A bucket with no public grant and its public access block settings left on stays private, and a reviewer can confirm that from the code."
+
+[[option]]
+id = "buckets-open-to-the-public"
+violates = true
+label = "A storage bucket carries an explicit public grant or turns a public access block setting off"
+directive = "A storage bucket is declared with a public access control list, a wildcard principal policy or a grant to all users. The same fault covers a public access block setting written as `false`."
+remediation = """
+Remove the public access control list, wildcard principal policy or all users grant from the
+bucket in `<path>`, and set any public access block setting that is `false` back to `true`.
+Verify by running `terraform plan` and confirming the grant is removed, then request an object
+from the bucket without credentials and confirm the request is denied.
+"""
+effort = "low"
+why = "Anyone who learns or guesses the bucket name can list and download its contents. With a public write grant they can also replace or delete them. The owner sees no error, so the exposure usually lasts until someone outside the company reports it."

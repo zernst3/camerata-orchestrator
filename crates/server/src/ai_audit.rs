@@ -310,10 +310,14 @@ mod detail_regen_tests;
 
 mod batch_mode;
 
+#[cfg(test)]
+mod cache_layout_tests;
 mod calibration;
 #[cfg(test)]
 mod calibration_tests;
 pub mod group_review;
+#[cfg(test)]
+mod group_review_batch_tests;
 #[cfg(test)]
 mod group_review_tests;
 #[cfg(test)]
@@ -355,7 +359,7 @@ mod run_completion_tests;
 mod second_try_tests;
 
 #[cfg(test)]
-mod rejection_reason_tests;
+pub(crate) mod rejection_reason_tests;
 
 #[cfg(test)]
 mod injection_tests;
@@ -377,6 +381,9 @@ mod fix_model_tests;
 
 #[cfg(test)]
 mod batch_default_tests;
+
+#[cfg(test)]
+mod scan_pass_credit_tests;
 
 #[cfg(test)]
 mod applies_to_routing_tests;

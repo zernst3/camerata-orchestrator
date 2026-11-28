@@ -13,6 +13,7 @@
 //! row? Moving to the decision store is a new implementation of that trait and nothing else here
 //! changes.
 
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use std::collections::HashMap;
 
 use super::Problem;
@@ -63,7 +64,7 @@ pub fn unverified_without_decision(
     undecided_unverified(findings, decisions)
         .map(|f| {
             Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("{} line {}", f.path, f.line),
                 format!(
                     "the quoted evidence for this finding was not found in the file near the \

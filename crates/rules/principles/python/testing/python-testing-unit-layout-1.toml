@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-UNIT-LAYOUT-1"
-version = 3
+version = 4
 title = "Unit tests live in a top-level tests/ directory mirroring the source tree"
 domain = "python:testing"
 layer = "language"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "Where do unit tests for a Python project live relative to application source?"
 default = "top-level-tests-dir"
-why = "pytest's own good-integration-practices guide documents two canonical layouts: a separate top-level tests/ directory (strongly recommended for new projects using the src/ layout) and inline tests co-located with application code. The separate layout is preferred because it keeps test files from being accidentally included in an installed package, lets tests run against the installed artifact, and makes the project structure obvious at a glance. When the project uses src/ the tests/ tree sits alongside src/: `src/mypkg/` and `tests/test_mypkg.py`. Within tests/, unit tests are further separated from integration tests (e.g. tests/unit/ vs tests/integration/) so that fast, isolated tests can be run without triggering network or database access. Without a canonical location, tests spread into production modules or proliferate at the repo root, making coverage reporting, CI filtering, and on-boarding harder."
+why = "pytest's own good-integration-practices guide documents two canonical layouts: a separate top-level tests/ directory (strongly recommended for new projects using the src/ layout) and inline tests co-located with application code. The separate layout is preferred because it keeps test files from being accidentally included in an installed package, lets tests run against the installed artifact, and makes the project structure obvious at a glance. When the project uses src/ the tests/ tree sits alongside src/: `src/mypkg/` and `tests/test_mypkg.py`. Within tests/, unit tests are further separated from integration tests (e.g. tests/unit/ vs tests/integration/) so that fast, isolated tests can be run without triggering network or database access. Without a canonical location, tests spread into production modules or proliferate at the repo root, making coverage reporting, CI filtering and on-boarding harder."
 
 [[option]]
 id = "top-level-tests-dir"

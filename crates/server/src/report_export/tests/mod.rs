@@ -35,6 +35,7 @@ pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["owner/repo".to_string()],
@@ -96,7 +97,7 @@ pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -
     }
 }
 
-fn wire(state: &str, reason: &str, bucket: &str) -> DispositionWire {
+pub(super) fn wire(state: &str, reason: &str, bucket: &str) -> DispositionWire {
     DispositionWire {
         state: state.to_string(),
         reason: reason.to_string(),

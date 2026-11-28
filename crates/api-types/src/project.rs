@@ -258,26 +258,47 @@ pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// The model stage 2 (the group reviewer) runs on when no group review model is set by the
 /// `--group-review-model` flag or the project setting (A13).
-pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-2";
+pub const STAGE2_DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// The model the possible-duplicate check runs on when no duplicate check model is set by the
 /// `--dup-check-model` flag or the project setting: the one question it asks of a pair of
 /// write-ups is small and bounded, so it is Sonnet 5.5.
 pub const DUP_CHECK_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 
+/// True when `model` is a first-party Anthropic API model id (`claude-sonnet-5`,
+/// `claude-haiku-4-5-20251001`). False for every OpenRouter id (`vendor/model`,
+/// `vendor/model:free`) and for an empty id. The one rule: the server's client lock and the
+/// Inspection settings' warning both call it.
+pub fn is_anthropic_model_id(model: &str) -> bool {
+    let model = model.trim();
+    model.starts_with("claude-") && !model.contains('/') && !model.contains(':')
+}
+
+/// The clone judge's model when neither the `--clone-judge-model` flag nor the project setting
+/// names one: classification over bounded input, Haiku 5.5. Not the project's fast band, so
+/// moving a band never moves the judge.
+pub const CLONE_JUDGE_DEFAULT_MODEL: &str = "claude-haiku-5-5";
+
 /// The agent finder's model when neither the `--finder-model` flag nor the project setting names
 /// one. The server's `DEFAULT_FINDER_MODEL` is this value.
-pub const FINDER_DEFAULT_MODEL: &str = "claude-fable-5-2";
+pub const FINDER_DEFAULT_MODEL: &str = "claude-opus-5-5";
 
-/// Which finder a project's scans use. `Engine` (the default until the calibration passes) is the
-/// rule by rule scan; `Agent` has one model review each part of the code. The server turns it
-/// into the run's finder choice. Set only on the project, never by the environment.
+/// Which finder a project's scans use. `Agent` (the default for a new project) has one model
+/// review each part of the code; `Engine` is the rule by rule scan. A project saved before the
+/// setting existed loads as `Engine` ([`legacy_finder`]), never silently as the new default. The
+/// server turns it into the run's finder choice. Set only on the project, never by the
+/// environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectFinder {
-    #[default]
     Engine,
+    #[default]
     Agent,
+}
+
+/// What a saved project with no `finder` key loads as: the engine, as it always has.
+fn legacy_finder() -> ProjectFinder {
+    ProjectFinder::Engine
 }
 
 impl ProjectFinder {
@@ -341,9 +362,9 @@ pub struct ReviewSettings {
     /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
     #[serde(default = "default_sample_size_per_run")]
     pub sample_size_per_run: usize,
-    /// Which finder the project's scans use. A project written before the setting existed loads
-    /// with the default.
-    #[serde(default)]
+    /// Which finder the project's scans use. A new project starts on the agent finder; a project
+    /// written before the setting existed loads as the engine.
+    #[serde(default = "legacy_finder")]
     pub finder: ProjectFinder,
 }
 
@@ -409,6 +430,29 @@ where
     })
 }
 
+impl ReviewSettings {
+    /// The settings a NEW project starts with: the defaults of [`Default`] (the agent finder,
+    /// the built-in model for every unset row) with the group review model stored explicitly.
+    /// Every value is read from the named constants, so this cannot drift from what the engine
+    /// resolves. A project file that loads is not touched by this.
+    pub fn for_new_project() -> Self {
+        Self {
+            group_review_model: STAGE2_DEFAULT_MODEL.to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// The settings of a project saved before the review settings existed: the design values with
+    /// the engine finder, which is what such a project has always run. A new project uses
+    /// [`Default`] (the agent finder). The project file's `review` field loads this when absent.
+    pub fn legacy() -> Self {
+        Self {
+            finder: legacy_finder(),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for ReviewSettings {
     fn default() -> Self {
         Self {
@@ -431,6 +475,21 @@ mod review_settings_tests {
     use crate::review::EscalationReason;
 
     #[test]
+    fn a_new_projects_settings_read_the_named_constants_and_old_projects_do_not_move() {
+        let fresh = ReviewSettings::for_new_project();
+        assert_eq!(fresh.finder, ProjectFinder::default());
+        assert_eq!(fresh.finder, ProjectFinder::Agent);
+        assert_eq!(fresh.group_review_model, STAGE2_DEFAULT_MODEL);
+        // Unset rows stay unset: the screen names the built-in default, the engine resolves it.
+        assert!(fresh.finder_model.is_empty());
+        assert!(fresh.dup_check_model.is_empty());
+        assert!(fresh.clone_judge_model.is_empty());
+        assert_eq!(CLONE_JUDGE_DEFAULT_MODEL, "claude-haiku-5-5");
+        // A project saved before the settings existed still loads as the engine.
+        assert_eq!(ReviewSettings::legacy().finder, ProjectFinder::Engine);
+    }
+
+    #[test]
     fn the_duplicate_check_model_is_unset_by_default_and_its_built_in_default_is_sonnet_5_5() {
         assert_eq!(DUP_CHECK_DEFAULT_MODEL, "claude-sonnet-5-5");
         assert!(ReviewSettings::default().dup_check_model.is_empty());
@@ -445,7 +504,7 @@ mod review_settings_tests {
 
     #[test]
     fn the_finder_and_clone_judge_models_are_unset_by_default_and_an_old_project_loads() {
-        assert_eq!(FINDER_DEFAULT_MODEL, "claude-fable-5-2");
+        assert_eq!(FINDER_DEFAULT_MODEL, "claude-opus-5-5");
         let d = ReviewSettings::default();
         assert!(d.finder_model.is_empty() && d.clone_judge_model.is_empty());
         // A project written before either setting existed loads with both unset.
@@ -475,8 +534,17 @@ mod review_settings_tests {
 
     #[test]
     fn a_project_written_before_the_settings_existed_loads_with_the_defaults() {
+        // The design values, on the engine finder: such a project has always run the engine, and a
+        // new project's default (the agent finder) is not applied to it.
         let s: ReviewSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s, ReviewSettings::default());
+        assert_eq!(s, ReviewSettings::legacy());
+        assert_eq!(
+            ReviewSettings {
+                finder: ProjectFinder::Agent,
+                ..s
+            },
+            ReviewSettings::default()
+        );
         let s: ReviewSettings = serde_json::from_str(
             r#"{"escalation_floor":5,"group_review_model":"claude-opus-5-5"}"#,
         )
@@ -513,10 +581,22 @@ mod review_settings_tests {
         );
     }
 
+    /// Outside review Part 1 item 3: a new settings value runs the agent finder; the legacy load
+    /// (no `finder` key) stays on the engine.
     #[test]
-    fn the_stage_defaults_are_opus_5_5_and_fable_5_2() {
+    fn the_review_settings_default_to_the_agent_finder_and_a_legacy_load_stays_on_engine() {
+        assert_eq!(ProjectFinder::default(), ProjectFinder::Agent);
+        assert_eq!(ReviewSettings::default().finder, ProjectFinder::Agent);
+        let legacy: ReviewSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.finder, ProjectFinder::Engine);
+        let saved: ReviewSettings = serde_json::from_str(r#"{"finder":"engine"}"#).unwrap();
+        assert_eq!(saved.finder, ProjectFinder::Engine);
+    }
+
+    #[test]
+    fn the_stage_defaults_are_opus_5_5() {
         assert_eq!(STAGE1_DEFAULT_MODEL, "claude-opus-5-5");
-        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-2");
+        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-opus-5-5");
         assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
     }
 }

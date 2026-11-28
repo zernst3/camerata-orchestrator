@@ -15,12 +15,16 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 mod cache;
 mod injection;
 mod ledger;
+mod not_settled;
 mod other_rules;
 mod redaction;
+mod redo_digest;
+mod repair;
 mod repros;
 mod rows;
 mod seam;
 mod size_check;
+mod unsure_rows;
 
 type Script = Box<dyn FnMut(&LlmRequest, usize) -> anyhow::Result<String> + Send>;
 
@@ -67,6 +71,7 @@ impl LlmPort for StubJudge {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

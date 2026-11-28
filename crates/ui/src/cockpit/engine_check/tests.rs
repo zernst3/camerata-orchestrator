@@ -286,3 +286,71 @@ fn a_second_look_card_carries_its_chip_and_its_own_question() {
     assert!(html.contains("Was it right to rule this out?"), "{html}");
     assert!(html.contains("engine-yes") && html.contains("engine-no"));
 }
+
+/// A kept card whose No was answered by a correction, with `hold` still on the row.
+fn corrected_card_page(hold: Option<camerata_api_types::review_view::HoldReason>) -> String {
+    let mut lane = dataset_base().engine;
+    let card = &mut lane.cards[0];
+    card.stratum = SampleStratum::Kept;
+    card.site.held = hold;
+    card.site.decision = None;
+    card.verdict = Some(camerata_api_types::review_view::EngineCheckVerdict {
+        key: card.site.site_key.clone(),
+        run_id: lane.run_id.clone(),
+        right: false,
+        wrong: Some(EngineCheckError::WrongSeverity),
+        correction: Some(CorrectionRef::Edit("edit-000001".to_string())),
+        by: "architect".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        carried_from: None,
+    });
+    let mut state = LaneState::default();
+    state.go(0, lane.cards.len());
+    crate::test_harness::render_fragment(form_page, FormCase { lane, state })
+}
+
+/// Review round 1, item 3: the card says "the corrected version is what ships" only when nothing
+/// holds the row. Any remaining hold reads as held, with the way out that is true for that hold.
+#[test]
+fn a_corrected_card_on_a_row_that_is_still_held_does_not_say_it_ships() {
+    use camerata_api_types::review_view::HoldReason;
+    const SHIPS: &str = "The corrected version is what ships.";
+    for hold in [
+        HoldReason::CriticalWithoutDecision,
+        HoldReason::UnsureWithoutDecision,
+    ] {
+        let html = corrected_card_page(Some(hold));
+        assert!(!html.contains(SHIPS), "{hold:?}: {html}");
+        assert!(html.contains("class=\"engine-state held\""), "{hold:?}");
+        assert!(
+            html.contains("corrected, held until you decide it"),
+            "{hold:?}"
+        );
+        assert!(
+            html.contains("set its severity, confirm it or mark it a false positive"),
+            "{hold:?}: {html}"
+        );
+    }
+    for hold in [
+        HoldReason::EvidenceUnverified,
+        HoldReason::JunkContent,
+        HoldReason::SplitOutWithoutDecision,
+        HoldReason::MergedWithoutDecision,
+    ] {
+        let html = corrected_card_page(Some(hold));
+        assert!(!html.contains(SHIPS), "{hold:?}: {html}");
+        assert!(html.contains("class=\"engine-state held\""), "{hold:?}");
+        assert!(
+            html.contains("corrected, held until you decide it"),
+            "{hold:?}"
+        );
+        assert!(
+            html.contains("held from export until you decide it"),
+            "{hold:?}: {html}"
+        );
+        assert!(!html.contains("set its severity"), "{hold:?}: {html}");
+    }
+    let clear = corrected_card_page(None);
+    assert!(clear.contains(SHIPS), "{clear}");
+    assert!(clear.contains("class=\"engine-state corrected\""));
+}

@@ -18,9 +18,20 @@ use super::{Finding, ScanReport};
 use crate::report_export::strip_zero_width;
 use camerata_api_types::audit::FindingKind;
 
+/// [`redact_visible`] for text a CLIENT receives: also masks a published documentation key
+/// (see `camerata_secrets::redact_str_for_client`). Never use it for model input.
+pub(crate) fn redact_visible_for_client(text: &str) -> Cow<'_, str> {
+    let clean = strip_zero_width(text);
+    match camerata_secrets::redact_str_for_client(&clean) {
+        Cow::Owned(redacted) => Cow::Owned(redacted),
+        Cow::Borrowed(_) => clean,
+    }
+}
+
 /// `text` with zero-width characters stripped, then with every secret value replaced by its
-/// redacted form. Stripping FIRST means a zero-width character inserted inside a key cannot hide
-/// it from the detector while a reader still sees the key. Borrows when nothing changed.
+/// redacted form. This is the MODEL-side redaction: a published documentation key stays readable.
+/// Stripping FIRST means a zero-width character inserted inside a key cannot hide it from the
+/// detector while a reader still sees the key. Borrows when nothing changed.
 pub(crate) fn redact_visible(text: &str) -> Cow<'_, str> {
     let clean = strip_zero_width(text);
     let redacted = match camerata_secrets::redact_str(&clean) {
@@ -36,7 +47,7 @@ pub(crate) fn redact_string(text: &mut String) -> usize {
     if let Cow::Owned(clean) = strip_zero_width(text) {
         *text = clean;
     }
-    let redacted = camerata_secrets::redact(text);
+    let redacted = camerata_secrets::redact_for_client(text);
     let count = redacted.redactions.len();
     if count > 0 {
         *text = redacted.text;
@@ -87,7 +98,37 @@ pub(crate) fn redact_findings(findings: &mut [Finding]) -> usize {
 /// before the cap means a cap can never cut a secret in half and leave a prefix plus a partial
 /// body that neither the redactor nor the release gate could recognise.
 pub(crate) fn snippet_from_line(line: &str, max: usize) -> String {
-    redact_visible(line.trim()).chars().take(max).collect()
+    redact_visible_for_client(line.trim())
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// [`snippet_from_line`] that, when the redacted line is longer than `max`, shows a window of
+/// `max` characters around the first redacted value instead of the head of the line: on a
+/// minified 100 KB line the head says nothing about the secret. Still redacted first, still at
+/// most `max` characters, and the masked form is always whole inside the window. A line with no
+/// redacted value (a hit from a rule that is not secret-shaped) keeps the head of the line.
+pub(crate) fn snippet_around_secret(line: &str, max: usize) -> String {
+    let trimmed = line.trim();
+    let clean = strip_zero_width(trimmed);
+    if clean.chars().count() <= max {
+        return snippet_from_line(line, max);
+    }
+    let redacted = camerata_secrets::redact_for_client(&clean);
+    let Some(first) = redacted.redactions.first() else {
+        return snippet_from_line(line, max);
+    };
+    // Nothing before the first value changed, so its byte start is the same in the output.
+    let start_byte = first.span.start.min(redacted.text.len());
+    let at = redacted.text[..start_byte].chars().count();
+    let form = first.form.chars().count();
+    let lead = if form >= max {
+        0
+    } else {
+        ((max - form) / 2).min(at)
+    };
+    redacted.text.chars().skip(at - lead).take(max).collect()
 }
 
 /// Redact every model-written string of a deep-tier report: the lens prose and error, the SOC-2

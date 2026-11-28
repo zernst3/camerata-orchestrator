@@ -794,6 +794,8 @@ fn the_fix_plan_lists_only_fixes_and_rules_checked_never_calls_a_convention_a_pr
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "cursor".to_string(),
         convention_label: "Cursor pagination".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     report.findings.push(convention);
     report
@@ -834,4 +836,251 @@ fn the_fix_plan_lists_only_fixes_and_rules_checked_never_calls_a_convention_a_pr
         !result.starts_with("Found"),
         "a convention is not a place with a problem: {result:?}"
     );
+}
+
+// ── the convention model's wording (design 2026-11-20, sections 7 and 11, tests 17 to 19) ──
+
+mod convention_wording {
+    use camerata_api_types::audit::{
+        ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, ObservedOptionUsage,
+        StandardSource,
+    };
+
+    use super::*;
+
+    fn rule_row(rule: &str, path: &str, kind: FindingKind) -> crate::onboard::Finding {
+        let mut f = sql_row(path, 5);
+        f.rule_id = rule.to_string();
+        f.severity = "low".to_string();
+        f.kind = Some(kind);
+        f
+    }
+
+    fn deviation(source: Option<StandardSource>, differs: Option<&str>) -> FindingKind {
+        FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(5),
+            convention_option_id: Some("a".into()),
+            convention_label: "Option A".into(),
+            standard_source: source,
+            differs_from_default: differs.map(str::to_string),
+            following_sites: Some(3),
+        })
+    }
+
+    /// A departure of a rule where 6 of 9 places follow the standard, 1 departs and 2 follow the
+    /// rule's default (the standard is only observed): "8 of 9" would be untrue.
+    fn deviation_a2() -> FindingKind {
+        FindingKind::Deviation(DeviationKind {
+            deviating_sites: 1,
+            assessed_sites: Some(9),
+            convention_option_id: Some("a".into()),
+            convention_label: "Option A".into(),
+            standard_source: None,
+            differs_from_default: Some("Option B".into()),
+            following_sites: Some(6),
+        })
+    }
+
+    fn workbook_with(rows: Vec<crate::onboard::Finding>) -> Vec<u8> {
+        let mut report = mixed_sealed().into_inner();
+        for r in &rows {
+            report.provenance.audited_rule_ids.push(r.rule_id.clone());
+        }
+        report.findings.extend(rows);
+        workbook_of(&apply_overlay(&report.seal(), &[], &[], &[]), false)
+    }
+
+    fn departures_cell(xlsx: &[u8], rule: &str) -> String {
+        let t = table(xlsx, v::DEPARTURES);
+        let at = (1..t.len())
+            .find(|r| cell_of(&t, *r, v::H_RULE_ID) == rule)
+            .unwrap_or_else(|| panic!("no departure row for {rule}: {t:?}"));
+        cell_of(&t, at, v::H_CONVENTION_SOURCE).to_string()
+    }
+
+    fn conventions_row(xlsx: &[u8], rule: &str) -> (String, String) {
+        let t = table(xlsx, v::YOUR_CONVENTIONS);
+        let at = (1..t.len())
+            .find(|r| cell_of(&t, *r, v::H_RULE_ID) == rule)
+            .unwrap_or_else(|| panic!("no convention row for {rule}: {t:?}"));
+        (
+            cell_of(&t, at, v::H_HOW_CONSISTENTLY).to_string(),
+            cell_of(&t, at, v::H_WHAT_YOUR_CODE_DOES).to_string(),
+        )
+    }
+
+    /// Test 17: the observed, reviewer and open question wordings, and the untouched split.
+    #[test]
+    fn the_sheets_use_the_wording_of_the_observed_reviewer_open_and_split_cases() {
+        let xlsx = workbook_with(vec![
+            rule_row("ARCH-OBS-1", "src/o1.rs", deviation(None, Some("Option B"))),
+            rule_row("ARCH-OBS-1", "src/o2.rs", deviation(None, Some("Option B"))),
+            rule_row(
+                "ARCH-REV-1",
+                "src/r1.rs",
+                deviation(Some(StandardSource::Reviewer), None),
+            ),
+            rule_row(
+                "ARCH-REV-1",
+                "src/r2.rs",
+                deviation(Some(StandardSource::Reviewer), None),
+            ),
+            rule_row(
+                "ARCH-SETREV-1",
+                "src/s.rs",
+                FindingKind::ConventionObserved(ConventionObservedKind {
+                    convention_option_id: "a".into(),
+                    convention_label: "Option A".into(),
+                    standard_source: Some(StandardSource::Reviewer),
+                    differs_from_default: None,
+                }),
+            ),
+            rule_row(
+                "ARCH-OPEN-1",
+                "",
+                FindingKind::NoConvention(NoConventionKind {
+                    observed_options: vec![
+                        ObservedOptionUsage {
+                            option_id: "a".into(),
+                            label: "Option A".into(),
+                            sites: Some(3),
+                        },
+                        ObservedOptionUsage {
+                            option_id: "b".into(),
+                            label: "Option B".into(),
+                            sites: Some(1),
+                        },
+                    ],
+                    left_to_client: true,
+                }),
+            ),
+            rule_row(
+                "ARCH-SPLIT-1",
+                "",
+                FindingKind::NoConvention(NoConventionKind {
+                    observed_options: vec![],
+                    left_to_client: false,
+                }),
+            ),
+        ]);
+        let obs = departures_cell(&xlsx, "ARCH-OBS-1");
+        assert!(
+            obs.contains("Observed in your code: 3 of 5 places follow it. 2 places depart. Differs from the rule's default: Option B."),
+            "{obs}"
+        );
+        // The count of places that follow is the standard option's own (design test 17, A2).
+        let a2 = workbook_with(vec![rule_row("ARCH-A2-1", "src/a2.rs", deviation_a2())]);
+        let cell = departures_cell(&a2, "ARCH-A2-1");
+        assert!(
+            cell.contains("Observed in your code: 6 of 9 places follow it. 1 place departs."),
+            "{cell}"
+        );
+        assert!(!cell.contains("8 of 9"), "{cell}");
+        let rev = departures_cell(&xlsx, "ARCH-REV-1");
+        assert!(
+            rev.contains("Convention set by the reviewer: Option A. 2 places depart."),
+            "{rev}"
+        );
+        let (status, _) = conventions_row(&xlsx, "ARCH-SETREV-1");
+        assert_eq!(
+            status,
+            crate::xlsx_export::CONVENTION_STATUS_SET_BY_REVIEWER
+        );
+        let (status, what) = conventions_row(&xlsx, "ARCH-OPEN-1");
+        assert_eq!(status, crate::xlsx_export::CONVENTION_STATUS_OPEN_QUESTION);
+        assert!(
+            what.contains("Option A (3 places)") && what.contains("Option B (1 place)"),
+            "{what}"
+        );
+        let (status, _) = conventions_row(&xlsx, "ARCH-SPLIT-1");
+        assert_eq!(status, crate::xlsx_export::CONVENTION_STATUS_NONE_ADOPTED);
+    }
+
+    /// Review item 5: the standard's source is worded by its true origin.
+    #[test]
+    fn the_standard_source_is_worded_by_where_it_really_came_from() {
+        for (source, expect) in [
+            (
+                StandardSource::RuleDefault,
+                "Convention taken from the rule's default: Option A.",
+            ),
+            (
+                StandardSource::EarlierChoice,
+                "Convention taken from the option your project chose earlier: Option A.",
+            ),
+            (
+                StandardSource::MostCommon,
+                "Convention taken from the option most places follow: Option A.",
+            ),
+        ] {
+            let xlsx = workbook_with(vec![rule_row(
+                "ARCH-SRC-1",
+                "src/s.rs",
+                deviation(Some(source), None),
+            )]);
+            let cell = departures_cell(&xlsx, "ARCH-SRC-1");
+            assert!(cell.contains(expect), "{source:?}: {cell}");
+        }
+    }
+
+    /// Test 18: an open question lists every option of the rule from the corpus (label, directive,
+    /// why, places) and marks none.
+    #[test]
+    fn an_open_question_lists_every_option_with_directive_and_why() {
+        let mut rule = camerata_rules::bare_rule("ARCH-OPEN-1", "universal");
+        for (id, label) in [("a", "Option A"), ("b", "Option B")] {
+            rule.options.push(camerata_rules::RuleOption {
+                id: id.into(),
+                label: label.into(),
+                directive: format!("Use {label}."),
+                why: format!("{label} is simpler."),
+                remediation: None,
+                finding_headline: None,
+                finding_detail: None,
+                escalation: None,
+                effort: None,
+                violates: false,
+            });
+        }
+        let mut corpus = camerata_rules::RuleSet::default();
+        corpus.push(rule);
+        let mut report = mixed_sealed().into_inner();
+        report
+            .provenance
+            .audited_rule_ids
+            .push("ARCH-OPEN-1".into());
+        report.findings.push(rule_row(
+            "ARCH-OPEN-1",
+            "",
+            FindingKind::NoConvention(NoConventionKind {
+                observed_options: vec![ObservedOptionUsage {
+                    option_id: "a".into(),
+                    label: "Option A".into(),
+                    sites: Some(3),
+                }],
+                left_to_client: true,
+            }),
+        ));
+        let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+        let options = ReportOptions {
+            internal: false,
+            ..client_options()
+        };
+        let xlsx = crate::xlsx_export::build_workbook(&reviewed, Some(&corpus), &options).unwrap();
+        let (_, what) = conventions_row(&xlsx, "ARCH-OPEN-1");
+        assert!(
+            what.contains("Option A: Use Option A. Why: Option A is simpler. (3 places)"),
+            "{what}"
+        );
+        assert!(
+            what.contains("Option B: Use Option B. Why: Option B is simpler."),
+            "{what}"
+        );
+        let t = table(&xlsx, v::YOUR_CONVENTIONS);
+        let at = (1..t.len())
+            .find(|r| cell_of(&t, *r, v::H_RULE_ID) == "ARCH-OPEN-1")
+            .unwrap();
+        assert!(!cell_of(&t, at, v::H_HOW_CONSISTENTLY).contains("recommend"));
+    }
 }

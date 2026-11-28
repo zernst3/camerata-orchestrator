@@ -49,6 +49,7 @@ impl Scripted {
             Mode::Malformed => Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: "I could not produce JSON for this.".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -142,6 +143,7 @@ fn args(repo: &Path, export: &Path, client_engagement: bool) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 
@@ -253,7 +255,7 @@ async fn the_internal_export_of_an_unreachable_run_is_written_marked_and_gate_re
         serde_json::from_str(&zip_entry(&export, "manifest.json")).unwrap();
     assert_eq!(manifest["inspection"]["run_incomplete"], true);
     assert!(zip_entry(&export, "README.txt").contains("INTERNAL INCOMPLETE"));
-    assert!(zip_entry(&export, "findings.json").contains("INTERNAL INCOMPLETE"));
+    assert!(zip_entry(&export, "json/inspection.json").contains("INTERNAL INCOMPLETE"));
     // `camerata release-gate <zip>` refuses it.
     let bytes = std::fs::read(&export).unwrap();
     assert!(!camerata_server::release_gate::audit_zip(&bytes, None).is_clean());

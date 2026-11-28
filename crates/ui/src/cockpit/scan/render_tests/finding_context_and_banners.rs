@@ -107,7 +107,7 @@ fn scan_repos_button_is_off_for_a_deleted_source_and_says_why() {
     };
     let blocked = render(Some(deleted_block()));
     assert!(
-        button_tag_labelled(&blocked, "Scan repos").contains("disabled"),
+        button_tag_labelled(&blocked, "Propose rules").contains("disabled"),
         "{blocked}"
     );
     assert!(blocked.contains(
@@ -115,7 +115,7 @@ fn scan_repos_button_is_off_for_a_deleted_source_and_says_why() {
         ));
     let open = render(None);
     assert!(
-        !button_tag_labelled(&open, "Scan repos").contains("disabled"),
+        !button_tag_labelled(&open, "Propose rules").contains("disabled"),
         "{open}"
     );
     assert!(!open.contains("was deleted"));
@@ -171,18 +171,15 @@ fn onboard_view_renders_findings_with_deleted_source_and_disabled_rescan_control
     vdom.rebuild_in_place();
     let html = dioxus_ssr::render(&vdom);
     // The review surface is still there: a deleted source does not hide it (the report,
-    // its rules table and the audit panel render), it only switches the source-needing
+    // its rules table and the inspection panel render), it only switches the source-needing
     // controls off.
-    assert!(
-        html.contains("Step 2 — audit the code against your selected rules"),
-        "{html}"
-    );
+    assert!(html.contains("2. Inspect"), "{html}");
     assert!(html.contains("findings-toolbar"));
     // Every control that needs the source says why and is off.
     assert!(html.contains("Source for acme/app was deleted on 24 Oct 2026."));
     assert!(
-        button_tag_labelled(&html, "Audit code against selected rules").contains("disabled"),
-        "audit"
+        button_tag_labelled(&html, "Inspect code against selected rules").contains("disabled"),
+        "inspect"
     );
     assert!(
         button_tag_labelled(&html, "Add rules to repo(s) (branch + push)").contains("disabled"),
@@ -231,6 +228,34 @@ fn the_existing_degraded_reasons_still_render_one_line() {
     }));
     assert!(html.contains("finding-ctx-degraded"));
     assert!(html.contains("file not found"));
+}
+
+#[test]
+fn an_unlinked_repo_says_so_in_plain_words_never_file_not_found() {
+    // The server's own reason is shown as sent; an empty one gets the UI's words.
+    for (reason, expected) in [
+        (
+            "acme/app is not linked to this project, so its code cannot be shown.",
+            "acme/app is not linked to this project, so its code cannot be shown.",
+        ),
+        (
+            "acme/app has no local folder at /work/acme/app. Set its folder in Settings.",
+            "acme/app has no local folder at /work/acme/app. Set its folder in Settings.",
+        ),
+        (
+            "",
+            "This repo is not linked to a project, or it has no local folder.",
+        ),
+    ] {
+        let html = render_context(serde_json::json!({
+            "status": "repo_unlinked",
+            "reason": reason,
+        }));
+        assert!(html.contains("finding-ctx-degraded"), "{html}");
+        assert!(html.contains(expected), "{reason:?}: {html}");
+        assert!(!html.contains("file not found"), "{reason:?}: {html}");
+        assert!(!html.contains("changed since scan"), "{reason:?}: {html}");
+    }
 }
 
 // ── Tier-1 render: DeterministicProgress (props-only, no context) ──────────
@@ -968,6 +993,7 @@ pub(super) fn recommendation(
     operator_chosen: bool,
 ) -> RuleRecommendationView {
     RuleRecommendationView {
+        repo: String::new(),
         recommended_option_id: option_id.to_string(),
         recommendation_reasoning: reasoning.to_string(),
         hallucinated,
@@ -986,6 +1012,7 @@ pub(super) fn recommendation_with_evidence(
     applicable: bool,
 ) -> RuleRecommendationView {
     RuleRecommendationView {
+        repo: String::new(),
         recommended_option_id: option_id.to_string(),
         recommendation_reasoning: reasoning.to_string(),
         hallucinated: false,

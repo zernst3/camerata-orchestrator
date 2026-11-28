@@ -69,6 +69,7 @@ impl LlmPort for Recorder {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),
@@ -197,6 +198,7 @@ async fn by_default_the_fix_stage_calls_haiku_at_the_named_effort() {
 async fn an_explicit_fix_model_wins_over_the_switch_in_both_positions() {
     for efficiency in [EfficiencyConfig::default(), switch_off()] {
         let controls = RunControls {
+            scope: Default::default(),
             efficiency,
             fix_model: Some("explicit-fix-model".to_string()),
             ..RunControls::default()
@@ -219,6 +221,7 @@ async fn an_explicit_fix_model_wins_over_the_switch_in_both_positions() {
 async fn an_explicit_haiku_pick_gets_the_same_effort_with_the_switch_on_or_off() {
     for efficiency in [EfficiencyConfig::default(), switch_off()] {
         let controls = RunControls {
+            scope: Default::default(),
             efficiency,
             fix_model: Some(FIX_STAGE_HAIKU_MODEL.to_string()),
             ..RunControls::default()
@@ -244,6 +247,7 @@ async fn a_capped_default_run_is_admitted_and_fix_spend_uses_haiku_rates() {
         ..Recorder::default()
     };
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(50.0),
         ..RunControls::default()
     };
@@ -293,6 +297,7 @@ async fn a_capped_default_run_is_admitted_and_fix_spend_uses_haiku_rates() {
 #[tokio::test]
 async fn a_blank_explicit_fix_model_counts_as_unset() {
     let controls = RunControls {
+        scope: Default::default(),
         fix_model: Some("   ".to_string()),
         ..RunControls::default()
     };
@@ -314,6 +319,7 @@ async fn a_blank_explicit_fix_model_counts_as_unset() {
 #[tokio::test]
 async fn switch_off_reproduces_the_pre_rank_10_fix_model_exactly() {
     let off = || RunControls {
+        scope: Default::default(),
         efficiency: switch_off(),
         ..RunControls::default()
     };

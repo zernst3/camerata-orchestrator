@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-USER-METADATA-1"
-version = 6
+version = 7
 title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
 domain = "supabase:rls"
 layer = "platform"
@@ -24,7 +24,7 @@ candidates = { locator = "sql_policies_routines_and_views" }
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a match over CREATE POLICY statement bodies: the literal tokens `user_metadata` or `raw_user_meta_data` appearing inside a policy's USING or WITH CHECK clause (whether reached via auth.jwt() or a join against auth.users) are flagged. This match is near-zero false-positive — there is no legitimate reason for a policy predicate to read user-editable profile data as an authorization input — which is why this rule is a floor-port candidate (mechanical, always-block-worthy) rather than merely advisory. Conformance holds when no policy predicate anywhere in the corpus references either token."
+qualifies = "Enforced by a match over CREATE POLICY statement bodies: the literal tokens `user_metadata` or `raw_user_meta_data` appearing inside a policy's USING or WITH CHECK clause (whether reached via auth.jwt() or a join against auth.users) are flagged. This match is near-zero false-positive (there is no legitimate reason for a policy predicate to read user-editable profile data as an authorization input), which is why this rule is a floor-port candidate (mechanical, always-block-worthy) rather than merely advisory. Conformance holds when no policy predicate anywhere in the corpus references either token."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
@@ -41,15 +41,15 @@ why = """
 Supabase's own Row Level Security guide explicitly warns that relying on the `user_metadata` claim
 (and its underlying `raw_user_meta_data` column on auth.users) in an RLS policy "can create
 security issues" because that field is updatable by the authenticated user themselves via the
-standard update-user-metadata API — it is profile data, not a server-issued claim. A policy that
+standard update-user-metadata API. It is profile data, not a server-issued claim. A policy that
 reads `(auth.jwt() -> 'user_metadata' ->> 'is_admin')::boolean` or joins to
 `auth.users.raw_user_meta_data` for an authorization decision lets any authenticated user grant
 themselves that privilege with a single API call: this is CWE-269 (Improper Privilege Management)
-in its most literal form — the actor sets their own privilege level.
+in its most literal form. The actor sets their own privilege level.
 
 The match-set is a single token check inside a CREATE POLICY body: `user_metadata` or
 `raw_user_meta_data` appearing anywhere in USING/WITH CHECK. There is no legitimate use of either
-field as an authorization input — Supabase's correct pattern is a separate, non-user-writable table
+field as an authorization input: Supabase's correct pattern is a separate, non-user-writable table
 (e.g. a `user_roles` table only service-role or an admin policy can write) or the JWT's
 `app_metadata` claim, which ordinary users cannot edit. Because the match has no known benign use
 and requires no cross-file replay (it is a fact about a single CREATE POLICY statement), it is a

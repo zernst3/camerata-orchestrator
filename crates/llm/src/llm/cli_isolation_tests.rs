@@ -21,6 +21,8 @@ fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<String> {
 
 fn build(req: &LlmRequest) -> tokio::process::Command {
     build_cli_command(req, "claude-haiku-5-5", "sid")
+        .unwrap()
+        .cmd
 }
 
 #[test]
@@ -142,7 +144,9 @@ fn no_request_shape_can_leave_the_working_directory_inherited() {
         ]),
     ];
     for req in requests {
-        let cmd = build_cli_command(&req, "claude-sonnet-5-5", "sid");
+        let cmd = build_cli_command(&req, "claude-sonnet-5-5", "sid")
+            .unwrap()
+            .cmd;
         let dir = cmd
             .as_std()
             .get_current_dir()

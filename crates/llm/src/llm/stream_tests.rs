@@ -358,3 +358,70 @@ async fn a_server_that_never_answers_within_the_idle_window_is_a_stall() {
     assert_eq!(*waits.0.lock().unwrap(), vec![2], "a stall is retried once");
     assert_eq!(ledger.snapshot().calls, 0, "nothing was billed as a reply");
 }
+
+/// Every backend call comes back stamped with how long it took (run figures): the streamed API
+/// leg and the non-streaming `complete` that delegates to it.
+#[tokio::test]
+async fn a_streamed_reply_carries_its_elapsed_time() {
+    let body = format!(
+        "{}{}{}",
+        start(10),
+        text("{\"findings\":[]}"),
+        finish("end_turn", 20)
+    );
+    let server = server_with(vec![sse(body.clone()), sse(body)]).await;
+    let waits = Arc::new(Waits::default());
+    let (llm, _ledger) = llm_at(&server, &waits);
+    let streamed = llm
+        .complete_streaming(request(1_000), &mut |_: &str| {})
+        .await
+        .unwrap();
+    assert!(streamed.elapsed_ms.is_some(), "the streamed call is timed");
+    let plain = llm.complete(request(1_000)).await.unwrap();
+    assert!(plain.elapsed_ms.is_some(), "the plain call is timed");
+}
+
+#[test]
+fn stamp_elapsed_times_a_reply_and_leaves_a_failure_alone() {
+    let started = std::time::Instant::now() - std::time::Duration::from_millis(250);
+    let ok = stamp_elapsed(
+        Ok(LlmResponse {
+            text: String::new(),
+            model: "m".to_string(),
+            backend: "api".to_string(),
+            cost_usd: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+            reported_model: None,
+            cli_cost_usd: None,
+            elapsed_ms: None,
+        }),
+        started,
+    )
+    .unwrap();
+    assert!(ok.elapsed_ms.unwrap() >= 250);
+    assert!(stamp_elapsed(Err(anyhow::anyhow!("down")), started).is_err());
+}
+
+/// A failed call waited too: the typed failure carries how long, for the stage's run figures.
+#[tokio::test]
+async fn a_failed_call_carries_the_time_it_waited() {
+    let bad = ResponseTemplate::new(400).set_body_json(
+        json!({"type":"error","error":{"type":"invalid_request_error","message":"bad"}}),
+    );
+    let server = server_with(vec![bad]).await;
+    let waits = Arc::new(Waits::default());
+    let (llm, _) = llm_at(&server, &waits);
+    let err = llm
+        .complete_streaming(request(4_096), &mut |_| {})
+        .await
+        .expect_err("400 is terminal");
+    assert!(
+        crate::failure::elapsed_ms_of(&err).is_some(),
+        "the failure is timed: {err}"
+    );
+}

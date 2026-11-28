@@ -79,6 +79,7 @@ mod tests {
             &LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: String::new(),
                 model: "m".to_string(),
                 backend: "api".to_string(),

@@ -208,3 +208,66 @@ fn the_refusal_names_the_absorbed_sites_that_failed() {
         problems[0].message
     );
 }
+
+// ---- #546: a finding on a file the repo does not have is held, then released by a decision ----
+
+/// A finding about an absence cites a path that is not there, with no cited line: the exempt
+/// shape the evidence check used to pass without looking the file up.
+fn absence_row() -> Finding {
+    Finding {
+        repo: "acme/portal".to_string(),
+        path: "SECURITY.md".to_string(),
+        line: 0,
+        rule_id: "AI-NO-SECURITY-POLICY".to_string(),
+        severity: "low".to_string(),
+        snippet: "no security policy is published".to_string(),
+        detail: "The repository has no security policy.".to_string(),
+        ..Finding::default()
+    }
+}
+
+/// The row as the scan leaves it: through the real evidence check, against files that do not
+/// include the cited one.
+fn checked_absence_row() -> Finding {
+    let mut rows = vec![absence_row()];
+    let files = vec![(
+        "lib/supabase/admin.ts".to_string(),
+        "db.query(sql)\n".to_string(),
+    )];
+    crate::onboard::evidence_check::verify_evidence(&mut rows, &files, None);
+    rows.remove(0)
+}
+
+#[test]
+fn a_missing_file_finding_is_refused_on_a_client_export_then_passes_after_a_decision() {
+    let row = checked_absence_row();
+    assert!(
+        row.captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE),
+        "the scan marks it: {:?}",
+        row.captures
+    );
+    let package = package_with(report_with(row.clone()), &HashMap::new());
+    match release(package) {
+        Err(ReleaseError::Blocked(failure)) => {
+            let problems = evidence_problems(&failure);
+            assert_eq!(problems.len(), 1, "{:?}", failure.report);
+            assert!(
+                problems[0].message.contains("SECURITY.md"),
+                "{}",
+                problems[0].message
+            );
+        }
+        other => panic!("an undecided missing-file row must block the release: {other:?}"),
+    }
+    let dispositions = HashMap::from([(
+        finding_key(&row),
+        DispositionWire {
+            state: "Confirmed".to_string(),
+            reason: "no policy; confirmed".to_string(),
+            ..DispositionWire::default()
+        },
+    )]);
+    let package = package_with(report_with(row), &dispositions);
+    let released = release(package);
+    assert!(released.is_ok(), "{:?}", released.err());
+}

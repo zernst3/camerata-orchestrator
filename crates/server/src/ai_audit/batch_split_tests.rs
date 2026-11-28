@@ -19,6 +19,7 @@ fn ok_reply() -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: "{\"findings\":[]}".to_string(),
         model: "stub".to_string(),
         backend: "stub".to_string(),
@@ -265,6 +266,7 @@ fn git_repo() -> tempfile::TempDir {
 fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
     use crate::run_store::{ModelsRecord, NewRun, RunOrigin, RunStore};
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: ModelsRecord {
@@ -276,6 +278,8 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: MODEL.to_string(),

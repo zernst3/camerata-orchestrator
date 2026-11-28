@@ -83,6 +83,9 @@ fn deviation() -> FindingKind {
         assessed_sites: Some(5),
         convention_option_id: None,
         convention_label: "the observed convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     })
 }
 
@@ -94,6 +97,7 @@ fn report_with(findings: Vec<Finding>) -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["owner/repo".to_string()],
@@ -149,7 +153,7 @@ fn report_with(findings: Vec<Finding>) -> ScanReport {
     }
 }
 
-/// The severity `findings.json` (the product export's row table, built by the same
+/// The severity `json/inspection.json` (the product export's row table, built by the same
 /// `partition_rows` the workbook, CSV and JSON exports use) carries for a one-finding report.
 fn exported_xlsx_severity(f: &Finding, corpus: &camerata_rules::RuleSet) -> String {
     let report = report_with(vec![f.clone()]).seal();
@@ -170,7 +174,7 @@ fn exported_xlsx_severity(f: &Finding, corpus: &camerata_rules::RuleSet) -> Stri
     assert_eq!(
         rows.len(),
         1,
-        "{} must export exactly one findings.json row; a dropped row is not an agreement",
+        "{} must export exactly one json/inspection.json row; a dropped row is not an agreement",
         f.rule_id
     );
     rows[0]["severity"].as_str().unwrap().to_string()
@@ -335,7 +339,7 @@ async fn bounding_the_real_corpus_twice_changes_nothing() {
 }
 
 /// THE requirement: for the same finding, the severity the live scan carries equals the
-/// severity every export artifact bills. Checked against `findings.json` (the shared
+/// severity every export artifact bills. Checked against `json/inspection.json` (the shared
 /// `partition_rows` behind the workbook, CSV and JSON) for every rule that declares any bound,
 /// every proposed severity and both accusing kinds, and against the PDF for Defects.
 #[tokio::test]
@@ -361,7 +365,7 @@ async fn live_and_export_severities_agree_for_every_bounded_rule() {
                 assert_eq!(
                     exported_xlsx_severity(&proposed, &corpus),
                     live.severity,
-                    "{rule_id} ({}) proposed {sev:?}: findings.json and the live scan disagree",
+                    "{rule_id} ({}) proposed {sev:?}: json/inspection.json and the live scan disagree",
                     kind.tag()
                 );
                 // The export applied to an ALREADY-bounded finding is the backstop path; it
@@ -401,14 +405,14 @@ fn unlocated(rule_id: &str, severity: &str, kind: Option<FindingKind>) -> Findin
 /// C4-R1 (an unlocated above-informational finding is `info`) used to run in the PDF only, so
 /// the same unlocated finding was `high` in the live scan and the workbook and `info` in the
 /// PDF. It is now part of the shared bound chain (floor, C4-R1, ceilings), so all four surfaces
-/// agree: the live scan, `findings.json` (the `partition_rows` behind the workbook, CSV and
+/// agree: the live scan, `json/inspection.json` (the `partition_rows` behind the workbook, CSV and
 /// JSON) and the PDF.
 ///
 /// Covers every real-corpus rule that declares any bound plus a rule that declares none, every
 /// proposed severity, and every kind (defect, deviation, kindless), so the order the three
 /// stages run in is exercised against the corpus's real floors and ceilings.
 ///
-/// FAILS BEFORE THE FIX: the live scan and `findings.json` kept the producer's severity for an
+/// FAILS BEFORE THE FIX: the live scan and `json/inspection.json` kept the producer's severity for an
 /// unlocated row while the PDF said `info`.
 #[tokio::test]
 async fn live_and_export_severities_agree_for_unlocated_findings() {
@@ -452,7 +456,7 @@ async fn live_and_export_severities_agree_for_unlocated_findings() {
                 assert_eq!(
                     exported_xlsx_severity(&proposed, &corpus),
                     live.severity,
-                    "{rule_id} ({tag}) proposed {sev:?}: findings.json and the live scan disagree \
+                    "{rule_id} ({tag}) proposed {sev:?}: json/inspection.json and the live scan disagree \
                      on an unlocated finding"
                 );
                 // Fixed point: the export backstop over an already-bounded row changes nothing.

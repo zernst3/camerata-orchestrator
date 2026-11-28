@@ -40,6 +40,7 @@ pub fn build_report(
         recommendations: std::collections::HashMap::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         failed_passes: Vec::new(),
@@ -50,6 +51,9 @@ pub fn build_report(
 /// Escape a single field for RFC 4180 CSV: if the value contains a comma, double-quote,
 /// or newline, wrap it in double-quotes and double any internal double-quotes.
 pub(crate) fn csv_escape(field: &str) -> String {
+    // A cell a spreadsheet would run as a formula gets the leading apostrophe first.
+    let field = crate::csv_cell::neutralize(field);
+    let field = field.as_ref();
     if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
         let escaped = field.replace('"', "\"\"");
         format!("\"{escaped}\"")

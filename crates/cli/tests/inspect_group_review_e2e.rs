@@ -2,8 +2,8 @@
 //! END-TO-END, scripted model, zero spend: `camerata inspect` runs the group reviewer (stage 2)
 //! after the scan, over the planted findings of the shared fixture repo.
 //!
-//! * the group reviewer is asked on the model the `--group-review-model` flag names (else Fable
-//!   5.1), never one from the environment;
+//! * the group reviewer is asked on the model the `--group-review-model` flag names (else Opus
+//!   5.5), never one from the environment;
 //! * the escalation settings (`--escalation-rate`, `--escalation-floor`) reach the budget;
 //! * the operator ledger and the printed summary state "Escalated N of a budget of B (...)";
 //! * what it said about a site is internal: no client export carries it.
@@ -60,6 +60,7 @@ impl LlmPort for Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: self.reply(&req),
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -145,6 +146,7 @@ fn args(repo: &Path, export: &Path) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 
@@ -189,7 +191,7 @@ async fn run(
     let mut findings_json = Vec::new();
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&export).unwrap()).unwrap();
     archive
-        .by_name("findings.json")
+        .by_name("json/inspection.json")
         .unwrap()
         .read_to_end(&mut findings_json)
         .unwrap();
@@ -238,17 +240,17 @@ async fn the_group_reviewer_runs_on_its_flag_and_the_ledger_states_the_budget() 
 
 #[tokio::test]
 #[serial_test::serial(process_env)]
-async fn with_no_flag_the_group_reviewer_runs_on_fable_and_the_environment_is_ignored() {
+async fn with_no_flag_the_group_reviewer_runs_on_opus_and_the_environment_is_ignored() {
     let Some((_, requests, findings_json, _)) = run(|_| {}).await else {
         return;
     };
     assert!(!requests.is_empty());
     for req in &requests {
-        assert_eq!(req.model, "claude-fable-5-2");
+        assert_eq!(req.model, "claude-opus-5-5");
         assert_ne!(req.model, "env-picked-model");
     }
     // This export is the operator's own (the project is not a client engagement). What the group
-    // reviewer said stays out of its findings.json, but for the one thing a row states: why it
+    // reviewer said stays out of its json/inspection.json, but for the one thing a row states: why it
     // was escalated, in the closed reason vocabulary.
     let text = String::from_utf8(findings_json).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).unwrap();

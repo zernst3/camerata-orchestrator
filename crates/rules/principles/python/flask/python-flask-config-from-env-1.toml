@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-CONFIG-FROM-ENV-1"
-version = 3
+version = 4
 title = "Flask configuration is loaded from environment variables or config objects; no secrets appear in source files"
 domain = "python:flask"
 layer = "framework"
@@ -7,7 +7,7 @@ enforcement = "mechanical"
 kind = "default_with_exceptions"
 inspectable = true
 default = true
-qualifies = "Enforced by Gitleaks or Bandit (B105/B106/B107) scanning for secret-pattern string literals in config files and Python source. Conformance holds when the CI secret-scan gate runs and no committed file contains a pattern matching an API key, password, private key, or token; it fails when no secret-scan gate covers Flask config files."
+qualifies = "Enforced by Gitleaks or Bandit (B105/B106/B107) scanning for secret-pattern string literals in config files and Python source. Conformance holds when the CI secret-scan gate runs and no committed file contains a pattern matching an API key, password, private key or token; it fails when no secret-scan gate covers Flask config files."
 verification = "grounded"
 
 [decision]

@@ -53,13 +53,13 @@ fn package_for(report: ScanReport) -> ProductPackage {
     .expect("the package assembles")
 }
 
-/// Every client-visible text of a package: the PDF's data, findings.json, every dataset, and the
+/// Every client-visible text of a package: the PDF's data, json/inspection.json, every dataset, and the
 /// workbook's cells and shared strings.
 fn every_surface(package: &ProductPackage) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     out.insert("PDF data".to_string(), package.data_json.clone());
     out.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         String::from_utf8_lossy(&package.findings_json).into_owned(),
     );
     for (name, bytes) in &package.datasets {
@@ -83,7 +83,7 @@ fn every_surface(package: &ProductPackage) -> BTreeMap<String, String> {
     out
 }
 
-/// The `also_locations` entries of every findings.json row.
+/// The `also_locations` entries of every json/inspection.json row.
 fn merged_sites(package: &ProductPackage) -> Vec<serde_json::Value> {
     let doc: serde_json::Value = serde_json::from_slice(&package.findings_json).expect("parses");
     doc["findings"]
@@ -103,7 +103,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
     p.value.lines().any(|line| haystack.contains(line))
 }
 
-/// A credential in a merged site's snippet and headline is redacted in findings.json, every CSV
+/// A credential in a merged site's snippet and headline is redacted in json/inspection.json, every CSV
 /// and JSON dataset, the workbook and the PDF's data, and the export clears the gate.
 #[test]
 fn a_credential_in_a_merged_site_is_redacted_in_every_client_file() {

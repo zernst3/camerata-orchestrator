@@ -94,7 +94,8 @@ struct Streak {
 /// What stopped the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutageTrigger {
-    /// `Transport` (a streak) or `AuthOrBilling` (one failure).
+    /// `Transport` (a streak), `AuthOrBilling` (one failure) or `RateLimited` (a wait that did
+    /// not clear in time).
     pub class: FailureClass,
     /// A plain sentence naming what happened. Operator only.
     pub detail: String,
@@ -102,11 +103,40 @@ pub struct OutageTrigger {
     pub at: String,
 }
 
+/// What the provider could not be reached for, as a clause after "the run stopped because".
+pub const STOP_PHRASE_UNREACHABLE: &str = "the model provider could not be reached";
+/// The same clause for a stop caused by a rate limit or an overload that did not clear.
+pub const STOP_PHRASE_RATE_LIMIT: &str =
+    "the model provider kept answering that it was over its rate limit or busy for 30 minutes";
+/// The same clause for a stop caused by an exhausted account.
+pub const STOP_PHRASE_BILLING: &str =
+    "the model provider refused the request for billing (credit balance)";
+
+impl OutageTrigger {
+    /// The clause that says why the run stopped: a credit stop reads as billing, a rate limit
+    /// that did not clear as such, any other stop as the provider not being reached. Operator
+    /// only: it ends up in the failed-part reasons of the operator ledger, and a client export is
+    /// refused while any exist.
+    pub fn phrase(&self) -> &'static str {
+        if self.class == FailureClass::RateLimited {
+            STOP_PHRASE_RATE_LIMIT
+        } else if self.class == FailureClass::AuthOrBilling
+            && camerata_llm::failure::is_exhausted_account_text(&self.detail)
+        {
+            STOP_PHRASE_BILLING
+        } else {
+            STOP_PHRASE_UNREACHABLE
+        }
+    }
+}
+
 /// The run-wide health counter. See the module docs for the rules.
 pub struct RunHealth {
     streak: Mutex<Streak>,
     stopped: AtomicBool,
     trigger: Mutex<Option<OutageTrigger>>,
+    /// How many model calls have succeeded in all, never reset ([`Self::successes`]).
+    successes: std::sync::atomic::AtomicU64,
     clock: Clock,
 }
 
@@ -136,6 +166,7 @@ impl RunHealth {
             streak: Mutex::new(Streak::default()),
             stopped: AtomicBool::new(false),
             trigger: Mutex::new(None),
+            successes: std::sync::atomic::AtomicU64::new(0),
             clock,
         }
     }
@@ -159,6 +190,13 @@ impl RunHealth {
     /// A model call succeeded: the provider is reachable, so the streak starts over.
     pub fn note_success(&self) {
         *self.streak_lock() = Streak::default();
+        self.successes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many model calls have succeeded so far. A call that waits out a rate limit reads it
+    /// before it starts and hands it back to [`Self::note_wait_exhausted`].
+    pub fn successes(&self) -> u64 {
+        self.successes.load(Ordering::SeqCst)
     }
 
     /// A model call failed after its retries, with `class`. `detail` is a short note for the
@@ -201,6 +239,25 @@ impl RunHealth {
         }
     }
 
+    /// A rate limit or an overload did not clear within the longest a call waits for one.
+    /// `successes_before` is [`Self::successes`] as the call started. If no call succeeded since,
+    /// the provider is answering but will not serve the run at all, and every piece would wait
+    /// the same time and fail the same way: stop the run, cleanly and resumable, as an outage
+    /// does, so the pieces in flight stop at their next check and no new piece starts. If some
+    /// call did succeed, the refusal is this piece's own (a request too large for the limit, say)
+    /// and the run goes on: only this piece fails, and a resume runs it again. Returns whether the
+    /// run was stopped.
+    pub fn note_wait_exhausted(&self, detail: &str, successes_before: u64) -> bool {
+        if self.successes() != successes_before {
+            return false;
+        }
+        self.trip(
+            FailureClass::RateLimited,
+            format!("a rate limit or overload did not clear in time (last: {detail})"),
+        );
+        true
+    }
+
     fn trip(&self, class: FailureClass, detail: String) {
         let mut trigger = self
             .trigger
@@ -214,6 +271,13 @@ impl RunHealth {
             });
         }
         self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// The clause that says why the run stopped ([`OutageTrigger::phrase`]); the plain
+    /// "could not be reached" clause while the run has not stopped.
+    pub fn stop_phrase(&self) -> &'static str {
+        self.trigger()
+            .map_or(STOP_PHRASE_UNREACHABLE, |t| t.phrase())
     }
 
     /// True once the run has stopped. New work is refused from here on.
@@ -254,7 +318,7 @@ impl OutageRecord {
         crate::cost_cap::not_run_failed_passes(
             &self.not_run_passes,
             &self.not_run_stages,
-            "the run stopped because the model provider could not be reached",
+            &format!("the run stopped because {}", self.trigger.phrase()),
         )
     }
 
@@ -291,6 +355,43 @@ mod tests {
             }
             h.note_failure(FailureClass::Transport, "x");
         }
+    }
+
+    #[test]
+    fn a_wait_that_ran_out_stops_the_run_only_if_no_call_succeeded_meanwhile() {
+        let (h, _) = health();
+        let before = h.successes();
+        h.note_success(); // another piece's call got through while this one waited
+        assert_eq!(h.successes(), before + 1);
+        assert!(!h.note_wait_exhausted("HTTP 429", before));
+        assert!(!h.is_stopped(), "the refusal is this piece's own");
+        assert!(h.trigger().is_none());
+        // With nothing succeeding since the call started, the same refusal stops the run.
+        assert!(h.note_wait_exhausted("HTTP 429", h.successes()));
+        assert!(h.is_stopped());
+    }
+
+    #[test]
+    fn a_rate_limit_that_did_not_clear_stops_the_run_and_says_so() {
+        let (h, _) = health();
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE, "not stopped yet");
+        assert!(h.note_wait_exhausted("HTTP 429: slow down", h.successes()));
+        assert!(h.is_stopped());
+        let trigger = h.trigger().expect("trigger");
+        assert_eq!(trigger.class, FailureClass::RateLimited);
+        assert!(trigger.detail.contains("slow down"));
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_RATE_LIMIT);
+        assert_eq!(
+            STOP_PHRASE_RATE_LIMIT,
+            "the model provider kept answering that it was over its rate limit or busy for 30 minutes"
+        );
+        // A real outage and a credit stop keep their own clauses.
+        let (h, now) = health();
+        transport_failures(&h, &now, 3, 90);
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE);
+        let (h, _) = health();
+        h.note_failure(FailureClass::AuthOrBilling, "credit balance is too low");
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_BILLING);
     }
 
     #[test]

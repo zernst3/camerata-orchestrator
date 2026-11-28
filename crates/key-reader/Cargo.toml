@@ -1,0 +1,22 @@
+[package]
+name = "camerata-key-reader"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# A tiny, rarely rebuilt helper: it reads the one Anthropic key entry from the macOS login
+# keychain and writes it to stdout, so the macOS "Always Allow" approval belongs to THIS
+# binary (whose hash changes only when this crate changes) and not to the engine (whose hash
+# changes on every rebuild). Keep it small and its dependencies minimal: every change to this
+# crate re-triggers the one-time approval. NEVER a dependency of any other crate.
+
+[[bin]]
+name = "camerata-key-reader"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.11"

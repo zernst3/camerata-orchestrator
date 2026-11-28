@@ -22,10 +22,16 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print(os.environ.get("FAKE_VERSION", "2.1.321 (Claude Code)"))
     sys.exit(0)
-prompt = args[args.index("-p") + 1] if "-p" in args else ""
-system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args else ""
+# The system prompt is a private file named by --system-prompt-file (it is too big for argv).
+system = ""
+if "--system-prompt-file" in args:
+    with open(args[args.index("--system-prompt-file") + 1]) as f:
+        system = f.read()
 if os.environ.get("CAMERATA_FAKE_WARM"):
     sys.exit(0)
+# The prompt arrives on stdin (`claude -p` with no prompt argument). Read after the warm-up exit: a
+# warm-up run has the test harness's stdin, which never ends.
+prompt = sys.stdin.read() if "-p" in args else ""
 def note(stage):
     down = os.environ.get("FAKE_503_STAGE_FILE", "")
     if down and os.path.exists(down) and open(down).read().strip() == stage:
@@ -145,6 +151,23 @@ async fn finished(state: &AppState, id: &str) -> crate::jobs::JobState {
     }
 }
 
+/// The fake `claude` of these rigs plays the engine's scan passes, and a new project runs the
+/// agent finder, so the engine rigs choose the engine finder explicitly.
+fn use_engine_finder(state: &AppState, project_id: &str) {
+    let project = state.projects.get(project_id).unwrap();
+    state
+        .projects
+        .set_review_settings(
+            project_id,
+            camerata_api_types::project::ReviewSettings {
+                finder: camerata_api_types::project::ProjectFinder::Engine,
+                ..project.review
+            },
+        )
+        .unwrap()
+        .unwrap();
+}
+
 fn stage_calls(log: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
@@ -224,6 +247,7 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         .projects
         .create("Resume", vec!["acme/one".to_string()])
         .unwrap();
+    use_engine_finder(&state, &project.id);
     state
         .projects
         .set_backend(&project.id, crate::project::ProjectBackend::Cli)
@@ -275,6 +299,10 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         Some(project.id.as_str()),
         "a scan started from the cockpit records the project it was started in"
     );
+    // The app's scan job records the wall-clock segment of its session (run figures).
+    let first_segments = record.segments.clone();
+    assert_eq!(first_segments.len(), 1, "{first_segments:?}");
+    assert!(first_segments[0].finished_unix_ms >= first_segments[0].started_unix_ms);
     let audit_calls_before = stage_calls(&log).iter().filter(|s| *s == "audit").count();
     assert!(audit_calls_before > 0);
 
@@ -360,6 +388,11 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     );
     let record = crate::run_store::read_record(&run_id).unwrap();
     assert_eq!(record.status, crate::run_store::RunStatus::Complete);
+    assert_eq!(record.segments.len(), 2, "the resume appended a segment");
+    assert_eq!(
+        record.segments[0], first_segments[0],
+        "the first segment is kept as it was"
+    );
 
     // ── A complete run: the plan says so and the resume endpoint starts nothing ───────────
     let plan = body_json(
@@ -447,6 +480,7 @@ fn saved_cockpit_run(
 ) -> Arc<crate::run_store::RunStore> {
     use crate::run_store as rs;
     rs::RunStore::create(rs::NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "listing-test".to_string(),
         repos: vec![(name.to_string(), dir.to_path_buf())],
         models: rs::ModelsRecord {
@@ -458,6 +492,8 @@ fn saved_cockpit_run(
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args,
@@ -477,6 +513,7 @@ fn saved_cockpit_run_in(
 ) -> Arc<crate::run_store::RunStore> {
     use crate::run_store as rs;
     rs::RunStore::create(rs::NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "listing-test".to_string(),
         repos: repos
             .iter()
@@ -491,6 +528,8 @@ fn saved_cockpit_run_in(
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args: serde_json::to_value(audit_request()).unwrap(),
@@ -837,6 +876,7 @@ async fn a_cockpit_scan_killed_mid_run_is_interrupted_and_run_what_remains_compl
         .projects
         .create("Killed", vec!["acme/one".to_string()])
         .unwrap();
+    use_engine_finder(&state, &project.id);
     state
         .projects
         .set_backend(&project.id, crate::project::ProjectBackend::Cli)
@@ -1123,14 +1163,19 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     state
         .settings
         .set_repo_path("acme/one", Some(repo.to_string_lossy().into_owned()));
-    if agent_finder {
+    // A new project runs the agent finder; the engine rigs choose the engine explicitly.
+    {
         let project = state.projects.get(&project.id).unwrap();
         state
             .projects
             .set_review_settings(
                 &project.id,
                 camerata_api_types::project::ReviewSettings {
-                    finder: camerata_api_types::project::ProjectFinder::Agent,
+                    finder: if agent_finder {
+                        camerata_api_types::project::ProjectFinder::Agent
+                    } else {
+                        camerata_api_types::project::ProjectFinder::Engine
+                    },
                     ..project.review
                 },
             )
@@ -1222,6 +1267,7 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
         .unwrap();
     std::fs::remove_file(&rig.group_review_down).unwrap();
     let calls_before = stage_calls(&rig.log).len();
+    let segments_before = crate::run_store::read_record(&rig.run_id).unwrap().segments;
 
     let resume = run_resume_start(
         State(rig.state.clone()),
@@ -1248,6 +1294,11 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
         stage_calls(&rig.log).len(),
         calls_before,
         "no model call was made"
+    );
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().segments,
+        segments_before,
+        "a refused resume leaves no segment of its own"
     );
 }
 
@@ -1279,7 +1330,7 @@ async fn resume_job(rig: &InterruptedScan) -> crate::jobs::JobState {
 }
 
 /// A run recorded on Fable 5.1, resumed in a project that has no pick of its own (it holds the
-/// built-in default, Fable 5.2), asks Fable 5.1 for its group review and says so on the run.
+/// built-in default, Opus 5.5), asks Fable 5.1 for its group review and says so on the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(process_env)]
 async fn a_cockpit_resume_with_no_group_review_pick_stays_on_the_recorded_model_and_says_so() {
@@ -1329,8 +1380,8 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
         .set_review_settings(
             &rig.project_id,
             camerata_api_types::project::ReviewSettings {
-                group_review_model: "claude-opus-5-5".to_string(),
-                ..camerata_api_types::project::ReviewSettings::default()
+                group_review_model: "claude-fable-5-2".to_string(),
+                ..camerata_api_types::project::ReviewSettings::legacy()
             },
         )
         .expect("the project exists")
@@ -1341,7 +1392,7 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
     assert_eq!(job.status, "failed", "{:?}", job.message);
     let why = job.message.clone().unwrap_or_default();
     assert!(
-        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        why.contains("claude-fable-5-1") && why.contains("claude-fable-5-2"),
         "{why}"
     );
     assert_eq!(
@@ -1604,6 +1655,48 @@ async fn a_server_scan_on_an_agent_project_runs_the_agent_finder() {
     );
 }
 
+/// Outside review Part 1 item 4, route level: an agent finder scan, started from the app, stops
+/// before any call or run spend when a rule file did not load, on both audit routes (the job and
+/// the synchronous one). This rig is an internal project; the command line test
+/// (`a_corrupt_rule_file_stops_every_agent_run_before_any_spend`) covers both kinds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn an_agent_scan_stops_on_both_audit_routes_when_a_rule_file_did_not_load() {
+    if !camerata_test_env::python3_on_path_for("an_agent_scan_stops_on_both_audit_routes") {
+        return;
+    }
+    let corpus = tempfile::tempdir().unwrap();
+    let dir = corpus.path().join("sec");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sec-corrupt-1.toml"),
+        "id = \"SEC-CORRUPT-1\"\n[[[ not toml",
+    )
+    .unwrap();
+    let _corpus = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
+    let rig = interrupted_scan_with_finder().await;
+    let message = rig.job.message.clone().unwrap_or_default();
+    assert_eq!(rig.job.status, "failed", "{message}");
+    assert!(
+        message.contains("SEC-CORRUPT-1") && message.contains("sec-corrupt-1.toml"),
+        "{message}"
+    );
+    assert!(
+        stage_calls(&rig.log).is_empty(),
+        "no model call: {:?}",
+        stage_calls(&rig.log)
+    );
+    let axum::Json(report) =
+        onboard_audit(State(rig.state.clone()), axum::Json(audit_request())).await;
+    let err = report.ai_error.clone().unwrap_or_default();
+    assert!(err.contains("SEC-CORRUPT-1"), "{err}");
+    assert!(
+        stage_calls(&rig.log).is_empty(),
+        "no model call: {:?}",
+        stage_calls(&rig.log)
+    );
+}
+
 #[test]
 fn a_resume_with_a_limit_raises_the_saved_runs_spend_limit() {
     let saved: AuditReq =
@@ -1678,4 +1771,260 @@ fn a_limit_that_is_not_a_positive_number_is_the_smallest_limit_never_no_limit() 
             "{bad} must not remove the guard"
         );
     }
+}
+
+// ---- Agent activity rows of the stages after the scan ----
+
+/// The group review shows in Agent activity on the saved background job path: its row is there
+/// (blocked, with the reason, because the fake model is down for it) and nothing is left running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_job_scan_shows_its_group_review_row_in_agent_activity() {
+    if !camerata_test_env::python3_on_path_for("a_job_scan_shows_its_group_review_row") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    let rows = rig.state.transcripts.get(crate::SCAN_AUDIT_KEY);
+    let review = rows
+        .iter()
+        .find(|r| r.role.starts_with("Group review ("))
+        .unwrap_or_else(|| panic!("no group review row: {rows:#?}"));
+    assert_eq!(review.status, "blocked", "{review:#?}");
+    assert!(
+        rows.iter().all(|r| r.status != "running"),
+        "no row is left running when the scan ends: {rows:#?}"
+    );
+}
+
+/// The same on the plain request path (`POST /api/onboard/audit`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_plain_request_scan_shows_its_group_review_row_in_agent_activity() {
+    if !camerata_test_env::python3_on_path_for("a_plain_request_scan_shows_its_group_review_row") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    // Start clean, so a row found afterwards is this request's own.
+    rig.state.transcripts.clear(crate::SCAN_AUDIT_KEY);
+    let _ = onboard_audit(State(rig.state.clone()), Json(audit_request())).await;
+    let rows = rig.state.transcripts.get(crate::SCAN_AUDIT_KEY);
+    assert!(
+        rows.iter().any(|r| r.role.starts_with("Group review (")),
+        "no group review row: {rows:#?}"
+    );
+    assert!(
+        rows.iter().all(|r| r.status != "running"),
+        "no row is left running when the scan ends: {rows:#?}"
+    );
+}
+
+// ---- the engine pin (V1 item 39): the build that starts an inspection finishes it ----
+
+/// A cockpit inspection saved on another build is not resumed on this one: the plan route
+/// returns the refusal in plain words, and "Run what remains" starts no job and makes no model
+/// call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_inspection_started_on_another_build_cannot_be_continued() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_inspection_started_on_another_build") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["pin"]["build"]["commit"] = serde_json::json!("1234567890abcdef1234567890abcdef12345678");
+    });
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let app = router(rig.state.clone());
+    let (status, plan) = get_json(app, &format!("/api/inspections/{}/plan", rig.run_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let refusal = plan["refusal"].as_str().unwrap_or_default();
+    assert!(refusal.contains("started on build 1234567890ab"), "{plan}");
+    let calls_before = stage_calls(&rig.log).len();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    assert!(
+        job.message
+            .clone()
+            .unwrap_or_default()
+            .contains("must finish it"),
+        "{:?}",
+        job.message
+    );
+    assert_eq!(
+        stage_calls(&rig.log).len(),
+        calls_before,
+        "no model call was made"
+    );
+}
+
+/// A saved inspection with no pin (started before builds were recorded) and one whose rule
+/// library changed are both refused at the start of the resume, with no model call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_with_no_pin_or_another_rule_library_is_refused() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_with_no_pin_or_another_rule") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let calls_before = stage_calls(&rig.log).len();
+    patch_saved_run(&rig.run_id, |v| {
+        v["pin"]["corpus_version"] = serde_json::json!("sha256:not-this-library");
+    });
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    assert!(
+        job.message
+            .clone()
+            .unwrap_or_default()
+            .contains("rule library changed"),
+        "{:?}",
+        job.message
+    );
+    patch_saved_run(&rig.run_id, |v| v["pin"] = serde_json::Value::Null);
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    assert!(
+        job.message
+            .clone()
+            .unwrap_or_default()
+            .contains("before Camerata recorded which build ran it"),
+        "{:?}",
+        job.message
+    );
+    assert_eq!(
+        stage_calls(&rig.log).len(),
+        calls_before,
+        "no model call was made"
+    );
+}
+
+/// An internal inspection (the project is not a client engagement) still starts on a build with
+/// uncommitted changes and records it; the same build is refused for a client inspection, before
+/// any model call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_client_inspection_does_not_start_on_a_dirty_build_but_an_internal_one_does() {
+    if !camerata_test_env::python3_on_path_for("a_client_inspection_does_not_start_on_a_dirty") {
+        return;
+    }
+    use crate::run_store::engine_pin::{test_build, BuildId};
+    /// Puts the test build back even when an assertion below panics.
+    struct RestoreBuild;
+    impl Drop for RestoreBuild {
+        fn drop(&mut self) {
+            test_build::set(None);
+        }
+    }
+    let _restore = RestoreBuild;
+    test_build::set(Some(BuildId {
+        dirty: true,
+        ..BuildId::clean_test_build()
+    }));
+    let rig = interrupted_scan().await;
+    let record = crate::run_store::read_record(&rig.run_id).unwrap();
+    assert!(
+        record.pin.expect("pinned").build.dirty,
+        "an internal run starts on a dirty build"
+    );
+    // The same project as a client engagement: refused at the start.
+    rig.state
+        .projects
+        .set_client_engagement(&rig.project_id, true, false)
+        .unwrap();
+    rig.state
+        .projects
+        .set_backend(&rig.project_id, crate::project::ProjectBackend::Api)
+        .unwrap();
+    let calls_before = stage_calls(&rig.log).len();
+    let job_id = start_audit_job(&rig.state, audit_request(), AuditJobOptions::default()).await;
+    let job = finished(&rig.state, &job_id).await;
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    let why = job.message.clone().unwrap_or_default();
+    assert!(
+        why.contains("cannot start an inspection for a client"),
+        "{why}"
+    );
+    assert_eq!(
+        stage_calls(&rig.log).len(),
+        calls_before,
+        "no model call was made"
+    );
+}
+
+/// A cockpit resume keeps the clone judge model the inspection started on, even when the project
+/// now names another (the app always passes its project's pick), and says so on the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_keeps_the_clone_judge_the_inspection_started_on() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_keeps_the_clone_judge") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["pin"]["clone_judge_model"] = serde_json::json!("claude-haiku-5-5");
+    });
+    rig.state
+        .projects
+        .set_review_settings(
+            &rig.project_id,
+            camerata_api_types::project::ReviewSettings {
+                clone_judge_model: "claude-sonnet-5-5".to_string(),
+                ..camerata_api_types::project::ReviewSettings::legacy()
+            },
+        )
+        .expect("the project exists")
+        .expect("the setting is accepted");
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    let record = crate::run_store::read_record(&rig.run_id).unwrap();
+    assert!(
+        record
+            .notes
+            .iter()
+            .any(|n| n.contains("The clone check stays on claude-haiku-5-5")),
+        "{:?}",
+        record.notes
+    );
+}
+
+/// The synchronous scan route refuses a client inspection on a dirty build, like the job route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_synchronous_scan_route_refuses_a_client_inspection_on_a_dirty_build() {
+    use crate::run_store::engine_pin::{test_build, BuildId};
+    struct RestoreBuild;
+    impl Drop for RestoreBuild {
+        fn drop(&mut self) {
+            test_build::set(None);
+        }
+    }
+    let _restore = RestoreBuild;
+    let state_dir = tempfile::tempdir().unwrap();
+    let _g = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state_dir.path());
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Sync", vec!["acme/one".to_string()])
+        .unwrap();
+    state
+        .projects
+        .set_backend(&project.id, crate::project::ProjectBackend::Api)
+        .unwrap();
+    state
+        .projects
+        .set_client_engagement(&project.id, true, false)
+        .unwrap();
+    test_build::set(Some(BuildId {
+        dirty: true,
+        ..BuildId::clean_test_build()
+    }));
+    let Json(report) = onboard_audit(State(state), Json(audit_request())).await;
+    let why = report.message.clone().unwrap_or_default();
+    assert!(report.blocked, "{why}");
+    assert!(
+        why.contains("cannot start an inspection for a client"),
+        "{why}"
+    );
 }

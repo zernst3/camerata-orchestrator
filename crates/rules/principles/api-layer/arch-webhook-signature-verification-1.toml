@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1"
-version = 4
+version = 5
 title = "A payment-provider webhook handler verifies the provider's signature on the raw request body before trusting the event"
 domain = "api-layer"
 layer = "universal"
@@ -30,17 +30,16 @@ why = """
 A payment webhook endpoint is, from the outside, just another public URL that accepts a POST body shaped like a
 provider event ('payment_intent.succeeded', 'charge.refunded', 'invoice.paid'). With no signature check, anyone who
 can guess or discover that URL can POST an arbitrary fabricated event and the handler will act on it exactly as if
-the real provider sent it — crediting an order as paid with no payment having occurred, marking a subscription
+the real provider sent it, crediting an order as paid with no payment having occurred, marking a subscription
 active, or triggering a refund-driven state change, all without a cent moving. Payment providers sign each webhook
 delivery (Stripe signs with HMAC-SHA256 over the raw body plus a timestamp, carried in a `Stripe-Signature` header;
 other providers follow the same shape with their own header/secret) specifically so the receiver can verify the
 event genuinely originated from the provider's systems and was not replayed or forged. Verification requires the
-RAW, unparsed request body — most frameworks' default body-parsing middleware (JSON parse-then-stringify) does not
+RAW, unparsed request body. Most frameworks' default body-parsing middleware (JSON parse-then-stringify) does not
 reproduce the exact byte sequence the signature was computed over, which is why this is a common integration bug
 even on teams that intend to verify: the raw-body requirement has to be wired explicitly for the webhook route, and
 a handler that reads `req.body` already parsed by generic middleware cannot verify correctly even if it tries. The
-check belongs at the very top of the handler, before ANY business logic touches the payload — verifying after
-already crediting the account defeats the purpose of verifying at all.
+check belongs at the very top of the handler, before ANY business logic touches the payload. Verifying after already crediting the account defeats the purpose of verifying at all.
 """
 
 [[option]]

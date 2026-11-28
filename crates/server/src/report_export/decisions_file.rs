@@ -1,4 +1,4 @@
-//! The package's `decisions.json` and Decisions sheet (design 5.3 and WO9).
+//! The package's `json/decisions.json` and Decisions sheet (design 5.3 and WO9).
 //!
 //! Every decision record the report was reviewed with, as the client package states it: which
 //! site or tree node it is on, what was ruled, which sites a group decision covers and which
@@ -27,7 +27,8 @@ pub struct DecisionRowJson {
     /// The tree node a group decision was made on; empty on a site record.
     pub node_id: String,
     /// `confirmed`, `ignored`, `false_positive`, `tech_debt_now`, `tech_debt_later`,
-    /// `merged_into` or `engine_restored`.
+    /// `merged_into`, `engine_restored` or `severity_set` (the reviewer changed the row's
+    /// severity themselves; the edit is the row's decision).
     pub state: String,
     /// The [`site_id`] of the row a merge points to; empty for any other state.
     pub merged_into: String,
@@ -43,7 +44,18 @@ pub struct DecisionRowJson {
     /// The record was undone. It stays in the file: the record that was undone is part of the
     /// history of the ruling.
     pub revoked: bool,
+    /// A ruling on the standard of a rule with options: the rule. Empty on every other record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule_id: String,
+    /// A ruling that set a standard: the option's label. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub option_label: String,
 }
+
+/// The state of a ruling that set the convention of a rule.
+pub const STANDARD_SET: &str = "standard_set";
+/// The state of a ruling that left a rule's choice to the client.
+pub const STANDARD_LEFT_TO_CLIENT: &str = "left_to_client";
 
 /// The state's name in the file.
 pub fn state_name(state: &DecisionState) -> &'static str {
@@ -92,19 +104,87 @@ fn row_of(d: &Decision) -> DecisionRowJson {
         },
         confirmed_by_client,
         revoked: !d.is_active(),
+        rule_id: String::new(),
+        option_label: String::new(),
+    }
+}
+
+/// One live ruling on a standard as the package prints it (convention model design, section 5):
+/// the rule and the option's label. The reviewer's name and the time are not printed, like every
+/// other record of this file.
+fn standard_row(
+    r: &camerata_api_types::decisions::StandardRuling,
+    reviewed: &ReviewedReport,
+) -> DecisionRowJson {
+    use camerata_api_types::decisions::StandardChoice;
+    let (state, label) = match &r.choice {
+        StandardChoice::Accept { option_id } => (
+            STANDARD_SET,
+            reviewed
+                .report()
+                .conventions
+                .iter()
+                .filter(|c| c.repo == r.repo && c.rule_id.eq_ignore_ascii_case(&r.rule_id))
+                .flat_map(|c| c.options.iter())
+                .find(|o| &o.option_id == option_id)
+                .map_or_else(|| option_id.clone(), |o| o.label.clone()),
+        ),
+        StandardChoice::LeaveToClient => (STANDARD_LEFT_TO_CLIENT, String::new()),
+    };
+    DecisionRowJson {
+        id: r.id.clone(),
+        scope: "rule".to_string(),
+        state: state.to_string(),
+        has_reason: !r.reason.trim().is_empty(),
+        rule_id: r.rule_id.clone(),
+        option_label: label,
+        ..DecisionRowJson::default()
+    }
+}
+
+/// The state a severity edit is recorded under.
+pub const SEVERITY_SET: &str = "severity_set";
+
+/// A severity edit the reviewer made on a row, as the package records it: the row's decision.
+fn severity_edit_row(n: usize, e: &super::AppliedEdit) -> DecisionRowJson {
+    DecisionRowJson {
+        // Edit ids are structured data of the findings files only, never of the decisions file:
+        // the record is numbered in its own series.
+        id: format!("severity-set-{n:06}"),
+        scope: "site".to_string(),
+        site_id: site_id(&e.key),
+        state: SEVERITY_SET.to_string(),
+        has_reason: e.has_reason,
+        ..DecisionRowJson::default()
     }
 }
 
 /// Every record `reviewed` was reviewed with, revoked ones included, in the order they were
-/// written.
+/// written, then one record per severity edit the reviewer made on a row: the edit is that row's
+/// decision (Zach, 2026-11-20), so the package says so. The reason stays in the store.
 pub fn decision_rows(reviewed: &ReviewedReport) -> Vec<DecisionRowJson> {
-    reviewed.all_records().iter().map(row_of).collect()
+    let mut rows: Vec<DecisionRowJson> = reviewed.all_records().iter().map(row_of).collect();
+    rows.extend(
+        reviewed
+            .applied_edits()
+            .iter()
+            .filter(|e| e.field == camerata_api_types::edits::EditField::Severity)
+            .enumerate()
+            .map(|(i, e)| severity_edit_row(i + 1, e)),
+    );
+    rows.extend(
+        reviewed
+            .standards()
+            .iter()
+            .map(|r| standard_row(r, reviewed)),
+    );
+    rows
 }
 
 /// The file's path in the package.
-pub const DECISIONS_FILE: &str = "decisions.json";
+pub use camerata_api_types::package_paths::DECISIONS_JSON as DECISIONS_FILE;
 
-/// The bytes of `decisions.json`.
+/// The bytes of `json/decisions.json`.
 pub fn decisions_json(reviewed: &ReviewedReport) -> anyhow::Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "decisions": decision_rows(reviewed),

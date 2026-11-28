@@ -403,3 +403,41 @@ fn assert_entry_bytes_eq(name: &str, left: &[u8], right: &[u8]) {
         window(right),
     );
 }
+
+/// #561: the sealed report `camerata inspect` saves in the run folder is the report's JSON. Read
+/// back and sealed again (as the app seals a stored report), it exports the very package the
+/// report in memory exports, the PDF included. The fixture's fix texts hold code spans (#391):
+/// the code runs the PDF sets are worked out from the report's fix text when the export is
+/// built, never stored, so nothing the renderer needs is lost on the way through the file.
+#[tokio::test]
+async fn a_saved_and_reloaded_report_exports_the_package_the_report_in_memory_exports() {
+    if !typst_on_path() {
+        eprintln!("skipping a_saved_and_reloaded_report_exports_the_package: typst not on PATH");
+        return;
+    }
+    let mut report = fixture_report();
+    report.findings[0].fix_specific = Some(
+        "Read the key with `std::env::var(\"API_KEY\")` and keep it out of `config.rs`.".into(),
+    );
+    report.findings[0].review.escalation_state =
+        camerata_api_types::review::EscalationState::Escalated;
+    report.findings[1].fix_specific = Some(
+        "Build the URL with ``format!(\"{}`x`\", base)`` and pass the secret in a header.".into(),
+    );
+    let in_memory = report.seal();
+    let saved = serde_json::to_vec(&in_memory).expect("the sealed report serializes");
+    let reloaded: ScanReport = serde_json::from_slice(&saved).expect("and reads back");
+
+    let (stem_a, zip_a) = build_product_export_bytes(&in_memory, None, CLIENT)
+        .await
+        .expect("the report in memory exports");
+    let (stem_b, zip_b) = build_product_export_bytes(&reloaded.seal(), None, CLIENT)
+        .await
+        .expect("the reloaded report exports");
+    assert_eq!(stem_a, stem_b);
+    let (a, b) = (zip_entry_contents(&zip_a), zip_entry_contents(&zip_b));
+    assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+    for (name, bytes) in &a {
+        assert_entry_bytes_eq(name, bytes, &b[name]);
+    }
+}

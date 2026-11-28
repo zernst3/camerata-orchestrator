@@ -849,11 +849,37 @@ pub(crate) fn process_rule_config_for(
         .unwrap_or_default()
 }
 
-pub(crate) async fn onboard_draft_get(
-    State(state): State<AppState>,
-) -> Json<Option<serde_json::Value>> {
+pub(crate) async fn onboard_draft_get(State(state): State<AppState>) -> axum::response::Response {
     let pid = active_project_id(&state);
-    Json(state.draft.load(&pid))
+    // A draft file that could not be read at start was set aside untouched: say so once,
+    // instead of answering "no draft" as though nothing had ever been saved. Told once, so the
+    // operator's next step (start again, save) is not blocked by the same message.
+    if state.draft.load(&pid).is_none() {
+        if let Some(message) = state.draft.take_unreadable_notice(&pid) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "ok": false, "code": "draft_unreadable", "message": message
+                })),
+            )
+                .into_response();
+        }
+    }
+    // A draft with no review but a saved inspection of the same repos gets that inspection as
+    // its review, so "Continue where you left off" reopens a run whose results never reached
+    // the draft (the screen was closed while it ran, or the app restarted). Not while a run for
+    // this project is in flight: the screen has cleared its review to take the new run's, and
+    // the run adopts its own result when it finishes.
+    if !state.jobs.has_running_for_project(&pid) {
+        if let Some(report) = state.get_last_scan(&pid) {
+            state
+                .draft
+                .adopt_audit(&pid, &report.repos, &report.provenance.finished_at, || {
+                    serde_json::to_value(&report).unwrap_or(serde_json::Value::Null)
+                });
+        }
+    }
+    Json(state.draft.load(&pid)).into_response()
 }
 
 /// Save/replace the active project's onboarding draft (opaque blob; the UI owns its shape).
@@ -1066,7 +1092,11 @@ pub(crate) async fn project_suppressions(
     // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
     // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
     // tab's "Clone / update all repos" is the deliberate way to refresh.
-    let entries = crate::onboard::suppression_registry(&sources).await;
+    let entries = crate::onboard::suppression_registry(
+        &sources,
+        &crate::onboard::scope::ScanScope::of_project_or_nothing(Some(&project)),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "source_deleted": !deleted.is_empty(),

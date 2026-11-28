@@ -165,6 +165,7 @@ impl Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -234,7 +235,40 @@ fn typst_available(test: &str) -> bool {
     camerata_test_env::typst_on_path_for(test)
 }
 
+/// The fixture repo with its deliberate plants (a secret, a secret in a URL, a SQL concatenation)
+/// made harmless: these tests are about resume mechanics, and a planted critical problem has no
+/// reviewer decision, which the release gate rightly refuses for a client package. The files keep
+/// their names and first lines.
 fn stage_fixture(dest: &Path) {
+    stage_fixture_planted(dest);
+    for (file, text) in [
+        ("src/config.rs", "pub const RETRIES: u32 = 3;\n"),
+        (
+            "src/client.rs",
+            "pub fn base_url() -> &'static str {\n    \"https://example.com/\"\n}\n",
+        ),
+        (
+            "src/db.rs",
+            "pub fn table_name() -> &'static str {\n    \"users\"\n}\n",
+        ),
+    ] {
+        std::fs::write(dest.join(file), text).unwrap();
+    }
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dest)
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "harmless"]);
+}
+
+fn stage_fixture_planted(dest: &Path) {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/tests/fixtures/e2e_report_repo");
     fn copy(src: &Path, dest: &Path) {
@@ -325,6 +359,7 @@ fn args(repos: &[&Path], names: &[&str], export: &Path) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 
@@ -651,6 +686,40 @@ async fn a_fabricated_quote_refuses_the_release_with_exit_3_and_names_the_row() 
     assert!(model.sent_of(PartKind::Fix) > 0);
 }
 
+/// The gate is pinned on the resume path: a client resume export of a run whose fixture carries
+/// planted critical problems with no reviewer decision is refused with the gate's sentence.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_resume_export_with_an_undecided_critical_is_refused_by_the_gate() {
+    if !typst_available("a_client_resume_export_with_an_undecided_critical") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture_planted(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let model = Scripted::new(Outage {
+        fix_stage: true,
+        ..Outage::default()
+    });
+    let err = run(&model, &[repo.path()], &["acme/one"], &export)
+        .await
+        .expect_err("a run with a failed part is refused");
+    let run_id = the_run_id(&err);
+    model.set(Outage::default());
+    let err = resume(&model, &run_id, Some(export.clone()))
+        .await
+        .expect_err("the undecided critical problems refuse the resumed client export");
+    assert_eq!(err.exit_code(), EXIT_RELEASE_BLOCKED);
+    let text = err.to_string();
+    assert!(
+        text.contains("shown at critical severity") && text.contains("no reviewer decision"),
+        "{text}"
+    );
+    assert!(!export.exists(), "no zip is written");
+}
+
 /// One repo, the fix stage down: the export is refused, nothing is written; after the provider is
 /// back the resume sends only the fix calls and the export is the uninterrupted run's.
 #[tokio::test]
@@ -706,6 +775,11 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
         record.status,
         camerata_server::run_store::RunStatus::Incomplete
     );
+    // `camerata inspect` records the wall-clock segment of its session (run figures), even for
+    // a run that ended on an error.
+    let first_segments = record.segments.clone();
+    assert_eq!(first_segments.len(), 1, "{first_segments:?}");
+    assert!(first_segments[0].finished_unix_ms >= first_segments[0].started_unix_ms);
     let remaining: Vec<PartKind> = record.remaining_parts().iter().map(|p| p.kind).collect();
     assert!(remaining.contains(&PartKind::Fix), "{remaining:?}");
     assert!(!remaining.contains(&PartKind::Scan), "{remaining:?}");
@@ -783,6 +857,11 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
     let done = camerata_server::run_store::read_record(&run_id).unwrap();
     assert_eq!(done.status, camerata_server::run_store::RunStatus::Complete);
     assert!(done.attempt >= 2);
+    assert_eq!(done.segments.len(), 2, "the resume appended a segment");
+    assert_eq!(
+        done.segments[0], first_segments[0],
+        "the first is kept as it was"
+    );
     assert_same_exports(&export, &baseline_export);
     // The resume rewrote the note for the completed run, and the released zip carries none of it.
     let resumed_note = advisory_beside(&ledger);
@@ -1004,6 +1083,10 @@ mod batch {
     pub struct FakeBatchApi {
         pub model: Scripted,
         pub submits: AtomicUsize,
+        /// Requests across every batch submitted.
+        pub submitted_items: AtomicUsize,
+        /// Each submitted request as its custom id and a hash of its content.
+        pub submitted_ids: Mutex<Vec<String>>,
         pub fetches: AtomicUsize,
         pub poll_down: AtomicBool,
         items: Mutex<HashMap<String, Vec<BatchItem>>>,
@@ -1014,6 +1097,8 @@ mod batch {
             Self {
                 model: Scripted::new(Outage::default()),
                 submits: AtomicUsize::new(0),
+                submitted_items: AtomicUsize::new(0),
+                submitted_ids: Mutex::new(Vec::new()),
                 fetches: AtomicUsize::new(0),
                 poll_down: AtomicBool::new(false),
                 items: Mutex::new(HashMap::new()),
@@ -1053,6 +1138,19 @@ mod batch {
         async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
             let n = self.0.submits.fetch_add(1, Ordering::SeqCst);
             let id = format!("msgbatch_{n}");
+            self.0
+                .submitted_items
+                .fetch_add(items.len(), Ordering::SeqCst);
+            {
+                use std::hash::{Hash, Hasher};
+                let mut ids = self.0.submitted_ids.lock().unwrap();
+                for item in &items {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    request_of(item).prompt.hash(&mut h);
+                    item.params.system.hash(&mut h);
+                    ids.push(format!("{}#{:x}", item.custom_id, h.finish()));
+                }
+            }
             self.0.items.lock().unwrap().insert(id.clone(), items);
             Ok(id)
         }
@@ -1189,13 +1287,27 @@ mod batch {
             "{:?}",
             outcome.incomplete_reasons
         );
-        // The first batch was not submitted a second time: across both attempts the batches
-        // submitted are exactly those an uninterrupted run submits (its second round follows the
-        // first round's results, so the interrupted attempt never got to it).
+        // Nothing submitted before the interruption was submitted a second time: across both
+        // attempts the requests sent are exactly those an uninterrupted run sends. They are
+        // counted as requests, not batches: the group review reads the report as it stands, so
+        // the interrupted attempt sent its one rule group in a batch of its own and the resume
+        // sent the other, where the uninterrupted run sent both in one.
+        // Every request, batched or sent in real time, is answered by the model once, so the
+        // model's call count is the requests an attempt sent. With warming on, the uninterrupted
+        // run sends both rule groups in one submission and warms one of them in real time; the
+        // interrupted and resumed attempts each send one group alone and never warm. So the
+        // batch items differ by one between the runs and the totals do not.
         assert_eq!(
-            api.submits.load(Ordering::SeqCst),
-            healthy.submits.load(Ordering::SeqCst),
-            "the batch submitted before the interruption was not submitted again"
+            api.model.calls(),
+            healthy.model.calls(),
+            "the requests submitted before the interruption were not submitted again"
+        );
+        let ids = api.submitted_ids.lock().unwrap().clone();
+        let distinct: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            ids.len(),
+            "no request (custom id and content) was submitted twice across the attempts: {ids:?}"
         );
         assert!(
             api.fetches.load(Ordering::SeqCst) >= 1,
@@ -1250,6 +1362,10 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
     stage_fixture(repo.path());
     let run_id = {
         let store = rs::RunStore::create(rs::NewRun {
+            pin: camerata_server::run_store::engine_pin::EnginePin::for_run(
+                None,
+                &Default::default(),
+            ),
             project_key: camerata_server::scan_cache::state_dir::repo_state_key(repo.path()),
             repos: vec![("acme/one".to_string(), repo.path().to_path_buf())],
             models: rs::ModelsRecord {
@@ -1261,6 +1377,8 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
                 resolved: true,
                 group_review: String::new(),
                 finder: String::new(),
+                finder_model: String::new(),
+                scan_exclusions: Vec::new(),
             },
             ai_scan_key: camerata_server::scan_cache::AiScanKey::new("m", Some("m"), &[]),
             // The cockpit's scan request, not the command line's flags.
@@ -1399,7 +1517,7 @@ async fn resume_with_preflight(
 }
 
 /// A run that started on Fable 5.1 and is resumed with no model flag (the built-in default is
-/// Fable 5.2 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
+/// Opus 5.5 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
 /// in one line.
 #[tokio::test]
 #[serial_test::serial(process_env)]
@@ -1486,3 +1604,295 @@ async fn a_resume_with_a_different_explicit_group_review_model_is_refused() {
     let (result, _) = resume_with_preflight(&llm, &run_id, export.clone()).await;
     result.expect("the same model is accepted");
 }
+
+// ── The engine pin (V1 item 39): the build that starts an inspection finishes it ─────────────
+
+/// The refusal a resume gives for a saved record patched by `patch`: the plain text, with no
+/// model call made and no export written.
+async fn refused_resume_after(
+    test: &str,
+    patch: impl FnOnce(&mut serde_json::Value),
+) -> Option<String> {
+    if !typst_available(test) {
+        return None;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        group_review: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, patch);
+    let calls_before = llm.calls();
+    let (result, _) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    let Err(InspectError::Failed(why)) = result else {
+        panic!("this resume must be refused in plain words");
+    };
+    assert_eq!(llm.calls(), calls_before, "no model call was made");
+    assert!(!export.exists());
+    Some(why)
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_on_another_build_is_refused_with_no_model_call() {
+    let patch = |v: &mut serde_json::Value| {
+        v["pin"]["build"]["commit"] = serde_json::json!("1234567890abcdef1234567890abcdef12345678");
+    };
+    let Some(why) = refused_resume_after("a_resume_on_another_build", patch).await else {
+        return;
+    };
+    assert!(why.contains("started on build 1234567890ab"), "{why}");
+    assert!(why.contains("must finish it"), "{why}");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_saved_run_with_no_pin_is_refused_at_resume() {
+    let Some(why) = refused_resume_after("a_saved_run_with_no_pin", |v| {
+        v["pin"] = serde_json::Value::Null;
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(
+        why.contains("before Camerata recorded which build ran it"),
+        "{why}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_after_the_rule_library_changed_is_refused() {
+    let Some(why) = refused_resume_after("a_resume_after_the_rule_library_changed", |v| {
+        v["pin"]["corpus_version"] = serde_json::json!("sha256:not-this-library");
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(why.contains("rule library changed"), "{why}");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_after_the_prompt_schema_changed_is_refused() {
+    let Some(why) = refused_resume_after("a_resume_after_the_prompt_schema_changed", |v| {
+        v["pin"]["build"]["prompt_schema"] = serde_json::json!(9999);
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(
+        why.contains("questions Camerata asks the model changed"),
+        "{why}"
+    );
+}
+
+/// A resume that names another clone judge than the run started on stays on the saved one, and
+/// the pre-flight says so.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_naming_another_clone_judge_than_the_run_started_on_keeps_the_saved_one() {
+    if !typst_available("a_resume_naming_another_clone_judge") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        group_review: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, |v| {
+        v["pin"]["clone_judge_model"] = serde_json::json!("claude-haiku-5-5");
+        v["args"]["clone_judge_model"] = serde_json::json!("claude-sonnet-5-5");
+    });
+    let (result, text) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    result.expect("the resume goes on, on the saved clone judge");
+    assert!(
+        text.contains("The clone check stays on claude-haiku-5-5"),
+        "{text}"
+    );
+}
+
+/// The start check, directly: dirty and commit-less builds are refused for a client inspection,
+/// an internal one is not, a clean build is not.
+#[test]
+fn the_client_start_check_refuses_a_dirty_or_commitless_build_and_never_an_internal_run() {
+    use camerata::inspect_cmd::refuse_unfit_build_for_client as check;
+    use camerata_server::run_store::engine_pin::BuildId;
+    let build = |commit: Option<&str>, dirty: bool| BuildId {
+        version: "0".to_string(),
+        commit: commit.map(str::to_string),
+        dirty,
+        prompt_schema: 1,
+        clone_prompt_schema: 1,
+    };
+    let sha = "a".repeat(40);
+    assert!(check(true, &build(Some(&sha), false)).is_ok());
+    let dirty = check(true, &build(Some(&sha), true))
+        .unwrap_err()
+        .to_string();
+    assert!(dirty.contains("changes that are not committed"), "{dirty}");
+    let none = check(true, &build(None, false)).unwrap_err().to_string();
+    assert!(none.contains("does not know which build it is"), "{none}");
+    assert!(check(false, &build(Some(&sha), true)).is_ok());
+    assert!(check(false, &build(None, false)).is_ok());
+}
+
+/// A client inspection started through the production entry is refused at once on a build that
+/// has uncommitted changes or no commit, before any key lookup or model call; on a clean build it
+/// goes on, so this only asserts the refusal when the running build is one of those.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_inspection_is_refused_at_start_on_a_dirty_or_commitless_build() {
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    if camerata_server::ENGINE_COMMIT.is_some() && !camerata_server::ENGINE_DIRTY {
+        return;
+    }
+    // A made-up key, so the key check (which comes first) passes and the build check is reached.
+    let _key = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test-not-a-real-key");
+    let err = camerata::inspect_cmd::run_inspect_with_store(
+        args(&[repo.path()], &["acme/one"], &out.path().join("x.zip")),
+        &store(),
+    )
+    .await
+    .expect_err("refused");
+    assert!(
+        err.to_string()
+            .contains("cannot start an inspection for a client"),
+        "{err}"
+    );
+}
+
+// ---- the operator's clone folder never reaches a client export (#557) -----------------------
+
+/// Moves every folder the gate knows by itself (the home directory, the data folder, the temp
+/// folder) away from where the fixture repo lives, so the only thing that can tell the gate about
+/// the repo's clone folder is the export being handed the run's repo folders. Hold it for the
+/// whole test.
+struct ElsewhereFolders {
+    _root: tempfile::TempDir,
+    _guards: Vec<camerata_test_env::EnvGuard>,
+}
+
+fn elsewhere_folders() -> ElsewhereFolders {
+    let root = tempfile::tempdir().unwrap();
+    for sub in ["home", "tmp", "data"] {
+        std::fs::create_dir_all(root.path().join(sub)).unwrap();
+    }
+    let guards = vec![
+        camerata_test_env::EnvGuard::set("HOME", root.path().join("home")),
+        camerata_test_env::EnvGuard::set("TMPDIR", root.path().join("tmp")),
+        camerata_test_env::EnvGuard::set("CAMERATA_DATA_DIR", root.path().join("data")),
+    ];
+    ElsewhereFolders {
+        _root: root,
+        _guards: guards,
+    }
+}
+
+/// The harmless fixture, with the clone folder written on the first line of a source file: the
+/// scripted model quotes the first line of each file it reviews, so the folder reaches client
+/// text the way a client's own code, a tool's words or a copied error would.
+fn stage_fixture_naming_its_clone_folder(dest: &Path) -> String {
+    stage_fixture(dest);
+    let folder = dest.to_string_lossy().into_owned();
+    std::fs::write(
+        dest.join("src/config.rs"),
+        format!("// built at {folder}\npub const RETRIES: u32 = 3;\n"),
+    )
+    .unwrap();
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dest)
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "names its folder"]);
+    folder
+}
+
+fn assert_refused_for_the_clone_folder(err: &InspectError, folder: &str, export: &Path) {
+    assert_eq!(err.exit_code(), EXIT_RELEASE_BLOCKED, "{err}");
+    match err {
+        InspectError::ReleaseBlocked(failure) => {
+            let text = failure.to_string();
+            assert!(text.contains("operator paths kept out"), "{text}");
+            assert!(text.contains(folder), "{text}");
+        }
+        other => panic!("expected the release to be blocked, got {other}"),
+    }
+    assert!(!export.exists(), "no zip is written");
+}
+
+/// A new client run: the export is handed the run's repo folders, so a client file that names the
+/// repo's clone folder is refused, and the refusal names the folder.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_export_naming_the_repos_clone_folder_is_refused() {
+    if !typst_available("a_client_export_naming_the_repos_clone_folder") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    let folder = stage_fixture_naming_its_clone_folder(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("named.zip");
+    let _elsewhere = elsewhere_folders();
+    let model = Scripted::new(Outage::default());
+    let err = run(&model, &[repo.path()], &["acme/one"], &export)
+        .await
+        .expect_err("a client file naming the clone folder is not released");
+    assert_refused_for_the_clone_folder(&err, &folder, &export);
+}
+
+/// The same on a resume: the saved run's repo folders are what the resumed export hands the gate.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resumed_client_export_naming_the_repos_clone_folder_is_refused() {
+    if !typst_available("a_resumed_client_export_naming_the_repos_clone_folder") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    let folder = stage_fixture_naming_its_clone_folder(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("named-resumed.zip");
+    let _elsewhere = elsewhere_folders();
+    let (model, run_id) = interrupted_run(
+        repo.path(),
+        &export,
+        Outage {
+            fix_stage: true,
+            ..Outage::default()
+        },
+    )
+    .await;
+    let err = resume(&model, &run_id, Some(export.clone()))
+        .await
+        .expect_err("a resumed client file naming the clone folder is not released");
+    assert_refused_for_the_clone_folder(&err, &folder, &export);
+}
+
+/// The sealed report the command line saves in the run folder (#561).
+#[path = "inspect_resume_e2e/saved_report.rs"]
+mod saved_report;

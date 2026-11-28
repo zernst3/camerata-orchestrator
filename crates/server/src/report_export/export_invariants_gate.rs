@@ -78,8 +78,9 @@
 //      `fix_fields_never_contain_raw_template_syntax`. Separately (OPEN, C5-6 — a product-
 //      polish gap, not a correctness bug): the GENERIC placeholder filler
 //      (`generic_placeholder_filler`) legitimately renders "the affected table"/"the affected
-//      file"/etc. when a detector captured no concrete object name, which reads as boilerplate
-//      next to an otherwise-specific fix: `fix_fields_can_fall_back_to_the_generic_affected_noun_phrase`.
+//      file"/etc. when a detector captured no concrete object name. ACCEPTED by ruling
+//      (2026-11-25, #345); STANDING (passes):
+//      `fix_fields_can_fall_back_to_the_generic_affected_noun_phrase`.
 //  11. Every curated (action-bucket) row for a rule with AUTHORED remediation has a non-empty
 //      `fix` and a non-empty hour estimate — never a silently missing Fix block for a rule this
 //      corpus actually authors one for. (This is deliberately scoped to AUTHORED rules — a
@@ -127,6 +128,7 @@
 use super::*;
 use crate::onboard::{AuditedRef, LanguageVolume, ScanProvenance};
 use crate::xlsx_export;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 // ── Fixture builders (own copies, matching the convention every test module in this
 // crate already follows — `report_export::tests` and `xlsx_export::tests` each keep their
@@ -152,6 +154,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["demo/portal".to_string()],
@@ -407,7 +410,7 @@ async fn build_fixture() -> Fixture {
 
 /// Every client-facing per-finding text field across BOTH artifact shapes: the PDF/JSON's
 /// `AuditReportJson` (matrix headlines, curated/held-for-review site prose, three-things,
-/// the priority grid) and `findings.json`/the xlsx's `FindingRow` set. Returns
+/// the priority grid) and `json/inspection.json`/the xlsx's `FindingRow` set. Returns
 /// `(location-label, text)` pairs for debuggable failure messages.
 fn all_client_text_fields(fx: &Fixture) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -1000,32 +1003,47 @@ async fn fix_fields_never_contain_raw_template_syntax() {
     );
 }
 
+/// Accepted behavior, by owner ruling (2026-11-25, issue #345 option 3): when a detector
+/// captured no concrete value for a rule's placeholder token, the Fix line carries the generic
+/// filled wording (for example "the affected table"), never a raw or dangling placeholder. When
+/// a value IS captured, the specific value appears instead. The generic wording is accepted as
+/// is; issue #345 tracks the later polish.
 #[tokio::test]
-#[ignore = "C5-6 open (product-polish, not a correctness bug): `generic_placeholder_filler` \
-                legitimately renders \"the affected table\" when a detector captured no \
-                concrete object name for a rule's `<table>`-style token (f_rls in this \
-                fixture, which deliberately omits the `table` capture) — this is FILLED text, \
-                never a raw/dangling placeholder, but it reads as generic boilerplate right \
-                next to an otherwise-specific Fix line. Worth deciding whether the fix line \
-                should instead omit the sentence, or whether every AUDIT_RULES floor checker \
-                should be required to populate its own `captures` (several already do — see \
-                `onboard::audit::enrich_secret_context`)."]
 async fn fix_fields_can_fall_back_to_the_generic_affected_noun_phrase() {
     let fx = build_fixture().await;
+    let unfilled_token = regex::Regex::new(r"<[^<>]*>").expect("static regex must compile");
+    let mut generic_fix_lines = 0;
     let mut offenders = Vec::new();
     for (loc, text) in all_client_text_fields(&fx) {
         if !(loc.ends_with(".fix") || loc.ends_with(".fix_for_this_finding")) {
             continue;
         }
-        if text.contains("the affected ") {
+        if text.contains("the affected table") {
+            generic_fix_lines += 1;
+        }
+        if text.contains('{') || unfilled_token.is_match(&text) {
             offenders.push(format!("{loc}: {text:?}"));
         }
     }
     assert!(
-        offenders.is_empty(),
-        "a fix field falls back to the generic \"the affected <noun>\" phrase instead of \
-             naming the real object: {offenders:#?}"
+        generic_fix_lines > 0,
+        "the fixture's f_rls finding has no captured table, so at least one Fix line must \
+         carry the generic \"the affected table\" wording"
     );
+    assert!(
+        offenders.is_empty(),
+        "a fix field carries a raw or dangling placeholder instead of filled wording: \
+         {offenders:#?}"
+    );
+
+    // The captured half: a detector-supplied value replaces the generic wording.
+    let mut captures = std::collections::BTreeMap::new();
+    captures.insert("table".to_string(), "payments".to_string());
+    let with_value = instantiate_remediation("Enable RLS on <table>.", "a.sql", &captures);
+    assert_eq!(with_value, "Enable RLS on payments.");
+    let without_value =
+        instantiate_remediation("Enable RLS on <table>.", "a.sql", &Default::default());
+    assert_eq!(without_value, "Enable RLS on the affected table.");
 }
 
 // ── Invariant 11 (STANDING) ──────────────────────────────────────────────────────────
@@ -1193,7 +1211,7 @@ async fn same_construct_injection_and_pagination_pair_export_as_two_distinct_gro
 /// already routed to `matrix.informational`" — true before C5-7, false after it (C5-7
 /// routes a high/critical uncited finding to the severity-unbounded `held` bucket
 /// instead). The row stayed counted everywhere that tallies `code_findings` directly
-/// (`matrix.held`, the cover severity strip, the category scorecard, `findings.json`/the
+/// (`matrix.held`, the cover severity strip, the category scorecard, `json/inspection.json`/the
 /// workbook) while the PDF renderer never emitted it in ANY section. Fixed by always
 /// building a site (see that loop's updated doc comment); this test is the STANDING gate
 /// against a regression of the same SHAPE from a different cause — any future change that
@@ -1772,6 +1790,9 @@ async fn req_c2_the_sites_vs_rows_check_is_gone_because_a_sub_groups_members_are
         assessed_sites: Some(47),
         convention_option_id: Some("versioned".to_string()),
         convention_label: "URI-versioned endpoints".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     let mut report = report_with(vec![f], vec!["ARCH-API-VERSIONING-1"]);
     let rows_before = report.findings.len();
@@ -1803,7 +1824,7 @@ async fn req_c2_the_sites_vs_rows_check_is_gone_because_a_sub_groups_members_are
 // `inject_evidence_gate_findings`) ran INSIDE `build_report_json` against a CLONED report
 // that silently shadowed the function's own parameter — `xlsx_export::build_workbook` /
 // `build_findings_export` read the ORIGINAL, un-injected `ScanReport` directly, so the PDF
-// rendered N+K rows while `findings.json`/the xlsx rendered N. The fix moves the gate
+// rendered N+K rows while `json/inspection.json`/the xlsx rendered N. The fix moves the gate
 // upstream of `ScanReport::seal` (see that method's doc comment for the full pipeline
 // order) and changes all three exporters to take `&SealedReport`.
 //
@@ -1951,7 +1972,7 @@ async fn req_d1_the_seal_fixture_actually_exercises_the_evidence_gate_and_previe
 /// both by COUNT and by IDENTITY (rule_id, repo, path, line) — when built from one sealed
 /// report whose evidence gate AND external-tool preview merge both fired. Before the fix,
 /// the PDF's row set (via the clone-shadowed `inject_evidence_gate_findings`) held N+K rows
-/// while `findings.json`/the xlsx held only N; this asserts the gap is fully closed.
+/// while `json/inspection.json`/the xlsx held only N; this asserts the gap is fully closed.
 #[tokio::test]
 async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
     let (sealed, k) = build_seal_fixture().await;
@@ -1999,7 +2020,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
         }
     }
 
-    // `findings.json`'s row-identity set — read via `serde_json::Value` since
+    // `json/inspection.json`'s row-identity set — read via `serde_json::Value` since
     // `xlsx_export::FindingRow`'s fields are private to that module (same convention
     // `all_client_text_fields` above already uses for this exact type).
     let findings_export_value =
@@ -2023,7 +2044,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
     let problems = crate::release_gate::row_parity(&json, &findings_export);
     assert!(
         problems.is_empty(),
-        "the PDF and findings.json must render the IDENTICAL row-identity set: {problems:?} \
+        "the PDF and {INSPECTION_JSON} must render the IDENTICAL row-identity set: {problems:?} \
              (pdf={pdf_ids:#?}, findings_json={findings_json_ids:#?})"
     );
     // Both the evidence-gate-synthesized row and the external-tool-preview row must
@@ -2036,7 +2057,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
         findings_json_ids
             .iter()
             .any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
-        "the evidence-gate-synthesized row must reach findings.json: {findings_json_ids:#?}"
+        "the evidence-gate-synthesized row must reach {INSPECTION_JSON}: {findings_json_ids:#?}"
     );
     assert!(
         pdf_ids
@@ -2048,13 +2069,13 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
         findings_json_ids
             .iter()
             .any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
-        "the external-tool-preview row must reach findings.json: {findings_json_ids:#?}"
+        "the external-tool-preview row must reach {INSPECTION_JSON}: {findings_json_ids:#?}"
     );
 
     // The xlsx: proven via its shared-strings pool (the same technique invariants 1/2 at
     // the top of this module already use) rather than parsing worksheet XML relationships —
     // both rule ids, including the evidence-gate-synthesized one, must appear somewhere in
-    // the workbook's text, proving it was ALSO exported there, not just in findings.json.
+    // the workbook's text, proving it was ALSO exported there, not just in json/inspection.json.
     let shared_strings = workbook_shared_string_texts(&workbook_shared_strings_xml(&workbook));
     let joined = shared_strings.join("\n");
     assert!(
@@ -2134,7 +2155,7 @@ async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_agai
         "at least the evidence-gate row must be held for review"
     );
 
-    // findings.json's `summary` is REUSED verbatim from the PDF's own `executive_summary`
+    // json/inspection.json's `summary` is REUSED verbatim from the PDF's own `executive_summary`
     // (never independently recomputed — see `build_findings_export`'s doc comment), so it
     // is the SAME shared helper by construction; pin that explicitly so a future change
     // that makes it recompute its own summary independently is caught here.
@@ -2146,12 +2167,18 @@ async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_agai
     );
     assert_eq!(
         findings_export.summary.candidates_reviewed, total_rows,
-        "findings.json's summary must reconcile against the same sealed row count"
+        concat!(
+            camerata_api_types::pkg_inspection_json!(),
+            "'s summary must reconcile against the same sealed row count"
+        )
     );
     assert_eq!(
         findings_export.summary.held_for_review, held_for_review_total,
-        "findings.json's summary must report the SAME held-for-review count as the PDF, \
+        concat!(
+            camerata_api_types::pkg_inspection_json!(),
+            "'s summary must report the SAME held-for-review count as the PDF, \
              never its own independently-recomputed one"
+        )
     );
 }
 

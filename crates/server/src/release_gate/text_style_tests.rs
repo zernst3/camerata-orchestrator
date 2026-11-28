@@ -59,7 +59,7 @@ fn each_banned_character_planted_on_each_surface_is_refused_with_its_place() {
             ),
             (
                 Surface::FindingsJson,
-                "findings.json",
+                "json/inspection.json",
                 "$.a_field_added_tomorrow",
             ),
             (Surface::DatasetJson, "json/deviations.json", "$[0].detail"),
@@ -133,10 +133,10 @@ fn an_audit_of_a_zip_refuses_a_banned_character_in_every_member_kind() {
             }),
         ),
         (
-            "decisions.json",
+            "json/decisions.json",
             Box::new(|e| {
                 e.insert(
-                    "decisions.json".to_string(),
+                    "json/decisions.json".to_string(),
                     serde_json::to_vec(&json!({ "note": planted_text(EM) })).expect("serializes"),
                 );
             }),
@@ -273,7 +273,7 @@ fn a_client_headline_that_opens_with_the_engines_own_note_is_refused() {
         assert!(
             problems
                 .iter()
-                .any(|p| p.file == "findings.json" && p.location == "$.findings[0].headline"),
+                .any(|p| p.file == "json/inspection.json" && p.location == "$.findings[0].headline"),
             "{headline}: {problems:?}"
         );
     }
@@ -391,10 +391,10 @@ fn a_verbatim_code_field_is_not_held_to_the_text_style_in_json() {
         "snippet": code,
         "also_locations": [{ "snippet": code }]
     }]});
-    assert!(text_style::json_problems("findings.json", &doc).is_empty());
+    assert!(text_style::json_problems("json/inspection.json", &doc).is_empty());
     // The same text in any other field is refused.
     let doc = json!({ "findings": [{ "detail": code }] });
-    assert!(!text_style::json_problems("findings.json", &doc).is_empty());
+    assert!(!text_style::json_problems("json/inspection.json", &doc).is_empty());
 }
 
 #[test]

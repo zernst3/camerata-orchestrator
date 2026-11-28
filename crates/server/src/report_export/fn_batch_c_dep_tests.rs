@@ -233,3 +233,130 @@ async fn the_pdf_does_not_say_no_vulnerable_dependencies_when_the_audit_did_not_
     assert!(joined.contains("Dependencieswerenotfullychecked"), "{text}");
     assert!(joined.contains("dependencyaudit"), "{text}");
 }
+
+// ── Which dependency files were checked ─────────────────────────────────────────────────────
+
+fn audited(path: &str, vendored: bool) -> crate::scan_ledger::AuditedDependencyFile {
+    crate::scan_ledger::AuditedDependencyFile {
+        repo: "acme/api".to_string(),
+        path: path.to_string(),
+        vendored,
+    }
+}
+
+/// A root lockfile and a vendored one are both listed, only the second marked, with the exact
+/// words the client reads.
+#[test]
+fn the_dependency_section_lists_the_dependency_files_checked_and_marks_vendored_ones() {
+    let mut report = report_with(Vec::new(), Vec::new());
+    report.ledger.record_audited_dependency_files(vec![
+        audited("package-lock.json", false),
+        audited("vendor/acme-x/package-lock.json", true),
+    ]);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let snap = &json.dependency_snapshot;
+    assert_eq!(
+        snap.checked_line,
+        "Dependency files checked: 2. 1 of them is vendored, meaning inside a folder of bundled \
+         outside code such as a vendor folder."
+    );
+    assert_eq!(
+        snap.checked_listed,
+        [
+            "vendor/acme-x/package-lock.json (vendored)",
+            "package-lock.json"
+        ]
+    );
+    assert!(snap.checked_more_line.is_empty());
+    assert_eq!(snap.audited_files.len(), 2);
+    assert!(!snap.audited_files[0].vendored && snap.audited_files[1].vendored);
+    let note = crate::report_export::audited_dependencies_note(
+        report.ledger.audited_dependency_files(),
+        false,
+    )
+    .expect("workbook note");
+    assert!(note.starts_with("Dependency files checked: 2."), "{note}");
+    // One order in both: vendored first, as the PDF lists them.
+    let lines: Vec<&str> = note.lines().skip(1).collect();
+    assert_eq!(
+        lines,
+        [
+            "vendor/acme-x/package-lock.json (vendored)",
+            "package-lock.json"
+        ],
+        "{note}"
+    );
+    assert!(!note.contains('\u{2014}') && !note.contains('\u{2013}'));
+}
+
+#[test]
+fn no_dependency_files_checked_says_nothing_extra() {
+    let report = report_with(Vec::new(), Vec::new());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    assert!(json.dependency_snapshot.checked_line.is_empty());
+    assert!(json.dependency_snapshot.audited_files.is_empty());
+    assert!(crate::report_export::audited_dependencies_note(&[], false).is_none());
+}
+
+/// A pom.xml among the checked files adds one Maven sentence to the dependency section and to
+/// the method text; without one neither mentions Maven.
+#[test]
+fn a_checked_pom_adds_the_maven_sentence_and_no_pom_adds_none() {
+    let build = |paths: &[&str]| {
+        let mut report = report_with(Vec::new(), Vec::new());
+        report
+            .ledger
+            .record_audited_dependency_files(paths.iter().map(|p| audited(p, false)).collect());
+        build_report_json(
+            &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+    };
+    let sentence = "Dependencies declared with an explicit version in pom.xml files were checked. Dependencies whose version comes from a parent POM, and the dependencies they pull in, were not.";
+    let with = build(&["package-lock.json", "svc/pom.xml"]);
+    assert!(
+        with.dependency_snapshot.checked_line.ends_with(sentence),
+        "{}",
+        with.dependency_snapshot.checked_line
+    );
+    assert!(
+        with.methodology.deterministic_note.ends_with(sentence),
+        "{}",
+        with.methodology.deterministic_note
+    );
+    let without = build(&["package-lock.json"]);
+    assert!(!without.dependency_snapshot.checked_line.contains("pom.xml"));
+    assert!(!without.methodology.deterministic_note.contains("pom.xml"));
+    assert!(!sentence.contains('\u{2014}') && !sentence.contains(" - "));
+}
+
+/// The note about files that could not be copied is shown to the client with the files named, not
+/// as a tool called "private-copy" that "did not fully run".
+#[test]
+fn a_not_copied_note_reaches_the_client_with_the_file_names() {
+    let note = crate::scan_mirror::not_copied_note(
+        "acme/api",
+        crate::scan_mirror::MIRROR_NOTE_TOOL,
+        &["src/acme-a.js".to_string(), "src/acme-b.js".to_string()],
+    )
+    .expect("note");
+    let lines = super::marking::tool_coverage_disclosures(&[note]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("src/acme-a.js") && lines[0].contains("src/acme-b.js"),
+        "{lines:?}"
+    );
+    assert!(lines[0].contains("could not be copied"), "{lines:?}");
+    assert!(!lines[0].contains("static-analysis"), "{lines:?}");
+    assert!(!lines[0].contains("private-copy"), "{lines:?}");
+    assert!(!lines[0].contains('\u{2014}'));
+}

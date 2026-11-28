@@ -56,6 +56,7 @@ fn stub_response(text: String) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text,
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -317,6 +318,7 @@ fn selected() -> Vec<(String, String)> {
 
 fn meter_with(config: EfficiencyConfig) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -773,6 +775,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::Writes);
     // Cap already exhausted by the scan pass (each stub call costs 0.01).
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -849,6 +852,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
     // One refusal is $0.60 against a $0.50 cap: the cap trips on the first, so the repeat round
     // is not started.
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -1588,6 +1592,7 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
     // spend to the limit, and the two singles after it are refused before they are sent.
     let llm = RoleLlm::new("{}", Regen::Garbage);
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2389,6 +2394,7 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
         let _g = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", dir.path());
         let repo = tempfile::tempdir().unwrap();
         let store = crate::run_store::RunStore::create(crate::run_store::NewRun {
+            pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
             project_key: "p".to_string(),
             repos: vec![(REPO.to_string(), repo.path().to_path_buf())],
             models: crate::run_store::ModelsRecord {
@@ -2400,6 +2406,8 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
                 resolved: true,
                 group_review: String::new(),
                 finder: String::new(),
+                finder_model: String::new(),
+                scan_exclusions: Vec::new(),
             },
             ai_scan_key: crate::scan_cache::AiScanKey {
                 audit_model: "claude-a".to_string(),
@@ -3140,6 +3148,7 @@ mod batch_route {
 
     fn capped(cap: f64) -> UsageMeter {
         UsageMeter::with_controls(RunControls {
+            scope: Default::default(),
             finder: Default::default(),
             finder_model: None,
             finder_force_pieces: None,
@@ -3156,6 +3165,22 @@ mod batch_route {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_detail_rewrite_round_shows_a_row_in_agent_activity() {
+        let store = crate::transcript::TranscriptStore::new();
+        let llm = RoleLlm::new("{}", Regen::Writes);
+        let route = StageRoute {
+            batch: false,
+            job: None,
+            feedback: Some((&store, "scan-key")),
+        };
+        let _ = run(&llm, route, None).await;
+        let rows = store.get("scan-key");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].role, format!("Detail rewrite ({REPO})"));
+        assert_eq!(rows[0].status, "done", "{rows:#?}");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_batch_run_sends_the_detail_rewrites_as_a_batch_and_absorbs_them_as_in_real_time() {
         let real_time = RoleLlm::new("{}", Regen::Writes);
         let (expected, expected_failed) = run(&real_time, StageRoute::default(), None).await;
@@ -3166,6 +3191,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, None).await;
 
@@ -3209,6 +3235,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, None).await;
 
@@ -3241,6 +3268,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, Some(&meter)).await;
 
@@ -3292,6 +3320,7 @@ mod resume_by_member {
     const BATCH: StageRoute<'static> = StageRoute {
         batch: true,
         job: None,
+        feedback: None,
     };
 
     fn at(line: usize) -> Finding {

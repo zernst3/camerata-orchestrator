@@ -67,6 +67,10 @@ struct Scripted {
     /// Bytes of padding every request carries, so a window of them has a real size.
     padding: usize,
     absorb_calls: usize,
+    /// Ids whose request carries a prompt-cache mark after a shared prefix.
+    marked: BTreeSet<String>,
+    /// Marked ids from this one on carry [`OTHER_PREFIX`] instead (a different cached prefix).
+    other_prefix_from: Option<String>,
 }
 
 impl Scripted {
@@ -77,6 +81,13 @@ impl Scripted {
         }
     }
 
+    /// A stage whose every request carries a cache mark after a shared prefix.
+    fn all_marked(ids: &[&str]) -> Self {
+        let mut stage = Self::new(ids);
+        stage.marked = stage.ids.iter().cloned().collect();
+        stage
+    }
+
     fn numbered(n: usize) -> Self {
         Self {
             ids: (0..n).map(|i| format!("item-{i:03}")).collect(),
@@ -84,6 +95,29 @@ impl Scripted {
         }
     }
 }
+
+impl Scripted {
+    /// The request the stage builds for `id`: marked items carry [`SHARED_PREFIX`] first and a
+    /// cache mark right after it, so the id sits in the uncached tail.
+    fn request_for(&self, id: &str, prompt: String) -> LlmRequest {
+        if self.marked.contains(id) {
+            let prefix = match &self.other_prefix_from {
+                Some(from) if id >= from.as_str() => OTHER_PREFIX,
+                _ => SHARED_PREFIX,
+            };
+            LlmRequest::new(format!("{prefix}{prompt}"))
+                .with_model(MODEL)
+                .with_max_tokens(1024)
+                .with_cache_prefix_len(prefix.len())
+        } else {
+            request(prompt)
+        }
+    }
+}
+
+/// The text every marked request starts with, followed by the cache mark.
+const OTHER_PREFIX: &str = "A DIFFERENT PREFIX: another system text and another repository. ";
+const SHARED_PREFIX: &str = "SHARED PREFIX: the repository line and the system text. ";
 
 impl StageItems for Scripted {
     type Id = String;
@@ -97,7 +131,7 @@ impl StageItems for Scripted {
                 if self.huge.contains(id) {
                     prompt.push_str(&"x".repeat(20_000_000));
                 }
-                (id.clone(), request(prompt))
+                (id.clone(), self.request_for(id, prompt))
             })
             .collect()
     }
@@ -134,6 +168,7 @@ fn reply_for(prompt: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: format!("answer to {prompt}"),
         model: MODEL.to_string(),
         backend: "api".to_string(),
@@ -183,6 +218,8 @@ struct Realtime {
     max_active: AtomicUsize,
     calls: Mutex<Vec<Call>>,
     prompt_lens: Mutex<Vec<usize>>,
+    /// Every request the port received, in order.
+    seen: Mutex<Vec<LlmRequest>>,
 }
 
 impl Realtime {
@@ -196,6 +233,7 @@ impl Realtime {
             max_active: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
             prompt_lens: Mutex::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
         }
     }
 
@@ -225,6 +263,7 @@ impl LlmPort for Realtime {
             nth
         };
         self.prompt_lens.lock().unwrap().push(req.prompt.len());
+        self.seen.lock().unwrap().push(req.clone());
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         self.calls.lock().unwrap().push(Call {
@@ -301,6 +340,10 @@ struct Api {
     /// The simulated kill: `submit` accepts the batch (the provider holds it) and then the
     /// process dies before the id can be saved, so the call never returns.
     kill_after_accepting: bool,
+    /// How many real-time calls had been made when each submission arrived.
+    realtime_calls_at_submit: Mutex<Vec<usize>>,
+    /// Batch rows report a read of the cached prefix.
+    rows_read_cache: bool,
 }
 
 impl Api {
@@ -321,7 +364,15 @@ impl Api {
             cancel_calls: Mutex::new(Vec::new()),
             broken: Mutex::new(HashMap::new()),
             kill_after_accepting: false,
+            realtime_calls_at_submit: Mutex::new(Vec::new()),
+            rows_read_cache: false,
         }
+    }
+
+    /// Every batch row reports reading the shared prefix from the cache.
+    fn reading_cache(mut self) -> Self {
+        self.rows_read_cache = true;
+        self
     }
 
     /// A saved batch the provider answers `status` for on every poll and fetch (404: gone).
@@ -434,6 +485,10 @@ impl BatchApi for Api {
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
         let call = self.submit_calls.fetch_add(1, Ordering::SeqCst);
         self.submit_times.lock().unwrap().push(Instant::now());
+        self.realtime_calls_at_submit
+            .lock()
+            .unwrap()
+            .push(self.realtime.call_count());
         if let Some(err) = (self.submit_script)(call) {
             return Err(err);
         }
@@ -508,7 +563,13 @@ impl BatchApi for Api {
                     billed: None,
                 };
                 match (self.rows)(round, &item) {
-                    Row::Ok => Some(row(Some(reply_for(&prompt_for(&item))), None)),
+                    Row::Ok => {
+                        let mut reply = reply_for(&prompt_for(&item));
+                        if self.rows_read_cache {
+                            reply.cache_read_input_tokens = 2_500;
+                        }
+                        Some(row(Some(reply), None))
+                    }
                     Row::Errored => Some(row(None, Some("overloaded"))),
                     Row::Missing => None,
                     Row::Refused => Some(BatchResultRow {
@@ -543,6 +604,7 @@ fn ctx<'a>(realtime: &'a dyn LlmPort, batch: Option<&'a dyn BatchApi>) -> StageC
         job: None,
         checkpoint: None,
         settings: settings(),
+        feedback: None,
     }
 }
 
@@ -1695,6 +1757,7 @@ async fn save_unsettled_batch(cp: &StageCheckpoint, all: &[&str], gone_id: &str)
 
 fn cap_meter() -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2041,6 +2104,7 @@ async fn a_window_of_large_requests_is_refused_at_admission_though_the_old_const
     stage.padding = 300_000;
     let api = Api::new();
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2095,6 +2159,7 @@ async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
     let mut stage = Scripted::numbered(10);
     let api = Api::new();
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2117,4 +2182,1091 @@ async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
 
     assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
     assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
+}
+
+// ── the spend limit's reserve is per request (Zach's hearth-sample run, 2026-11-18) ─────────────
+
+fn priced_reply(cost: f64) -> LlmResponse {
+    LlmResponse {
+        cost_usd: Some(cost),
+        ..reply_for("a past call")
+    }
+}
+
+/// A meter under a $20 limit that has already spent $7.02, $3.68 of it in ONE big finder call.
+fn meter_after_a_big_finder_call() -> UsageMeter {
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(3.68));
+    meter.record_stage(Stage::GroupReview, &priced_reply(3.34));
+    assert!((meter.spent_usd() - 7.02).abs() < 1e-6);
+    meter
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fix_stage_after_a_big_finder_call_is_not_stopped_by_a_limit_it_did_not_reach() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = meter_after_a_big_finder_call();
+    let mut stage = Scripted::numbered(12);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 8 },
+        &c,
+    )
+    .await;
+
+    assert!(out.is_complete(), "failed: {:?}", out.failed);
+    assert_eq!(out.absorbed.len(), 12);
+    let record = meter.cost_cap_record().expect("a limit was set");
+    assert!(
+        record.not_run_stages.is_empty(),
+        "no stage is recorded as not run: {:?}",
+        record.not_run_stages
+    );
+    assert!(!record.stopped_the_run());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_limit_that_really_is_reached_still_refuses_the_stage_and_says_so() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(5.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(5.5));
+    let mut stage = Scripted::numbered(3);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(out.failed.len(), 3);
+    for f in &out.failed {
+        assert_eq!(f.class, FailureClass::SpendLimit);
+        assert!(
+            f.reason.contains("spend limit stopped the run"),
+            "{}",
+            f.reason
+        );
+    }
+    assert_eq!(meter.refusal_cause(), RefusalCause::LimitReached);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_checkpoint_stop_is_not_reported_as_the_spend_limit_being_reached() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.seed_checkpoint_stop(&crate::cost_checkpoint::CostCheckpoint {
+        approved_usd: 10.0,
+        spent_usd: 1.0,
+        projected_usd: 15.0,
+        pieces_done: 1,
+        pieces_left: 3,
+        stopped: true,
+        new_estimate_usd: Some(15.0),
+        difference_usd: Some(5.0),
+        stopped_before: "agent finder".into(),
+        reserve_usd: 0.0,
+    });
+    let mut stage = Scripted::numbered(3);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(meter.refusal_cause(), RefusalCause::CheckpointStop);
+    assert_eq!(out.failed.len(), 3);
+    for f in &out.failed {
+        assert!(!f.reason.contains("spend limit stopped"), "{}", f.reason);
+        assert!(f.reason.contains("checkpoint"), "{}", f.reason);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unknown_cost_is_not_reported_as_the_spend_limit_being_reached() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    let mut unpriced = priced_reply(0.0);
+    unpriced.cost_usd = None;
+    unpriced.model = "claude-from-the-future".to_string();
+    meter.record_stage(Stage::Finder, &unpriced);
+    assert!(meter.cost_unknown());
+    let mut stage = Scripted::numbered(3);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(meter.refusal_cause(), RefusalCause::CostUnknown);
+    assert_eq!(out.failed.len(), 3);
+    for f in &out.failed {
+        assert!(!f.reason.contains("spend limit stopped"), "{}", f.reason);
+        assert!(f.reason.contains("unknown"), "{}", f.reason);
+    }
+}
+
+// ── the meter itself ────────────────────────────────────────────────────────────────────────────
+
+fn cheap_request() -> LlmRequest {
+    LlmRequest::new("a small prompt")
+        .with_model("claude-sonnet-5-5")
+        .with_max_tokens(1_024)
+}
+
+#[tokio::test]
+async fn cheap_requests_are_admitted_together_after_one_big_call() {
+    let meter = meter_after_a_big_finder_call();
+    let req = cheap_request();
+    let mut permits = Vec::new();
+    for _ in 0..12 {
+        permits.push(
+            meter
+                .admit_for_request(&req, Stage::FixGeneration)
+                .await
+                .expect("a one-cent request fits under $20 with $7 spent"),
+        );
+    }
+    drop(permits);
+    // The reservations came back with the permits.
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_request_reserve_is_released_when_its_permit_drops_and_the_limit_still_bites() {
+    // $19.99 spent of $20 and one request in flight: the next is refused, then admitted again
+    // once the first finishes and the spend is still under the limit.
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(19.99));
+    let req = cheap_request();
+    let first = meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .expect("first");
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_err());
+    drop(first);
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn the_overshoot_stays_bounded_by_the_requests_own_ceilings() {
+    let cap = 10.0;
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::ScanPass, &priced_reply(0.01));
+    let req = LlmRequest::new("x".repeat(3_000))
+        .with_model("claude-opus-5-5")
+        .with_max_tokens(128_000);
+    let ceiling = request_ceiling_usd(&req).unwrap();
+    let mut permits = Vec::new();
+    while let Ok(p) = meter.admit_for_request(&req, Stage::FixGeneration).await {
+        permits.push(p);
+        assert!(permits.len() < 100, "the limit never closed");
+    }
+    let worst = meter.spent_usd() + permits.len() as f64 * ceiling;
+    assert!(
+        worst <= cap + ceiling,
+        "{} permits: ${worst:.2}",
+        permits.len()
+    );
+    assert!(permits.len() >= 3);
+}
+
+#[tokio::test]
+async fn a_stage_whose_calls_cost_more_than_their_ceiling_reserves_what_they_really_cost() {
+    // On the CLI backend a call can cost more than its request's ceiling (the CLI's own overhead
+    // is not in the prompt). A request-scoped pass must reserve the larger of its ceiling and the
+    // largest real cost its stage has had, or the overshoot is no longer bounded.
+    let cap = 10.0;
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    });
+    let req = cheap_request();
+    let ceiling = request_ceiling_usd(&req).unwrap();
+    assert!(
+        ceiling < 0.1,
+        "the request's own ceiling is small: {ceiling}"
+    );
+    // One fix call really cost $2.
+    meter.record_stage(Stage::FixGeneration, &priced_reply(2.0));
+    let mut permits = Vec::new();
+    while let Ok(p) = meter.admit_for_request(&req, Stage::FixGeneration).await {
+        permits.push(p);
+        assert!(
+            permits.len() < 50,
+            "the limit never closed: ceilings alone admit them all"
+        );
+    }
+    // spent $2 of $10, each in flight reserves $2: admitted while 2 + n*2 < 10 (n = 0 to 3).
+    assert_eq!(permits.len(), 4, "{}", permits.len());
+    // Another stage's calls do not inflate this stage's reserve.
+    drop(permits);
+    let other = meter.admit_for_request(&req, Stage::Calibration).await;
+    assert!(other.is_ok());
+}
+
+#[tokio::test]
+async fn a_refused_admission_carries_the_cause_it_was_refused_for() {
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
+        max_cost_usd: Some(5.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(5.5));
+    let req = cheap_request();
+    let Err(cause) = meter.admit_for_request(&req, Stage::FixGeneration).await else {
+        panic!("the limit is reached");
+    };
+    assert_eq!(cause, RefusalCause::LimitReached);
+}
+
+// ── Agent activity rows ─────────────────────────────────────────────────────────────────────────
+
+mod activity_rows {
+    use super::*;
+    use crate::ai_audit::stage_batch::StageFeedback;
+    use crate::transcript::TranscriptStore;
+
+    const KEY: &str = "scan-key";
+
+    fn with_row<'a>(
+        mut c: StageCtx<'a>,
+        store: &'a TranscriptStore,
+        name: &'a str,
+    ) -> StageCtx<'a> {
+        c.feedback = Some(StageFeedback {
+            store,
+            key: KEY,
+            name,
+        });
+        c
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_shows_a_running_row_before_its_first_call_returns_and_a_done_row_after() {
+        let store = TranscriptStore::new();
+        let seen_during: Arc<Mutex<Vec<Vec<crate::transcript::AgentTranscript>>>> = Arc::default();
+        let (watch, sink) = (store.clone(), seen_during.clone());
+        let rt = Realtime::new(move |id, _| {
+            sink.lock().unwrap().push(watch.get(KEY));
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+        });
+        let mut stage = Scripted::new(&["a", "b"]);
+        let c = with_row(ctx(&rt, None), &store, "Group review");
+
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.failed.is_empty());
+
+        let during = seen_during.lock().unwrap().clone();
+        assert!(!during.is_empty(), "the model was called");
+        for view in &during {
+            assert_eq!(view.len(), 1, "{view:#?}");
+            assert_eq!(view[0].role, "Group review (acme/widgets)");
+            assert_eq!(
+                view[0].status, "running",
+                "the row is there while calls run"
+            );
+            assert!(
+                view[0].prompt.contains("ITEM=a;"),
+                "the generated prompt is shown: {}",
+                view[0].prompt
+            );
+            assert!(view[0].prompt.contains("2 calls in this stage"));
+        }
+        let after = store.get(KEY);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].status, "done");
+        assert!(
+            after[0].output.contains("Done: 2 of 2 calls answered."),
+            "{}",
+            after[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_with_a_call_that_had_no_answer_shows_blocked_with_the_reason() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::new(|id, _| {
+            if id == "b" {
+                (
+                    Duration::from_secs(1),
+                    Err(content_error("the model refused this request")),
+                )
+            } else {
+                (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+            }
+        });
+        let mut stage = Scripted::new(&["a", "b"]);
+        let c = with_row(ctx(&rt, None), &store, "Fix");
+
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert_eq!(failed_ids(&out), ids(&["b"]));
+
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("1 of 2 calls had no answer")
+                && rows[0].output.contains("the model refused this request"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_stage_shows_a_blocked_row_saying_how_far_it_got() {
+        let store = TranscriptStore::new();
+        let jobs = Arc::new(JobStore::new());
+        let id = jobs.create("audit", None);
+        let (j2, i2) = (jobs.clone(), id.clone());
+        let rt = Realtime::new(move |item, nth| {
+            if item == "item-010" && nth == 0 {
+                j2.cancel(&i2);
+            }
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+        });
+        let mut stage = Scripted::numbered(40);
+        let mut c = with_row(ctx(&rt, None), &store, "Group review");
+        c.job = Some((&jobs, &id));
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.cancelled.is_some());
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("Stopped before the end:") && rows[0].output.contains("of 40"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_round_of_the_same_stage_gets_its_own_row() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        for _ in 0..2 {
+            let mut stage = Scripted::new(&["a"]);
+            let c = with_row(ctx(&rt, None), &store, "Fix");
+            run_stage(
+                STAGE,
+                &mut stage,
+                StageMode::Parallel { max_in_flight: 1 },
+                &c,
+            )
+            .await;
+        }
+        let rows = store.get(KEY);
+        let roles: Vec<&str> = rows.iter().map(|r| r.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["Fix (acme/widgets)", "Fix, round 2 (acme/widgets)"],
+            "{rows:#?}"
+        );
+        assert!(rows.iter().all(|r| r.status == "done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_with_no_activity_panel_shows_nothing() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        let mut stage = Scripted::new(&["a"]);
+        let c = ctx(&rt, None);
+        run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 1 },
+            &c,
+        )
+        .await;
+        assert!(store.get(KEY).is_empty());
+    }
+}
+
+// ── #240 story 1: a batch whose items share a cached prefix warms that prefix first ─────────────
+
+const FIVE: [&str; 5] = ["item-000", "item-001", "item-002", "item-003", "item-004"];
+
+/// A real-time answer that wrote the shared prefix to the cache.
+fn cache_writing_reply(id: &str) -> LlmResponse {
+    let mut resp = reply_for(&prompt_for(id));
+    resp.cache_creation_input_tokens = 2_500;
+    resp
+}
+
+/// A fake real-time port whose every answer writes the cache.
+fn warming_realtime() -> Realtime {
+    Realtime::new(|id, _| (Duration::from_secs(2), Ok(cache_writing_reply(id))))
+}
+
+fn api_with(realtime: Realtime) -> Api {
+    let mut api = Api::new();
+    api.realtime = realtime;
+    api
+}
+
+fn meter_with_warm(on: bool) -> UsageMeter {
+    let mut efficiency = crate::efficiency::EfficiencyConfig::default();
+    efficiency.set("batch_warm", on).unwrap();
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        efficiency,
+        ..crate::cost_cap::RunControls::default()
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_of_cache_marked_items_sends_one_warm_call_first_and_absorbs_every_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let original = stage.items();
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(sorted(out.absorbed.clone()), ids(&FIVE));
+    assert_eq!(stage.got.len(), 5, "all five replies reached the stage");
+    // One real-time call, for the first item, and it went out before the batch was submitted.
+    assert_eq!(api.realtime.call_count(), 1);
+    assert_eq!(api.realtime.calls()[0].id, "item-000");
+    assert_eq!(*api.realtime_calls_at_submit.lock().unwrap(), vec![1]);
+    // The batch carries the other four, once.
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![ids(&["item-001", "item-002", "item-003", "item-004"])]
+    );
+    // The warm request is the item's own request, byte for byte; only its time-to-live is
+    // stated, and it is the one the batch asks for (one hour from two items up).
+    let warm = api.realtime.seen.lock().unwrap()[0].clone();
+    let first = &original[0].1;
+    assert_eq!(warm.prompt, first.prompt);
+    assert_eq!(warm.system, first.system);
+    assert_eq!(warm.cache_breakpoints, first.cache_breakpoints);
+    assert_eq!(warm.max_tokens, first.max_tokens);
+    assert_eq!(warm.model, first.model);
+    assert_eq!(warm.cache_ttl, Some(CacheTtl::OneHour));
+    assert!(!warm.cache_breakpoints.is_empty());
+    // The warm reply is checkpointed like any other: same key, no batch id of its own.
+    let lines = cp.absorbed();
+    assert_eq!(lines.len(), 5);
+    let line = lines.iter().find(|l| l.key == "item-000").unwrap();
+    assert_eq!(line.batch_id, None);
+    assert_eq!(line.cache_creation_input_tokens, 2_500);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_warm_call_without_two_cache_marked_items() {
+    // No cache mark at all.
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::new(&FIVE);
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Batch,
+        &ctx(&api.realtime, Some(&api)),
+    )
+    .await;
+    assert_eq!(out.absorbed.len(), 5);
+    assert_eq!(api.realtime.call_count(), 0);
+    assert_eq!(api.submitted_item_ids()[0].len(), 5);
+
+    // One item, marked.
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&["item-000"]);
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Batch,
+        &ctx(&api.realtime, Some(&api)),
+    )
+    .await;
+    assert_eq!(out.absorbed.len(), 1);
+    assert_eq!(api.realtime.call_count(), 0);
+
+    // Five items, only one marked.
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::new(&FIVE);
+    stage.marked.insert("item-003".to_string());
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Batch,
+        &ctx(&api.realtime, Some(&api)),
+    )
+    .await;
+    assert_eq!(out.absorbed.len(), 5);
+    assert_eq!(
+        api.realtime.call_count(),
+        0,
+        "one mark has nothing to share"
+    );
+    assert_eq!(api.submitted_item_ids()[0].len(), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_the_measure_off_the_whole_submission_goes_out_at_once() {
+    let meter = meter_with_warm(false);
+    assert!(meter.efficiency().render().contains("batch_warm=off"));
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert_eq!(out.absorbed.len(), 5);
+    assert_eq!(api.realtime.call_count(), 0);
+    assert_eq!(api.submitted_item_ids().len(), 1);
+    assert_eq!(api.submitted_item_ids()[0].len(), 5);
+
+    // The same stage with the measure on (the default) warms.
+    let meter = meter_with_warm(true);
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.absorbed.len(), 5);
+    assert_eq!(api.realtime.call_count(), 1);
+    assert_eq!(api.submitted_item_ids()[0].len(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_warm_call_submits_every_item_and_loses_none() {
+    for error in [content_error("boom"), rate_limited(5), overloaded()] {
+        let message = format!("{error:#}");
+        let api = api_with(Realtime::new(move |_, _| {
+            (
+                Duration::from_secs(1),
+                Err(anyhow::anyhow!(message.clone())),
+            )
+        }));
+        let meter = uncapped_meter();
+        let mut stage = Scripted::all_marked(&FIVE);
+        let mut c = ctx(&api.realtime, Some(&api));
+        c.meter = Some(&meter);
+
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
+        assert_eq!(sorted(out.absorbed.clone()), ids(&FIVE));
+        assert_eq!(
+            api.realtime.call_count(),
+            1,
+            "one warm attempt, not repeated"
+        );
+        assert_eq!(
+            api.submitted_item_ids(),
+            vec![ids(&FIVE)],
+            "the whole submission went out, the warm item included"
+        );
+        assert!(
+            meter.notes().iter().any(|n| n.contains("warm call")),
+            "the failure is on the record"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_warm_reply_the_stage_turns_down_is_accounted_not_lost() {
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    stage.reject_always.insert("item-000".to_string());
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Batch,
+        &ctx(&api.realtime, Some(&api)),
+    )
+    .await;
+
+    assert_eq!(failed_ids(&out), ids(&["item-000"]));
+    assert_eq!(
+        sorted(out.absorbed.clone()),
+        ids(&["item-001", "item-002", "item-003", "item-004"])
+    );
+    assert_eq!(out.absorbed.len() + out.failed.len(), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resume_after_the_warm_call_does_not_send_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+
+    // Process 1: the warm call answers and is absorbed; the batch cannot be submitted.
+    let api = api_with(warming_realtime()).submit_script(|_| Some(content_error("down")));
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.absorbed, ids(&["item-000"]));
+    assert_eq!(out.failed.len(), 4);
+    assert_eq!(api.realtime.call_count(), 1);
+    assert_eq!(
+        cp.absorbed()
+            .iter()
+            .map(|l| l.key.clone())
+            .collect::<Vec<_>>(),
+        ids(&["item-000"]),
+        "the warm reply is on file before the batch goes out"
+    );
+
+    // Process 2: the warm item is replayed, not sent. Nothing is sent in real time at all (the
+    // run that wrote the cache is the one that stopped), and the batch carries the other four.
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.resumed, ids(&["item-000"]));
+    assert_eq!(
+        sorted(out.absorbed.clone()),
+        ids(&["item-001", "item-002", "item-003", "item-004"])
+    );
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(api.realtime.call_count(), 0, "no second warm call");
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![ids(&["item-001", "item-002", "item-003", "item-004"])]
+    );
+    assert_eq!(stage.got.len(), 5);
+}
+
+/// A stage of six marked items that goes out as two submissions of three.
+async fn run_two_submissions(api: &Api) -> stage_batch::StageOutcome<String> {
+    run_two_submissions_with(api, false).await
+}
+
+/// `other_prefix`: the second submission's items carry a different cached prefix.
+async fn run_two_submissions_with(
+    api: &Api,
+    other_prefix: bool,
+) -> stage_batch::StageOutcome<String> {
+    let six = [
+        "item-000", "item-001", "item-002", "item-003", "item-004", "item-005",
+    ];
+    let mut stage = Scripted::all_marked(&six);
+    if other_prefix {
+        stage.other_prefix_from = Some("item-003".to_string());
+    }
+    // Size the body limit from the planner's own arithmetic: three items fit, a fourth does not.
+    let one = &stage.items()[0].1;
+    let item =
+        crate::llm::build_batch_item("s000000000000000000000000", one, MODEL, CacheTtl::OneHour);
+    let size = serde_json::to_vec(&item).unwrap().len() + 1;
+    let mut c = ctx(&api.realtime, Some(api));
+    c.settings.max_body_bytes = size * 3 + size / 2;
+    run_stage(STAGE, &mut stage, StageMode::Batch, &c).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_submission_with_the_same_prefix_is_not_warmed_again() {
+    let api = api_with(warming_realtime());
+    let out = run_two_submissions(&api).await;
+    assert_eq!(out.absorbed.len(), 6);
+    let warmed: Vec<String> = api.realtime.calls().iter().map(|c| c.id.clone()).collect();
+    assert_eq!(
+        warmed,
+        ids(&["item-000"]),
+        "one warm call per cached prefix"
+    );
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![
+            ids(&["item-001", "item-002"]),
+            ids(&["item-003", "item-004", "item-005"])
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_distinct_prefix_is_warmed_while_the_cache_is_proven_to_work() {
+    let api = api_with(warming_realtime()).reading_cache();
+    let out = run_two_submissions_with(&api, true).await;
+    assert_eq!(out.absorbed.len(), 6);
+    let warmed: Vec<String> = api.realtime.calls().iter().map(|c| c.id.clone()).collect();
+    assert_eq!(warmed, ids(&["item-000", "item-003"]));
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![
+            ids(&["item-001", "item-002"]),
+            ids(&["item-004", "item-005"])
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_warm_reply_that_wrote_and_read_no_cache_stops_every_later_warm_call_of_the_run() {
+    // The default fake reply reports no cache write and no cache read: the prefix is under the
+    // model's minimum, the marks do nothing. The second submission has another prefix.
+    let api = Api::new();
+    let out = run_two_submissions_with(&api, true).await;
+    assert_eq!(out.absorbed.len(), 6, "nothing is lost either way");
+    assert!(out.failed.is_empty());
+    let warmed: Vec<String> = api.realtime.calls().iter().map(|c| c.id.clone()).collect();
+    assert_eq!(
+        warmed,
+        ids(&["item-000"]),
+        "the second submission did not warm"
+    );
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![
+            ids(&["item-001", "item-002"]),
+            ids(&["item-003", "item-004", "item-005"])
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_warmed_batch_whose_rows_read_nothing_stops_later_warm_calls() {
+    // The warm call wrote the cache, but no row of the batch read it (the entry did not reach
+    // them): the run stops warming. The second submission has another prefix.
+    let api = api_with(warming_realtime());
+    let out = run_two_submissions_with(&api, true).await;
+    assert_eq!(out.absorbed.len(), 6);
+    let warmed: Vec<String> = api.realtime.calls().iter().map(|c| c.id.clone()).collect();
+    assert_eq!(warmed, ids(&["item-000"]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_follow_round_does_not_warm_again() {
+    // Round 0: two items error and come back in a follow round of marked items.
+    let api = api_with(warming_realtime()).rows(|round, item| {
+        if round == 0 && matches!(item, "item-001" | "item-002" | "item-003") {
+            Row::Errored
+        } else {
+            Row::Ok
+        }
+    });
+    let mut stage = Scripted::all_marked(&FIVE);
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Batch,
+        &ctx(&api.realtime, Some(&api)),
+    )
+    .await;
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(out.absorbed.len(), 5);
+    assert_eq!(api.submitted_item_ids().len(), 2, "a follow round happened");
+    assert_eq!(api.realtime.call_count(), 1, "and it did not warm");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_stage_call_of_the_same_run_does_not_warm_the_same_prefix_again() {
+    let meter = uncapped_meter();
+    let api = api_with(warming_realtime());
+    for ids_now in [
+        FIVE,
+        ["item-000", "item-001", "item-002", "item-003", "item-005"],
+    ] {
+        let mut stage = Scripted::all_marked(&ids_now);
+        let mut c = ctx(&api.realtime, Some(&api));
+        c.meter = Some(&meter);
+        let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
+        assert_eq!(out.absorbed.len(), 5);
+    }
+    assert_eq!(
+        api.realtime.call_count(),
+        1,
+        "the second run_stage read what the first wrote"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_warm_call_the_model_refuses_is_that_items_final_answer_and_is_not_billed_twice() {
+    let api = api_with(Realtime::new(|_, _| {
+        (
+            Duration::from_secs(1),
+            Err(anyhow::Error::new(crate::llm::ModelRefusal {
+                billed: Some(Box::new(reply_for(""))),
+            })),
+        )
+    }));
+    let meter = uncapped_meter();
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(failed_ids(&out), ids(&["item-000"]));
+    assert_eq!(out.failed[0].class, FailureClass::Content);
+    assert_eq!(out.absorbed.len(), 4);
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![ids(&["item-001", "item-002", "item-003", "item-004"])],
+        "the refused item was not sent again in the batch"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_warm_call_when_the_batch_asks_for_the_five_minute_cache() {
+    let mut efficiency = crate::efficiency::EfficiencyConfig::default();
+    efficiency.set("batch_long_cache", false).unwrap();
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        efficiency,
+        ..crate::cost_cap::RunControls::default()
+    });
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.absorbed.len(), 5);
+    assert_eq!(api.realtime.call_count(), 0);
+    assert_eq!(api.submitted_item_ids()[0].len(), 5);
+}
+
+#[test]
+fn the_warm_rule_is_two_marked_items_the_measure_on_and_a_cache_not_shown_dead() {
+    use super::batch_mode::{reply_shows_no_caching, should_warm_batch};
+    let on = crate::efficiency::EfficiencyConfig::default();
+    let mut off = on;
+    off.set("batch_warm", false).unwrap();
+    assert!(on.batch_warm, "on by default");
+    let hour = CacheTtl::OneHour;
+    assert!(should_warm_batch(on, 2, false, hour));
+    assert!(should_warm_batch(on, 65, false, hour));
+    assert!(!should_warm_batch(on, 1, false, hour));
+    assert!(!should_warm_batch(on, 0, false, hour));
+    assert!(!should_warm_batch(off, 65, false, hour));
+    assert!(!should_warm_batch(on, 65, true, hour));
+    // A 5 minute write would be gone before the batch starts.
+    assert!(!should_warm_batch(on, 65, false, CacheTtl::FiveMinutes));
+
+    let mut resp = reply_for("x");
+    assert!(reply_shows_no_caching(&resp));
+    resp.cache_creation_input_tokens = 1;
+    assert!(!reply_shows_no_caching(&resp));
+    resp.cache_creation_input_tokens = 0;
+    resp.cache_read_input_tokens = 1;
+    assert!(!reply_shows_no_caching(&resp));
+}
+
+// ── #240: a billing failure of the warm call stops the stage; the limit still gates the batch ───
+
+const CREDIT_ERROR: &str =
+    "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing.";
+
+fn billing_error() -> anyhow::Error {
+    anyhow::Error::new(LlmCallFailure::new(
+        FailureClass::AuthOrBilling,
+        CREDIT_ERROR,
+    ))
+}
+
+fn credit_stopped_realtime() -> Realtime {
+    Realtime::new(|_, _| (Duration::from_secs(1), Err(billing_error())))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_warm_call_refused_for_billing_submits_no_batch_stops_the_stage_and_loses_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+
+    // Process 1: the warm call is refused for billing.
+    let meter = uncapped_meter();
+    let api = api_with(credit_stopped_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        0,
+        "no batch is submitted"
+    );
+    assert_eq!(api.realtime.call_count(), 1, "one warm attempt, no more");
+    assert!(out.absorbed.is_empty());
+    assert_eq!(
+        sorted(failed_ids(&out)),
+        ids(&FIVE),
+        "every item is accounted"
+    );
+    assert!(out
+        .failed
+        .iter()
+        .all(|f| f.class == FailureClass::AuthOrBilling));
+    assert!(
+        meter.outage_stopped(),
+        "the run is stopped the way a credit stop on a batch row stops it"
+    );
+    assert!(meter.notes().iter().any(|n| n.contains("warm call")));
+    assert!(cp.absorbed().is_empty());
+    assert!(cp.batches().is_empty());
+
+    // Process 2, credit restored: nothing was lost, every item is sent and absorbed.
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(sorted(out.absorbed.clone()), ids(&FIVE));
+    assert_eq!(stage.got.len(), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_billing_refusal_no_later_submission_of_the_run_warms_or_submits() {
+    let api = api_with(credit_stopped_realtime());
+    let out = run_two_submissions(&api).await;
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        api.realtime.call_count(),
+        1,
+        "the second submission did not call either"
+    );
+    assert!(out.absorbed.is_empty());
+    assert_eq!(out.failed.len(), 6);
+}
+
+fn limited_meter(limit: f64, stored: f64) -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(limit),
+        stored_spend_usd: stored,
+        ..crate::cost_cap::RunControls::default()
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_past_its_limit_sends_neither_a_warm_call_nor_a_batch() {
+    let meter = limited_meter(5.0, 12.0);
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(api.realtime.call_count(), 0);
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(out.failed.len(), 5);
+    assert!(out
+        .failed
+        .iter()
+        .all(|f| f.class == FailureClass::SpendLimit));
+}
+
+/// The batch is admitted AGAIN after the warm call, on what the warm call left: a warm call
+/// that spends the room the batch needed means the batch is refused, not submitted.
+#[tokio::test(start_paused = true)]
+async fn the_batch_is_admitted_again_after_the_warm_call_has_spent() {
+    // The warm reply costs 0.02. The limit leaves room for the warm call and for the whole
+    // batch before it, but not for the batch after the warm call has been paid.
+    let meter = limited_meter(0.0201, 0.0);
+    let api = api_with(warming_realtime());
+    let mut stage = Scripted::all_marked(&FIVE);
+    stage.padding = 4_000;
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(api.realtime.call_count(), 1, "the warm call was admitted");
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        0,
+        "the batch the limit would refuse was not submitted"
+    );
+    assert_eq!(out.absorbed, ids(&["item-000"]));
+    assert_eq!(out.failed.len(), 4);
+    assert!(out
+        .failed
+        .iter()
+        .all(|f| f.class == FailureClass::SpendLimit));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_warm_call_does_not_block_the_prefix_for_the_next_submission() {
+    // The first warm call fails; the second submission (same prefix) tries again and warms.
+    let api = api_with(Realtime::new(|id, nth| {
+        if nth == 0 && id == "item-000" {
+            (Duration::from_secs(1), Err(content_error("boom")))
+        } else {
+            (Duration::from_secs(1), Ok(cache_writing_reply(id)))
+        }
+    }));
+    let out = run_two_submissions(&api).await;
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(out.absorbed.len(), 6);
+    let warmed: Vec<String> = api.realtime.calls().iter().map(|c| c.id.clone()).collect();
+    assert_eq!(warmed, ids(&["item-000", "item-003"]));
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![
+            ids(&["item-000", "item-001", "item-002"]),
+            ids(&["item-004", "item-005"])
+        ]
+    );
 }

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::archive::{xlsx_cells, xlsx_header_footers, xlsx_strings};
+use super::archive::{xlsx_cells, xlsx_extra_texts, xlsx_header_footers, xlsx_strings};
 use super::report::Problem;
 
 /// One problem per secret in `text`, located by `location` (and by line when `with_line`).
@@ -36,11 +36,21 @@ fn scan_text_except(
     if stripped.as_ref() != text {
         variants.push(stripped.as_ref());
     }
+    // A key split by a space in the text still reads as one key to a person copying it. The text
+    // with those spaces closed up ([`close_split_key_spaces`]) is scanned too, for the shapes
+    // with a fixed vendor prefix only: the shapes read from their context would invent matches
+    // across prose.
+    let closed = close_split_key_spaces(&stripped);
+    let closed_variant = (closed != stripped.as_ref()).then_some(closed.as_str());
     let mut seen: HashSet<(String, String)> = HashSet::new();
     let mut problems = Vec::new();
-    for variant in variants {
-        for m in camerata_secrets::detect_secrets(variant) {
-            if skip(&m, variant) {
+    for (variant, is_closed) in variants
+        .into_iter()
+        .map(|v| (v, false))
+        .chain(closed_variant.map(|v| (v, true)))
+    {
+        for m in camerata_secrets::detect_client_secrets(variant) {
+            if skip(&m, variant) || (is_closed && !m.shape.is_vendor_shaped()) {
                 continue;
             }
             let form = m.redacted_form(variant);
@@ -62,7 +72,7 @@ fn scan_text_except(
             problems.push(Problem::new(
                 file,
                 at,
-                format!("{} present in a client file", m.shape.display_name()),
+                present_message(m.shape, m.twin.as_ref()),
                 Some(evidence),
             ));
         }
@@ -70,37 +80,89 @@ fn scan_text_except(
     problems
 }
 
+/// The problem's message: the shape named, and for a published documentation key that it is one
+/// and is unmasked (the export masks it; this proves it did). Never the value.
+fn present_message(
+    shape: camerata_secrets::SecretShape,
+    twin: Option<&camerata_secrets::Twin>,
+) -> String {
+    if matches!(twin, Some(camerata_secrets::Twin::PublishedExampleKey)) {
+        format!(
+            "{} (a published example key) present unmasked in a client file",
+            shape.display_name()
+        )
+    } else {
+        format!("{} present in a client file", shape.display_name())
+    }
+}
+
 /// A plain-text file (the README, the manifest, a non-JSON member).
 pub fn text_problems(file: &str, text: &str) -> Vec<Problem> {
     scan_text(file, "", text, true)
 }
 
-fn strip_json_zero_width(value: &mut Value) {
+fn map_json_strings(value: &mut Value, f: &dyn Fn(&str) -> String) {
     match value {
-        Value::String(s) => *s = crate::report_export::strip_zero_width(s).into_owned(),
-        Value::Array(items) => items.iter_mut().for_each(strip_json_zero_width),
+        Value::String(s) => *s = f(s),
+        Value::Array(items) => items.iter_mut().for_each(|item| map_json_strings(item, f)),
         Value::Object(map) => {
             let entries = std::mem::take(map);
             for (key, mut item) in entries {
-                strip_json_zero_width(&mut item);
-                map.insert(
-                    crate::report_export::strip_zero_width(&key).into_owned(),
-                    item,
-                );
+                map_json_strings(&mut item, f);
+                map.insert(f(&key), item);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
-/// A parsed JSON document: every string and every object key, located by JSON path.
+/// The characters a key is made of.
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=')
+}
+
+/// `text` with the single spaces closed up where they split what reads as a key: the run after
+/// the space opens with six or more key characters and one of the first six is a digit or a
+/// capital (random text, not a word), and the run before it ends in a key character. A word
+/// after a prefix in prose (`sb_secret_ keys in client code`) is not random, so prose is left as
+/// it is; a key split by a space (`sk_live_a1B2c3D4 e5F6g7H8i9J0`) is closed.
+fn close_split_key_spaces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, fragment) in text.split(' ').enumerate() {
+        if i > 0 {
+            let lead: Vec<char> = fragment.chars().take_while(|c| is_key_char(*c)).collect();
+            let random = lead.len() >= 6
+                && lead
+                    .iter()
+                    .take(6)
+                    .any(|c| c.is_ascii_digit() || c.is_ascii_uppercase());
+            let joins = out.chars().next_back().is_some_and(is_key_char);
+            if !(random && joins) {
+                out.push(' ');
+            }
+        }
+        out.push_str(fragment);
+    }
+    out
+}
+
+/// A parsed JSON document: every string and every object key, located by JSON path. Read as
+/// given, with zero-width characters stripped, and with the spaces that split a key closed up (the last
+/// for the shapes with a fixed vendor prefix only, as in [`scan_text_except`]).
 pub fn json_problems(file: &str, value: &Value) -> Vec<Problem> {
     let mut stripped = value.clone();
-    strip_json_zero_width(&mut stripped);
+    map_json_strings(&mut stripped, &|s| {
+        crate::report_export::strip_zero_width(s).into_owned()
+    });
+    let mut closed = stripped.clone();
+    map_json_strings(&mut closed, &close_split_key_spaces);
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     let mut problems = Vec::new();
-    for doc in [value, &stripped] {
+    for (doc, is_closed) in [(value, false), (&stripped, false), (&closed, true)] {
         for hit in camerata_secrets::find_secret_hits_in_json(doc) {
+            if is_closed && !hit.shape.is_vendor_shaped() {
+                continue;
+            }
             let evidence = hit.form.split_whitespace().collect::<Vec<_>>().join(" ");
             if !seen.insert((
                 hit.path.clone(),
@@ -112,7 +174,7 @@ pub fn json_problems(file: &str, value: &Value) -> Vec<Problem> {
             problems.push(Problem::new(
                 file,
                 hit.path,
-                format!("{} present in a client file", hit.shape.display_name()),
+                present_message(hit.shape, hit.twin.as_ref()),
                 Some(evidence),
             ));
         }
@@ -125,8 +187,94 @@ pub fn json_problems(file: &str, value: &Value) -> Vec<Problem> {
 pub fn json_bytes_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(value) => json_problems(file, &value),
-        Err(_) => text_problems(file, &String::from_utf8_lossy(bytes)),
+        Err(_) => unparseable_json_problems(file, &String::from_utf8_lossy(bytes)),
     }
+}
+
+/// A `.json` file that does not parse: scanned as text, and again with its string escapes decoded
+/// (`\u0073k_live_...` is the key to any reader that opens it), so an unparseable export is never
+/// a way around the check.
+fn unparseable_json_problems(file: &str, text: &str) -> Vec<Problem> {
+    let mut problems = text_problems(file, text);
+    let decoded = decode_json_escapes(text);
+    if decoded != text {
+        let known: HashSet<(String, Option<String>)> = problems
+            .iter()
+            .map(|p| (p.message.clone(), p.evidence.clone()))
+            .collect();
+        for p in text_problems(file, &decoded) {
+            if !known.contains(&(p.message.clone(), p.evidence.clone())) {
+                problems.push(p);
+            }
+        }
+    }
+    problems
+}
+
+/// `text` with its JSON string escapes decoded leniently: `\uXXXX` (a surrogate pair too),
+/// `\n`, `\t`, `\r`, `\b`, `\f`, `\"`, `\\` and `\/`. An escape that is not valid stays as written.
+fn decode_json_escapes(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let hex4 = |at: usize| -> Option<u32> {
+        let digits: String = chars.get(at..at + 4)?.iter().collect();
+        u32::from_str_radix(&digits, 16).ok()
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '\\' || i + 1 >= chars.len() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match chars[i + 1] {
+            'u' => {
+                let Some(unit) = hex4(i + 2) else {
+                    out.push('\\');
+                    i += 1;
+                    continue;
+                };
+                let mut consumed = 6;
+                let code = if (0xD800..0xDC00).contains(&unit)
+                    && chars.get(i + 6) == Some(&'\\')
+                    && chars.get(i + 7) == Some(&'u')
+                {
+                    match hex4(i + 8).filter(|low| (0xDC00..0xE000).contains(low)) {
+                        Some(low) => {
+                            consumed = 12;
+                            0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
+                        }
+                        None => unit,
+                    }
+                } else {
+                    unit
+                };
+                if let Some(c) = char::from_u32(code) {
+                    out.push(c);
+                    i += consumed;
+                } else {
+                    out.push('\\');
+                    i += 1;
+                }
+            }
+            simple @ ('n' | 't' | 'r' | 'b' | 'f' | '"' | '\\' | '/') => {
+                out.push(match simple {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    'b' => '\u{8}',
+                    'f' => '\u{c}',
+                    other => other,
+                });
+                i += 2;
+            }
+            _ => {
+                out.push('\\');
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// A CSV file's bytes: every header and every cell, located by row and column name.
@@ -155,7 +303,7 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
                 // A nested list or object (the `also_locations` column) is JSON text. It is
                 // scanned BOTH ways, and the union is reported, so the check is never weaker
                 // than scanning the cell as one string was:
-                // 1. walked like `findings.json`, every string and key on its own (the same
+                // 1. walked like `json/inspection.json`, every string and key on its own (the same
                 //    detector, the same strictness), which also sees an unquoted `.env` line
                 //    inside a snippet that the one-string scan cannot (the line is not at a line
                 //    start there);
@@ -369,18 +517,54 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
             None,
         )),
     }
-    if let Ok(strings) = xlsx_strings(bytes) {
-        let already: HashSet<(String, Option<String>)> = problems
-            .iter()
-            .map(|p| (p.message.clone(), p.evidence.clone()))
-            .collect();
-        for (i, text) in strings.iter().enumerate() {
-            for p in scan_text(file, &format!("shared string #{i}"), text, false) {
-                if !already.contains(&(p.message.clone(), p.evidence.clone())) {
-                    problems.push(p);
+    // Parts a reader can open that are neither a cell nor a header: cell comments, the document
+    // properties (title, author, keywords), drawings and charts. Their text is scanned both as
+    // runs joined and as runs apart, so a key split across two runs is still one key.
+    match xlsx_extra_texts(bytes) {
+        Ok(parts) => {
+            for (part, joined, apart) in parts {
+                let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                for text in [&joined, &apart] {
+                    for p in scan_text(file, &format!("workbook part {part}"), text, false) {
+                        if seen.insert((p.message.clone(), p.evidence.clone())) {
+                            problems.push(p);
+                        }
+                    }
                 }
             }
         }
+        Err(e) => problems.push(Problem::new(
+            file,
+            "workbook",
+            format!(
+                "a workbook part could not be read, so it could not be checked for secrets: {e}"
+            ),
+            None,
+        )),
+    }
+    match xlsx_strings(bytes) {
+        Ok(strings) => {
+            let already: HashSet<(String, Option<String>)> = problems
+                .iter()
+                .map(|p| (p.message.clone(), p.evidence.clone()))
+                .collect();
+            for (i, text) in strings.iter().enumerate() {
+                for p in scan_text(file, &format!("shared string #{i}"), text, false) {
+                    if !already.contains(&(p.message.clone(), p.evidence.clone())) {
+                        problems.push(p);
+                    }
+                }
+            }
+        }
+        Err(e) => problems.push(Problem::new(
+            file,
+            "workbook",
+            format!(
+                "the workbook's shared strings could not be read, so they could not be checked \
+                 for secrets: {e}"
+            ),
+            None,
+        )),
     }
     problems
 }

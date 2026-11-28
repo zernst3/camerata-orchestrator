@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1"
-version = 1
+version = 2
 title = "ASP.NET Core routing style: Minimal APIs or MVC controllers"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -11,7 +11,7 @@ default = false
 verification = "grounded"
 [decision]
 question = "What routing style does the project adopt for HTTP endpoints: Minimal APIs (MapGet/MapPost lambda endpoints) or MVC controllers (classes inheriting ControllerBase with attribute routing)?"
-why = "ASP.NET Core supports two first-class routing styles, and the right one follows from the kind of service being built and the investment the project already has, not from a presumed winner. Minimal APIs register endpoints as MapGet/MapPost lambdas in Program.cs (or in IEndpointRouteBuilder extension methods): less framework ceremony, a lower per-endpoint overhead, and the direction modern ASP.NET Core tooling is built around, which makes them the natural fit for new services and small focused APIs. MVC controllers organize endpoints into ControllerBase classes with attribute routing, and bring richer filter and model-binding conventions out of the box (controller-scoped filters, action results, model-state handling), which makes them the natural fit for projects with deep existing investment in those conventions or a large established controller surface. Whichever style is chosen, the one cost worth avoiding is mixing both arbitrarily within a project, since that maintains two programming models for identical work. Choose by the service's shape and the codebase's existing investment, and apply the chosen style consistently."
+why = "ASP.NET Core supports two first-class routing styles, and the right one follows from the kind of service being built and the investment the project already has, not from a presumed winner. Minimal APIs register endpoints as MapGet/MapPost lambdas in Program.cs (or in IEndpointRouteBuilder extension methods): less framework ceremony, a lower per-endpoint overhead and the direction modern ASP.NET Core tooling is built around, which makes them the natural fit for new services and small focused APIs. MVC controllers organize endpoints into ControllerBase classes with attribute routing, and bring richer filter and model-binding conventions out of the box (controller-scoped filters, action results, model-state handling), which makes them the natural fit for projects with deep existing investment in those conventions or a large established controller surface. Whichever style is chosen, the one cost worth avoiding is mixing both arbitrarily within a project, since that maintains two programming models for identical work. Choose by the service's shape and the codebase's existing investment, and apply the chosen style consistently."
 
 [[option]]
 id = "minimal-apis-throughout"

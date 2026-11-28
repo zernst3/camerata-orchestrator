@@ -123,6 +123,9 @@ pub struct Hit {
 /// outcome for why nothing was searched ([`FindingContextOutcome::SearchFailed`]: it did not
 /// start, not a repository, an error exit; [`SearchTooSlow`](FindingContextOutcome::SearchTooSlow);
 /// [`Busy`](FindingContextOutcome::Busy): no slot for another read of client code freed in time).
+/// Whether a hit in a path may be shown: the project's Excluded by agreement list.
+type Admit = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 type Searched = Result<(Vec<Hit>, bool), FindingContextOutcome>;
 
 /// The limits one search runs under. Tests shrink them to reach the timeout and the output cap
@@ -179,6 +182,7 @@ fn parse_hits(
     sha: Option<&str>,
     truncated: bool,
     extra_dirs: &[String],
+    admit: &dyn Fn(&str) -> bool,
 ) -> (Vec<Hit>, bool) {
     let prefix = sha.map(|s| format!("{s}:"));
     let mut hits = Vec::new();
@@ -199,7 +203,9 @@ fn parse_hits(
             Some(p) => name.strip_prefix(p.as_str()).unwrap_or(name),
             None => name,
         };
-        if path.is_empty() || is_noise_path(path, extra_dirs) {
+        // The project's Excluded by agreement list is applied BEFORE the hit limit below, so an
+        // excluded file with many uses cannot crowd the real ones out of the answer.
+        if path.is_empty() || is_noise_path(path, extra_dirs) || !admit(path) {
             continue;
         }
         if hits.len() >= MAX_HITS {
@@ -227,7 +233,7 @@ fn whole_records(output: &[u8]) -> &[u8] {
 }
 
 /// Run the one read-only `git grep` and read its output, bounded.
-async fn git_grep(at: Where<'_>, symbol: &str, limits: SearchLimits) -> Searched {
+async fn git_grep(at: Where<'_>, symbol: &str, limits: SearchLimits, admit: Admit) -> Searched {
     use tokio::io::AsyncReadExt;
 
     let (dir, tree) = match at {
@@ -293,12 +299,12 @@ async fn git_grep(at: Where<'_>, symbol: &str, limits: SearchLimits) -> Searched
             bytes.truncate(limits.max_output);
             let _ = child.kill().await;
             let kept = whole_records(&bytes).to_vec();
-            return Ok(parse_in_pool(kept, tree, true, extra_dirs).await);
+            return Ok(parse_in_pool(kept, tree, true, extra_dirs, admit).await);
         }
         match child.wait().await {
             // 0: matches, 1: none.
             Ok(status) if matches!(status.code(), Some(0 | 1)) => {
-                Ok(parse_in_pool(bytes, tree, false, extra_dirs).await)
+                Ok(parse_in_pool(bytes, tree, false, extra_dirs, admit).await)
             }
             _ => Err(FindingContextOutcome::SearchFailed),
         }
@@ -314,11 +320,14 @@ async fn parse_in_pool(
     sha: Option<&str>,
     truncated: bool,
     extra_dirs: Vec<String>,
+    admit: Admit,
 ) -> (Vec<Hit>, bool) {
     let sha = sha.map(str::to_string);
-    tokio::task::spawn_blocking(move || parse_hits(&bytes, sha.as_deref(), truncated, &extra_dirs))
-        .await
-        .unwrap_or_default()
+    tokio::task::spawn_blocking(move || {
+        parse_hits(&bytes, sha.as_deref(), truncated, &extra_dirs, &*admit)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[derive(serde::Serialize)]
@@ -395,6 +404,13 @@ pub async fn symbol_refs_with(
         Ok(read) => read,
         Err(refusal) => return no_store(refusal.into_response()),
     };
+    // A hit in a file the project's exclusion list names is dropped: `git grep` searches the
+    // whole tree, so the list is applied to what it found.
+    let scope = super::scope::scope_for_read(state, params.project.as_deref());
+    let admit: Admit = {
+        let repo = params.repo.clone();
+        std::sync::Arc::new(move |path: &str| scope.admits(&repo, path))
+    };
     match read {
         SourceRead::Deleted {
             deleted_at,
@@ -406,14 +422,17 @@ pub async fn symbol_refs_with(
             }
             .to_json(),
         ),
-        // Not linked / not on disk: indistinguishable from "file missing" to the UI.
-        SourceRead::Unresolved { .. } => respond(FindingContextOutcome::FileMissing.to_json()),
+        // Not linked / no local folder: its own status and reason, never "file missing".
+        SourceRead::Unresolved { reason } => {
+            respond(FindingContextOutcome::RepoUnlinked { reason }.to_json())
+        }
         // No commit is known for this inspection: the working tree, labelled.
         SourceRead::WorkingTree { dir } => {
-            let (hits, more) = match git_grep(Where::WorkingTree(&dir), symbol, limits).await {
-                Ok(found) => found,
-                Err(outcome) => return nothing_found(&outcome, None, symbol),
-            };
+            let (hits, more) =
+                match git_grep(Where::WorkingTree(&dir), symbol, limits, admit.clone()).await {
+                    Ok(found) => found,
+                    Err(outcome) => return nothing_found(&outcome, None, symbol),
+                };
             respond(Body {
                 status: "ok",
                 source: "working_tree",
@@ -435,10 +454,11 @@ pub async fn symbol_refs_with(
                 // The one labelled fallback, and only while the folder exists (the resolver
                 // checked) and the search ran: the working tree, loudly. The status stays
                 // `commit_unavailable`. A search that did not run is `unavailable`, not this.
-                let (hits, more) = match git_grep(Where::WorkingTree(&dir), symbol, limits).await {
-                    Ok(found) => found,
-                    Err(outcome) => return nothing_found(&outcome, None, symbol),
-                };
+                let (hits, more) =
+                    match git_grep(Where::WorkingTree(&dir), symbol, limits, admit.clone()).await {
+                        Ok(found) => found,
+                        Err(outcome) => return nothing_found(&outcome, None, symbol),
+                    };
                 let outcome = FindingContextOutcome::CommitUnavailable;
                 return respond(Body {
                     status: "commit_unavailable",
@@ -455,7 +475,7 @@ pub async fn symbol_refs_with(
                 dir: &dir,
                 sha: &sha,
             };
-            let (hits, more) = match git_grep(at, symbol, limits).await {
+            let (hits, more) = match git_grep(at, symbol, limits, admit.clone()).await {
                 Ok(found) => found,
                 Err(outcome) => return nothing_found(&outcome, None, symbol),
             };
@@ -484,7 +504,7 @@ mod tests {
         out.extend_from_slice(b"S:node_modules/dep/index.js\x001\x00foo\n");
         out.extend_from_slice(b"S:Cargo.lock\x002\x00foo\n");
         out.extend_from_slice(b"S:dir:with/colon.rs\x0012\x00foo()\r\n");
-        let (hits, more) = parse_hits(&out, Some("S"), false, &[]);
+        let (hits, more) = parse_hits(&out, Some("S"), false, &[], &|_: &str| true);
         assert!(!more);
         assert_eq!(
             hits,
@@ -505,17 +525,17 @@ mod tests {
         let many: Vec<u8> = (1..=MAX_HITS + 5)
             .flat_map(|n| format!("a.rs\0{n}\0foo\n").into_bytes())
             .collect();
-        let (hits, more) = parse_hits(&many, None, false, &[]);
+        let (hits, more) = parse_hits(&many, None, false, &[], &|_: &str| true);
         assert_eq!((hits.len(), more), (MAX_HITS, true));
         let exact: Vec<u8> = (1..=MAX_HITS)
             .flat_map(|n| format!("a.rs\0{n}\0foo\n").into_bytes())
             .collect();
         assert!(
-            !parse_hits(&exact, None, false, &[]).1,
+            !parse_hits(&exact, None, false, &[], &|_: &str| true).1,
             "exactly the cap is not more"
         );
         assert!(
-            parse_hits(&exact, None, true, &[]).1,
+            parse_hits(&exact, None, true, &[], &|_: &str| true).1,
             "a truncated read is more"
         );
     }
@@ -543,10 +563,16 @@ mod tests {
     #[test]
     fn the_operators_extra_excluded_dirs_drop_hits_as_the_scan_does() {
         let out = b"a/vendored_by_me/x.rs\x001\x00foo\nsrc/y.rs\x002\x00foo\n";
-        let (hits, _) = parse_hits(out, None, false, &["vendored_by_me".to_string()]);
+        let (hits, _) = parse_hits(
+            out,
+            None,
+            false,
+            &["vendored_by_me".to_string()],
+            &|_: &str| true,
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "src/y.rs");
-        let (hits, _) = parse_hits(out, None, false, &[]);
+        let (hits, _) = parse_hits(out, None, false, &[], &|_: &str| true);
         assert_eq!(hits.len(), 2);
     }
 
