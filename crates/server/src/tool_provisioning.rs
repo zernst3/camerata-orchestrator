@@ -719,6 +719,7 @@ pub(crate) async fn ensure_eslint_with(
     }
     refuse_real_tooling_in_test_process(tooling, "eslint")?;
 
+    npm.prepare_home().await?;
     if !npm.answers_version().await {
         return Err(ProvisionError::InstallFailed {
             tool: "eslint",
@@ -748,7 +749,13 @@ pub struct NpmCommand {
     /// True when Camerata is offline: npm would reach its registry, so a missing eslint tree is a
     /// refusal instead.
     pub offline: bool,
+    /// npm's own folder in the tooling folder: its user and global config files (empty) and its
+    /// cache live here, never the user's `~/.npmrc` or `~/.npm`. `None` only for a test fake.
+    pub home: Option<PathBuf>,
 }
+
+/// The registry eslint and its plugins install from: npm's official one.
+pub const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
 
 impl NpmCommand {
     /// A single program that behaves as npm (a test fake).
@@ -758,16 +765,49 @@ impl NpmCommand {
             prefix: Vec::new(),
             path_env: None,
             offline: false,
+            home: None,
         }
     }
 
+    /// The npm command: none of the user's `npm_config_*` variables (any case), Camerata's own
+    /// config files and cache, the official registry.
     fn command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(&self.launcher);
         cmd.args(&self.prefix).kill_on_drop(true);
         if let Some(path) = &self.path_env {
             cmd.env("PATH", path);
         }
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("npm_config_")
+            {
+                cmd.env_remove(&key);
+            }
+        }
+        cmd.env("npm_config_registry", NPM_REGISTRY)
+            .env("npm_config_update_notifier", "false")
+            .env("npm_config_fund", "false")
+            .env("npm_config_audit", "false");
+        if let Some(home) = &self.home {
+            cmd.env("npm_config_userconfig", home.join("npmrc"))
+                .env("npm_config_globalconfig", home.join("global-npmrc"))
+                .env("npm_config_cache", home.join("cache"));
+        }
         cmd
+    }
+
+    /// Create npm's own folder and its empty config files.
+    async fn prepare_home(&self) -> std::io::Result<()> {
+        let Some(home) = &self.home else {
+            return Ok(());
+        };
+        tokio::fs::create_dir_all(home.join("cache")).await?;
+        for file in ["npmrc", "global-npmrc"] {
+            tokio::fs::write(home.join(file), "").await?;
+        }
+        Ok(())
     }
 
     async fn answers_version(&self) -> bool {

@@ -140,6 +140,8 @@ if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   mkdir -p "$3/bin" && cp "$0" "$3/bin/python" && exit 0
 fi
 if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
+  env > "$0.pip-env"
+  echo "$*" > "$0.pip-args"
   d=$(dirname "$0")
   SEMGREP_BODY='{FAKE_SEMGREP}'
   printf '%s' "$SEMGREP_BODY" > "$d/semgrep" && chmod +x "$d/semgrep" && exit 0
@@ -175,6 +177,8 @@ script="$1"; shift
 case "$script" in
   *npm-cli.js)
     if [ "$1" = "--version" ]; then echo "11.0.0"; exit 0; fi
+    env > "$0.npm-env"
+    echo "$*" > "$0.npm-args"
 {install}    exit 0
     ;;
   *eslint.js)
@@ -325,6 +329,14 @@ impl FakeTools {
     pub fn entry(&self, artifact: Artifact) -> PathBuf {
         super::fetch::entry_point(&self.env.tooling, self.env.pins(artifact), self.platform)
             .expect("the fake pins name an entry point")
+    }
+
+    /// What the fake recorded beside `program` under `suffix` (`npm-env`, `npm-args`,
+    /// `pip-env`, `pip-args`), or an empty string.
+    pub fn recorded(program: &Path, suffix: &str) -> String {
+        let mut file = program.as_os_str().to_owned();
+        file.push(format!(".{suffix}"));
+        std::fs::read_to_string(PathBuf::from(file)).unwrap_or_default()
     }
 
     /// Every `PATH` the program at `program` was started with, one per run.

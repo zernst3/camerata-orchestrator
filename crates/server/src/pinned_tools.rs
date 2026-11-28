@@ -249,6 +249,7 @@ impl ToolEnv {
             prefix: vec![node.npm_cli.clone().into_os_string()],
             path_env: Some(self.child_path()),
             offline: self.source.offline(),
+            home: Some(self.tooling.join("npm")),
         }
     }
 }

@@ -77,6 +77,18 @@ fn python_child(env: &ToolEnv, program: &Path) -> tokio::process::Command {
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
         .env_remove("VIRTUAL_ENV");
+    // pip reads no configuration file at all (`os.devnull` is pip's "load none") and none of the
+    // user's `PIP_*` variables, whatever their case.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("PIP_")
+        {
+            cmd.env_remove(&key);
+        }
+    }
+    cmd.env("PIP_CONFIG_FILE", "/dev/null");
     camerata_core::apply_semgrep_env(cmd.as_std_mut());
     cmd
 }
@@ -152,8 +164,10 @@ pub async fn ensure_semgrep(env: &ToolEnv) -> Result<PathBuf, ProvisionError> {
         "--no-deps",
         "--index-url",
         PYPI_INDEX,
-        "-r",
+        "--cache-dir",
     ])
+    .arg(env.tooling.join("pip-cache"))
+    .arg("-r")
     .arg(&requirements);
     run_step(pip, "installing semgrep from its hash-locked requirements").await?;
 

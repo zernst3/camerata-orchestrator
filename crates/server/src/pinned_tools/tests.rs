@@ -749,3 +749,92 @@ async fn two_concurrent_installs_of_one_artifact_download_once_and_both_get_it()
     );
     assert!(tools.env.is_installed(Artifact::Ruff));
 }
+
+// ── review round 1: npm and pip never read the user's configuration ──────────────────────────
+
+/// `npm ci` runs with `--ignore-scripts`, Camerata's own npmrc, global config and cache in the
+/// tooling folder, the official registry, and none of the user's `npm_config_*` variables.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn npm_ignores_the_users_config_and_runs_no_package_script() {
+    let _registry = camerata_test_env::EnvGuard::set(
+        "npm_config_registry",
+        "https://registry.acme-mirror.example/",
+    );
+    let _userconfig =
+        camerata_test_env::EnvGuard::set("NPM_CONFIG_USERCONFIG", "/home/acme/.npmrc");
+    let tools = FakeTools::new();
+    provision_tool_set(&tools.env, &needs(&[ScanTool::Eslint], false), true)
+        .await
+        .expect("provisions");
+    let node = tools.entry(Artifact::Node);
+    let env = FakeTools::recorded(&node, "npm-env");
+    let args = FakeTools::recorded(&node, "npm-args");
+    assert!(args.starts_with("ci "), "{args}");
+    assert!(args.contains("--ignore-scripts"), "{args}");
+    assert!(
+        !env.contains("acme-mirror"),
+        "the user's registry leaked:\n{env}"
+    );
+    assert!(
+        !env.contains("/home/acme/.npmrc"),
+        "the user's npmrc leaked:\n{env}"
+    );
+    let npm_home = tools.tooling().join("npm");
+    for (key, want) in [
+        ("npm_config_userconfig", npm_home.join("npmrc")),
+        ("npm_config_globalconfig", npm_home.join("global-npmrc")),
+        ("npm_config_cache", npm_home.join("cache")),
+    ] {
+        assert!(
+            env.lines()
+                .any(|l| l == format!("{key}={}", want.display())),
+            "{key} is not {}:\n{env}",
+            want.display()
+        );
+    }
+    assert!(
+        env.lines()
+            .any(|l| l == "npm_config_registry=https://registry.npmjs.org/"),
+        "{env}"
+    );
+}
+
+/// pip runs with no configuration file at all, its cache in the tooling folder, the official
+/// index, and none of the user's `PIP_*` variables.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn pip_ignores_the_users_config() {
+    let _index = camerata_test_env::EnvGuard::set(
+        "PIP_INDEX_URL",
+        "https://pypi.acme-mirror.example/simple",
+    );
+    let _config = camerata_test_env::EnvGuard::set("PIP_CONFIG_FILE", "/home/acme/pip.conf");
+    let tools = FakeTools::new();
+    provision_tool_set(&tools.env, &needs(&[ScanTool::Semgrep], false), true)
+        .await
+        .expect("provisions");
+    let python = semgrep_bin(tools.tooling())
+        .parent()
+        .unwrap()
+        .join("python");
+    let env = FakeTools::recorded(&python, "pip-env");
+    let args = FakeTools::recorded(&python, "pip-args");
+    assert!(
+        !env.contains("acme-mirror"),
+        "the user's index leaked:\n{env}"
+    );
+    assert!(
+        env.lines().any(|l| l == "PIP_CONFIG_FILE=/dev/null"),
+        "{env}"
+    );
+    assert!(
+        args.contains("--index-url https://pypi.org/simple"),
+        "{args}"
+    );
+    let cache = tools.tooling().join("pip-cache");
+    assert!(
+        args.contains(&format!("--cache-dir {}", cache.display())),
+        "{args}"
+    );
+}
