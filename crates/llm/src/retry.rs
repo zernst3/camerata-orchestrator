@@ -1240,7 +1240,7 @@ mod tests {
         };
         let sleeper = RecordingSleeper::default();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let url = format!("http://127.0.0.1:{port}/v1/messages/batches");
+        let url = format!("http://127.0.0.1:{port}/acme/batches");
         let e = execute_traced(|| client.post(&url), &sleeper, "claude-sonnet-5-5")
             .await
             .err()
@@ -1273,7 +1273,7 @@ mod tests {
         });
         let sleeper = RecordingSleeper::default();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let url = format!("http://127.0.0.1:{port}/v1/messages/batches");
+        let url = format!("http://127.0.0.1:{port}/acme/batches");
         let e = execute_traced(
             || client.post(&url).body("{}"),
             &sleeper,
