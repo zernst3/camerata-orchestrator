@@ -420,7 +420,7 @@ async fn an_intel_mac_is_refused_before_any_model_call_with_one_plain_line() {
             },
         )
         .await;
-        let err = result.err().expect("refused").to_string();
+        let err = result.expect_err("refused").to_string();
         assert_eq!(
             err,
             camerata_server::pinned_tools::platform::INTEL_MAC_REFUSAL,
@@ -435,7 +435,7 @@ async fn an_intel_mac_is_refused_before_any_model_call_with_one_plain_line() {
     let plan =
         run_plan_only_with_tools(args(repo.path(), &export, false), true, &|_| {}, &intel).await;
     assert_eq!(
-        plan.err().expect("a plan is refused too").to_string(),
+        plan.expect_err("a plan is refused too").to_string(),
         camerata_server::pinned_tools::platform::INTEL_MAC_REFUSAL
     );
     assert!(fakes.source.fetched().is_empty(), "nothing was downloaded");

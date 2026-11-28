@@ -689,7 +689,7 @@ fn a_download_over_the_size_cap_is_refused() {
     assert!(fetch::take_chunk(&mut buf, b"67890", 10).is_ok());
     let err = fetch::take_chunk(&mut buf, b"!", 10).expect_err("over the cap");
     assert!(err.contains("10 bytes"), "{err}");
-    assert!(fetch::MAX_DOWNLOAD_BYTES >= 128 * 1024 * 1024);
+    const { assert!(fetch::MAX_DOWNLOAD_BYTES >= 128 * 1024 * 1024) };
 }
 
 #[test]
