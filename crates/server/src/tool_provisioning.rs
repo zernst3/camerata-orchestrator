@@ -143,10 +143,11 @@ pub const TOOLING_DIR_ENV: &str = "CAMERATA_TOOLING_DIR";
 //     over each other ([`acquire_provision_lock`]) — and an install must never be visible
 //     half-finished (the eslint staging + swap below).
 
-/// How long a caller waits for another provisioner's lock before giving up with a disclosed
-/// error. Generous: a cold `npm ci` or a `pip install semgrep` legitimately takes minutes. The
-/// bound exists so a wedged installer cannot hang every later scan forever; the caller turns the
-/// error into a `CoverageNote` and the scan completes without that tool.
+/// How long a caller waits for another provisioner's lock before giving up with an error.
+/// Generous: a cold `npm ci` or a `pip install semgrep` legitimately takes minutes. The bound
+/// exists so a wedged installer cannot hang every later scan forever. The error is a provisioning
+/// failure like any other (#587): before the run it refuses the inspection, during the run it
+/// stops it.
 pub(crate) const PROVISION_LOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Poll interval while waiting on a contended provisioning lock.
@@ -198,8 +199,9 @@ fn test_process_may_not_write(tooling: &Path, real: Option<&Path>, exe: Option<&
 ///
 /// Detection is by executable location rather than `cfg!(test)` so integration-test binaries
 /// (which link the library built WITHOUT `cfg(test)`) are covered by the same rule. The refusal
-/// is a [`ProvisionError`], which every scan caller already turns into a disclosed
-/// `CoverageNote`, so it fails soft exactly like an unavailable tool.
+/// is [`ProvisionError::RealToolingProtected`], which only a cargo test binary can hit: the scan
+/// step discloses the tool as not run and the pre-run provisioning leaves it as it is, so existing
+/// tests that use the product environment keep their behaviour.
 pub(crate) fn refuse_real_tooling_in_test_process(
     tooling: &Path,
     tool: &'static str,

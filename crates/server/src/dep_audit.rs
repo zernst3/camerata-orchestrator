@@ -1129,9 +1129,9 @@ fn given_to_osv(
 }
 
 /// Fold the files that failed to copy into the audit's outcome. When the audit did not run (a
-/// timeout, a spawn or parse error, provisioning), its own note stands as it is and no file is
-/// listed as checked: appending the not-copied text would make that note read as a run that
-/// happened. When it ran, the not-copied text is added, so the run is never read as clean.
+/// timeout, a spawn or parse error, no build of osv-scanner for this machine), its own note
+/// stands as it is and no file is listed as checked: appending the not-copied text would make
+/// that note read as a run that happened. When it ran, the not-copied text is added, so the run is never read as clean.
 fn with_copy_failures(
     repo: &str,
     note: Option<CoverageNote>,

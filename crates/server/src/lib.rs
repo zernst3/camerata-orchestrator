@@ -2762,7 +2762,8 @@ async fn onboard_audit(
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
         // Runs after preview linters so a slow osv-scanner never blocks them.
-        // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
+        // osv-scanner is provisioned first, outside the bound; a provisioning failure stops the
+        // run (#587). Only the scan is bounded, at 60 s; a scan past it is a disclosed note.
         // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
         if run_deterministic {
             use tokio::time::Duration;
@@ -3577,10 +3578,10 @@ pub(crate) async fn start_audit_job(
 
             // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
             //
-            // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
-            // provisioning or scan never blocks them.  A single 60-second hard
-            // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
-            // the step fails soft and the scan completes without dep-audit findings.
+            // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner never
+            // blocks them. osv-scanner is provisioned first, outside the bound; a provisioning
+            // failure fails the job (#587). Only the scan is bounded, at 60 s; a scan past it
+            // is a disclosed note and the scan completes without dep-audit findings.
             //
             // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
             // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
