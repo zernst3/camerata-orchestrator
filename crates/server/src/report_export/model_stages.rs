@@ -62,7 +62,7 @@ pub const OLDER_RUN_NOTE: &str = "This inspection was saved before the model of 
 /// The note of a run that called no model but carried its model findings from an earlier
 /// inspection (an incremental run whose files had not changed).
 pub const CARRIED_ALL_NOTE: &str = "No model was called in this inspection. Its model findings \
-     were carried from an earlier inspection, and that inspection's models are not listed here.";
+     were carried from an earlier inspection. That inspection's models are not listed here.";
 
 /// The note of a run that called models and also carried model findings from an earlier
 /// inspection.
@@ -75,12 +75,28 @@ pub const NO_MODEL_NOTE: &str = "No model was used in this inspection.";
 /// The run's model stages, from its own record. See the module doc.
 pub fn model_stages(report: &crate::onboard::ScanReport) -> ModelStagesJson {
     let multi_repo = report.repos.len() > 1;
-    let stages = match report.ledger.model_stages() {
-        Some(record) => from_record(record, multi_repo),
-        None => return from_older_run(report, multi_repo),
-    };
-    let note = stages.is_empty().then(|| NO_MODEL_NOTE.to_string());
-    ModelStagesJson { stages, note }
+    // An incremental run carries the earlier inspection's model findings for the files that did
+    // not change: those findings came from a model this run did not call.
+    let carried = report
+        .ledger
+        .incremental()
+        .is_some_and(|c| c.carried_findings > 0);
+    match report.ledger.model_stages() {
+        Some(record) if !record.partial => {
+            let stages = from_record(record, multi_repo);
+            let note = match (stages.is_empty(), carried) {
+                (true, true) => Some(CARRIED_ALL_NOTE),
+                (true, false) => Some(NO_MODEL_NOTE),
+                (false, true) => Some(CARRIED_SOME_NOTE),
+                (false, false) => None,
+            };
+            ModelStagesJson {
+                stages,
+                note: note.map(str::to_string),
+            }
+        }
+        later => from_older_run(report, later, multi_repo, carried),
+    }
 }
 
 /// A model stage as the client reads it. The finder is the rule scan passes and the agent finder
@@ -209,7 +225,12 @@ fn from_record(record: &RecordedStageModels, multi_repo: bool) -> Vec<ModelStage
 /// The list from a run saved before its model stages were recorded: the stages the run's
 /// provenance names a model for, and "model not recorded" for each stage the run shows it ran
 /// without naming the model. A stage the saved run gives no sign of is left off.
-fn from_older_run(report: &crate::onboard::ScanReport, multi_repo: bool) -> ModelStagesJson {
+fn from_older_run(
+    report: &crate::onboard::ScanReport,
+    later: Option<&RecordedStageModels>,
+    multi_repo: bool,
+    carried: bool,
+) -> ModelStagesJson {
     let p = &report.provenance;
     let named = |model: &Option<String>| -> Option<String> {
         model
@@ -218,21 +239,47 @@ fn from_older_run(report: &crate::onboard::ScanReport, multi_repo: bool) -> Mode
             .filter(|m| !m.is_empty())
             .map(str::to_string)
     };
-    // `audit_model` is stamped only when a model call was made, so without it nothing ran.
-    let Some(scan_model) = named(&p.audit_model) else {
+    // The stages a newer build ran on this run later (a partial record): each names its model.
+    let later = later.map_or_else(Vec::new, |r| from_record(r, multi_repo));
+    // Provenance stamps the configured calibration and group review models whether or not the
+    // stage ran, so either is listed only when the run's stage record shows its calls. Only the
+    // call count is read there, never a model or a figure.
+    let ran = |stage: Stage| {
+        report.ledger.stage_telemetry().is_some_and(|t| {
+            t.stages
+                .iter()
+                .any(|s| s.stage == stage && s.usage.calls > 0)
+        })
+    };
+    // `audit_model` is stamped only when a model call was made, so without it the scan made none.
+    let scan_model = named(&p.audit_model);
+    if scan_model.is_none() && later.is_empty() {
+        let note = if carried {
+            CARRIED_ALL_NOTE
+        } else {
+            NO_MODEL_NOTE
+        };
         return ModelStagesJson {
             stages: Vec::new(),
-            note: Some(NO_MODEL_NOTE.to_string()),
+            note: Some(note.to_string()),
         };
-    };
+    }
     let mut stages = Vec::new();
     for stage in ClientStage::ALL {
+        if let Some(entry) = later.iter().find(|e| e.stage == stage.key()) {
+            stages.push(entry.clone());
+            continue;
+        }
         // `Some(Some(model))`: ran on a named model; `Some(None)`: ran, model not saved.
         let entry: Option<Option<String>> = match stage {
-            ClientStage::Finder => Some(Some(scan_model.clone())),
-            ClientStage::GroupReview => named(&p.group_review_model).map(Some),
+            ClientStage::Finder => scan_model.clone().map(Some),
+            ClientStage::GroupReview => named(&p.group_review_model)
+                .filter(|_| ran(Stage::GroupReview))
+                .map(Some),
             ClientStage::CloneCheck => named(&p.clone_judge_model).map(Some),
-            ClientStage::Calibration => named(&p.calibration_model).map(Some),
+            ClientStage::Calibration => named(&p.calibration_model)
+                .filter(|_| ran(Stage::Calibration))
+                .map(Some),
             // Each stored pair is a model's answer.
             ClientStage::DuplicateCheck => {
                 (!report.ledger.duplicate_checks().pairs.is_empty()).then_some(None)
@@ -253,9 +300,14 @@ fn from_older_run(report: &crate::onboard::ScanReport, multi_repo: bool) -> Mode
             None => {}
         }
     }
+    let note = if carried {
+        format!("{OLDER_RUN_NOTE} {CARRIED_SOME_NOTE}")
+    } else {
+        OLDER_RUN_NOTE.to_string()
+    };
     ModelStagesJson {
         stages,
-        note: Some(OLDER_RUN_NOTE.to_string()),
+        note: Some(note),
     }
 }
 

@@ -2593,14 +2593,21 @@ options and the deep compliance and security review. Each line also says whether
 batch or live, and the fix text line says how many findings use the rule's standard fix instead of
 a fix written for the codebase. A model the CLI backend was asked for is marked "(requested)",
 because the CLI does not confirm which model answered. A stage that made no model call is left
-off; a run that called no model says "No model was used in this inspection." The workbook's Start
+off; a run that called no model says "No model was used in this inspection." An incremental run
+that carried model findings from an earlier inspection never says that: when it called no model
+it says its model findings were carried from an earlier inspection, whose models are not listed,
+and when it called some it says the list names only the models this inspection called. The workbook's Start
 here sheet prints the same list under the same heading, one row per stage, and
 `json/inspection.json` carries it as `provenance.model_stages`. The list is read from the run's own
 record, never from the current settings, so re-exporting a saved run names the models that run
-used. A run saved before this record existed (before #584) names the finder, calibration, group
-review and clone check models it saved, shows "model not recorded" for the fix text, the duplicate
-check and the deep review when the run shows they ran, and says the run was saved before each
-stage's model was recorded. Re-exporting such a run makes no model call.
+used. A run saved before this record existed (before #584) names the finder and clone check models
+it saved, and the calibration and group review models only when its stage record shows those stages
+made calls (the saved run names the configured model even when the stage never ran). It shows "model
+not recorded" for the fix text, the duplicate check and the deep review when the run shows they
+ran, and says the run was saved before each stage's model was recorded. A stage a newer build runs
+on such a run later (the duplicate check, the group review, or a clone check part that
+`camerata inspect --recheck-saved` asks again) names the model it ran on. Re-exporting such a run
+makes no model call.
 
 Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
 Anthropic API, is the default and uses the Anthropic key the operator saved in the app (Settings), with the

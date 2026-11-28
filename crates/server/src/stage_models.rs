@@ -111,7 +111,24 @@ impl RecordedStageModels {
     /// Add `calls` calls of `stage` on the model keyed `model` (named as
     /// [`crate::stage_telemetry::model_key_of`] names it) in `mode`: a call counted outside the
     /// stage meter, such as a recheck's re-asked part. Adds to what the stage already holds.
-    pub fn add_calls(&mut self, _stage: Stage, _model: &str, _mode: &str, _calls: u64) {}
+    pub fn add_calls(&mut self, stage: Stage, model: &str, mode: &str, calls: u64) {
+        if calls == 0 {
+            return;
+        }
+        if self.stage(stage).is_none() {
+            self.stages.push(StageModelRecord {
+                stage,
+                models: BTreeMap::new(),
+                modes: BTreeMap::new(),
+            });
+            self.stages
+                .sort_by_key(|s| Stage::ALL.iter().position(|a| *a == s.stage));
+        }
+        if let Some(record) = self.stages.iter_mut().find(|s| s.stage == stage) {
+            *record.models.entry(model.to_string()).or_default() += calls;
+            *record.modes.entry(mode.to_string()).or_default() += calls;
+        }
+    }
 
     /// The record of `stage`, when the run made a call in it.
     pub fn stage(&self, stage: Stage) -> Option<&StageModelRecord> {

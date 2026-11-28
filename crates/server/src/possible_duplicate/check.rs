@@ -428,11 +428,15 @@ pub async fn check_possible_duplicates(
             .sort_by_key(|s| Stage::ALL.iter().position(|a| *a == s.stage));
         report.ledger.record_stage_telemetry(telemetry);
         // #584: this stage's models join the run's record. A run saved before the record existed
-        // keeps none, so its export still says what it cannot name.
-        if let Some(mut stages) = report.ledger.model_stages().cloned() {
-            stages.absorb(&fresh);
-            report.ledger.record_model_stages(stages);
-        }
+        // starts a partial one, so this stage names its model and the export lists the run's
+        // other stages as an older run's.
+        let mut stages = report
+            .ledger
+            .model_stages()
+            .cloned()
+            .unwrap_or_else(crate::stage_models::RecordedStageModels::partial);
+        stages.absorb(&fresh);
+        report.ledger.record_model_stages(stages);
     }
 
     let stored = DuplicateChecks {
