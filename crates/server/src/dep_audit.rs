@@ -1179,6 +1179,54 @@ pub fn record_audited_files(
     }
 }
 
+/// [`run_dep_audit_listed`] under a time limit for the SCAN (the app's 60 s bound).
+///
+/// osv-scanner is provisioned FIRST, outside the limit: a slow first download is never cut short
+/// into a "timed out" coverage note, and a provisioning failure is a [`ToolProvisioningStop`] (the
+/// run-integrity rule), never a note. Only the scan itself is bounded; a scan past the limit is the
+/// disclosed timeout note it always was.
+pub async fn run_dep_audit_bounded(
+    repo: &str,
+    repo_dir: &Path,
+    scope: &RepoScope,
+    tools: &crate::pinned_tools::ToolEnv,
+    limit: Duration,
+) -> Result<
+    (
+        Vec<Finding>,
+        Option<CoverageNote>,
+        Vec<crate::scan_ledger::AuditedDependencyFile>,
+    ),
+    ToolProvisioningStop,
+> {
+    let disabled = std::env::var(DISABLE_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !disabled {
+        if let Err(mut note) = pinned_osv_scanner(repo, tools).await? {
+            note.repo.get_or_insert_with(|| repo.to_string());
+            return Ok((Vec::new(), Some(note), Vec::new()));
+        }
+    }
+    match tokio::time::timeout(limit, run_dep_audit_listed(repo, repo_dir, scope, tools)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Ok((Vec::new(), Some(timed_out_note(repo, limit)), Vec::new())),
+    }
+}
+
+/// The note for a dependency scan that ran past its limit.
+fn timed_out_note(repo: &str, limit: Duration) -> CoverageNote {
+    CoverageNote {
+        tool_failed: false,
+        repo: Some(repo.to_string()),
+        tool: TOOL_NAME.to_string(),
+        message: format!(
+            "dependency audit (osv-scanner) timed out after {} s for {repo}",
+            limit.as_secs()
+        ),
+    }
+}
+
 /// Run the dependency audit (`osv-scanner --format json -r <mirror>`) for one repo with the
 /// pinned osv-scanner from `tools` (#587), and return the findings, a coverage note when the
 /// audit could not run or covered less than the repo has, and the dependency files osv-scanner
@@ -1954,6 +2002,54 @@ mod tests {
             stop.to_string().starts_with("the inspection stopped"),
             "{stop}"
         );
+    }
+
+    /// The app bounds the dependency audit at 60 s. The bound is for the SCAN: a slow first
+    /// download of osv-scanner is not cut short into a "timed out" note, and a download that fails
+    /// stops the run (the run-integrity rule), never a coverage note.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_scan_time_limit_never_turns_a_provisioning_problem_into_a_note() {
+        let _on = camerata_test_env::EnvGuard::remove(DISABLE_ENV_VAR);
+        let repo = tempfile::tempdir().unwrap();
+        let limit = Duration::from_millis(100);
+
+        let slow = crate::pinned_tools::fixtures::FakeTools::new();
+        slow.source.delay_every_fetch(Duration::from_millis(600));
+        let (_, note, _) = run_dep_audit_bounded(
+            "acme/test",
+            repo.path(),
+            &RepoScope::none(),
+            &slow.env,
+            limit,
+        )
+        .await
+        .expect("a slow download is not a stop");
+        assert!(
+            note.as_ref()
+                .is_none_or(|n| !n.message.contains("timed out")),
+            "the download was cut short by the scan's limit: {note:?}"
+        );
+        assert!(slow
+            .env
+            .is_installed(crate::pinned_tools::Artifact::OsvScanner));
+
+        let broken = crate::pinned_tools::fixtures::FakeTools::new();
+        broken.source.delay_every_fetch(Duration::from_millis(600));
+        broken
+            .source
+            .fail_everything("network unreachable (fixture)");
+        let stop = run_dep_audit_bounded(
+            "acme/test",
+            repo.path(),
+            &RepoScope::none(),
+            &broken.env,
+            limit,
+        )
+        .await
+        .expect_err("a failed download stops the run");
+        assert_eq!(stop.tool, "osv-scanner");
+        assert!(stop.reason.contains("unreachable"), "{}", stop.reason);
     }
 
     #[tokio::test]

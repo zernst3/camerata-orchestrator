@@ -4868,8 +4868,13 @@ def get_user_safe_constant():
     /// skip decision honest instead of letting the refusal surface as a confusing test failure.
     async fn cached_eslint_workspace_with_react_hooks_plugin() -> Option<std::path::PathBuf> {
         let tools = crate::pinned_tools::ToolEnv::product().ok()?;
-        // eslint runs on the pinned Node.js (#587): without it the live test skips.
+        // eslint runs on the pinned Node.js (#587): without it the live test skips, and says so.
         if !tools.is_installed(crate::pinned_tools::Artifact::Node) {
+            eprintln!(
+                "skipping a live eslint test: the pinned Node.js {} is not installed in {}",
+                crate::pinned_tools::pins::NODE_VERSION,
+                tools.tooling.display()
+            );
             return None;
         }
         let tooling = tools.tooling;
@@ -5210,8 +5215,13 @@ export function Thing({ id }) {
     /// triggering (or racing) a re-provision of the shared tree.
     async fn cached_eslint_workspace() -> Option<std::path::PathBuf> {
         let tools = crate::pinned_tools::ToolEnv::product().ok()?;
-        // eslint runs on the pinned Node.js (#587): without it the live test skips.
+        // eslint runs on the pinned Node.js (#587): without it the live test skips, and says so.
         if !tools.is_installed(crate::pinned_tools::Artifact::Node) {
+            eprintln!(
+                "skipping a live eslint test: the pinned Node.js {} is not installed in {}",
+                crate::pinned_tools::pins::NODE_VERSION,
+                tools.tooling.display()
+            );
             return None;
         }
         let tooling = tools.tooling;

@@ -2765,7 +2765,7 @@ async fn onboard_audit(
         // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
         // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
         if run_deterministic {
-            use tokio::time::{timeout, Duration};
+            use tokio::time::Duration;
             let dep_audit_timeout = Duration::from_secs(60);
             // Pass-1 W1 seal fix: snapshotted so the whole loop's net additions get ONE ledger
             // stage entry (a no-op when every repo's dep-audit found nothing new) — see
@@ -2780,28 +2780,23 @@ async fn onboard_audit(
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let repo_scope = scan_scope.for_repo(spec);
-                let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope, &tools);
-                let (dep_findings, dep_note, dep_files) =
-                    match timeout(dep_audit_timeout, run).await {
-                        Ok(Ok(result)) => result,
-                        Ok(Err(stop)) => {
-                            report.ai_error = Some(stop.to_string());
-                            report.message = Some(stop.to_string());
-                            return report;
-                        }
-                        Err(_elapsed) => (
-                            Vec::new(),
-                            Some(crate::onboard::CoverageNote {
-                                tool_failed: false,
-                                repo: None,
-                                tool: "osv-scanner".to_string(),
-                                message: format!(
-                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                            ),
-                            }),
-                            Vec::new(),
-                        ),
-                    };
+                // osv-scanner is provisioned outside the 60 s bound; a failure there stops the run
+                // (#587, the run-integrity rule). Only the scan is bounded.
+                let run = crate::dep_audit::run_dep_audit_bounded(
+                    spec,
+                    dir,
+                    &repo_scope,
+                    &tools,
+                    dep_audit_timeout,
+                );
+                let (dep_findings, dep_note, dep_files) = match run.await {
+                    Ok(result) => result,
+                    Err(stop) => {
+                        report.ai_error = Some(stop.to_string());
+                        report.message = Some(stop.to_string());
+                        return report;
+                    }
+                };
                 let dep_note = dep_note.map(|mut note| {
                     note.repo.get_or_insert_with(|| spec.to_string());
                     note
@@ -3590,7 +3585,7 @@ pub(crate) async fn start_audit_job(
             // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
             // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
             if run_deterministic {
-                use tokio::time::{timeout, Duration};
+                use tokio::time::Duration;
                 let dep_audit_timeout = Duration::from_secs(60);
                 // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
                 // path — one ledger stage entry for the whole loop's net additions.
@@ -3602,28 +3597,22 @@ pub(crate) async fn start_audit_job(
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let repo_scope = scan_scope.for_repo(spec);
-                    let run =
-                        crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope, &tools);
-                    let (dep_findings, dep_note, dep_files) =
-                        match timeout(dep_audit_timeout, run).await {
-                            Ok(Ok(result)) => result,
-                            Ok(Err(stop)) => {
-                                body_jobs.fail(&body_jid, stop.to_string());
-                                return;
-                            }
-                            Err(_elapsed) => (
-                                Vec::new(),
-                                Some(crate::onboard::CoverageNote {
-                                    tool_failed: false,
-                                    repo: None,
-                                    tool: "osv-scanner".to_string(),
-                                    message: format!(
-                                    "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                                ),
-                                }),
-                                Vec::new(),
-                            ),
-                        };
+                    // osv-scanner is provisioned outside the 60 s bound; a failure there stops the run
+                    // (#587, the run-integrity rule). Only the scan is bounded.
+                    let run = crate::dep_audit::run_dep_audit_bounded(
+                        spec,
+                        dir,
+                        &repo_scope,
+                        &tools,
+                        dep_audit_timeout,
+                    );
+                    let (dep_findings, dep_note, dep_files) = match run.await {
+                        Ok(result) => result,
+                        Err(stop) => {
+                            body_jobs.fail(&body_jid, stop.to_string());
+                            return;
+                        }
+                    };
                     let dep_note = dep_note.map(|mut note| {
                         note.repo.get_or_insert_with(|| spec.to_string());
                         note
