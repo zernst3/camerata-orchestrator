@@ -1003,6 +1003,9 @@ pub struct RunStore {
     /// store is dropped unless [`RunStore::keep_changes`] was called: a recheck that is refused
     /// leaves the saved run as it found it.
     restore_on_drop: Mutex<Option<Vec<u8>>>,
+    /// Called on every reply the provider itself gave this process (never a replay from the run's
+    /// store): the run's health record counts only these ([`RunStore::on_provider_answer`]).
+    answer_hooks: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
 
 pub(crate) struct StoreState {
@@ -1086,6 +1089,29 @@ fn plan_for(repos: &[(String, PathBuf)], include_alternatives: bool) -> Vec<Part
 }
 
 impl RunStore {
+    /// Call `hook` on every reply the provider itself gives this process through the run's
+    /// journal (a call it made, a batch submitted, polled or fetched), and never on a reply it
+    /// replays from what the run already holds. The run's health record links itself here, so a
+    /// replay never reads as the provider being reachable (#582).
+    pub fn on_provider_answer(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        self.answer_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(hook);
+    }
+
+    /// The provider itself answered ([`Self::on_provider_answer`]).
+    pub(crate) fn note_provider_answer(&self) {
+        for hook in self
+            .answer_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            hook();
+        }
+    }
+
     /// Begin a new run: the folder, the record with every part pending and the lock, all written
     /// before any work starts.
     pub fn create(new: NewRun) -> Result<Arc<Self>, RunStoreError> {
@@ -1153,6 +1179,7 @@ impl RunStore {
             rerun_misses: None,
             pending_rerun: Mutex::new(None),
             restore_on_drop: Mutex::new(None),
+            answer_hooks: Mutex::new(Vec::new()),
         });
         store.persist()?;
         Ok(store)
@@ -1202,6 +1229,7 @@ impl RunStore {
             rerun_misses,
             pending_rerun: Mutex::new(None),
             restore_on_drop: Mutex::new(None),
+            answer_hooks: Mutex::new(Vec::new()),
         });
         store.persist()?;
         Ok(store)

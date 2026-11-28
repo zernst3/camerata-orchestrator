@@ -752,6 +752,10 @@ fn record_entry(store: &RunStore, call: &FreshCall, entry: CallEntry) {
 }
 
 fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResponse>) {
+    if result.is_ok() {
+        // The provider itself answered this one (a replay never comes here).
+        store.note_provider_answer();
+    }
     let entry = match result {
         Ok(resp) => CallEntry {
             attempt: 0,
@@ -1229,6 +1233,7 @@ impl BatchApi for JournalBatchApi {
                 None => {
                     let custom_ids = again.iter().map(|i| i.custom_id.clone()).collect();
                     let batch_id = self.inner.submit(again).await?;
+                    self.store.note_provider_answer();
                     let record = BatchFile {
                         key: key2.clone(),
                         n: n2,
@@ -1255,6 +1260,7 @@ impl BatchApi for JournalBatchApi {
         }
         let custom_ids = items.iter().map(|i| i.custom_id.clone()).collect();
         let batch_id = self.inner.submit(items).await?;
+        self.store.note_provider_answer();
         let record = BatchFile {
             key: key.clone(),
             n,
@@ -1281,7 +1287,9 @@ impl BatchApi for JournalBatchApi {
                 request_counts: BatchRequestCounts::default(),
             });
         }
-        self.inner.poll(batch_id).await
+        let status = self.inner.poll(batch_id).await?;
+        self.store.note_provider_answer();
+        Ok(status)
     }
 
     async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
@@ -1293,6 +1301,7 @@ impl BatchApi for JournalBatchApi {
             return Ok(rows.iter().map(StoredRow::replayed).collect());
         }
         let rows = self.inner.fetch(batch_id, ttl).await?;
+        self.store.note_provider_answer();
         let found = self.slot_of(batch_id);
         let Some(slot) = found else {
             return Ok(rows);

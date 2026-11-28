@@ -142,6 +142,9 @@ pub struct RunHealth {
     last_success: Mutex<Option<std::time::Instant>>,
     /// Called once, when the run first stops ([`Self::on_trip`]).
     trip_hooks: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
+    /// Set once the record counts only the provider's own answers
+    /// ([`Self::link_provider_answers`]): a reply recorded on the meter may be a replay.
+    linked: AtomicBool,
     clock: Clock,
 }
 
@@ -174,6 +177,7 @@ impl RunHealth {
             successes: std::sync::atomic::AtomicU64::new(0),
             last_success: Mutex::new(None),
             trip_hooks: Mutex::new(Vec::new()),
+            linked: AtomicBool::new(false),
             clock,
         }
     }
@@ -194,8 +198,25 @@ impl RunHealth {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// A model call succeeded: the provider is reachable, so the streak starts over.
+    /// A reply was recorded on the run's meter. When this record is linked to the run's journal
+    /// ([`Self::link_provider_answers`]) a recorded reply may be one the journal replayed, which
+    /// proves nothing about the provider: only [`Self::note_provider_answer`] counts then.
+    /// Otherwise (no journal, so no replay) the reply is the provider's own answer.
     pub fn note_success(&self) {
+        if self.linked.load(Ordering::SeqCst) {
+            return;
+        }
+        self.note_provider_answer();
+    }
+
+    /// Count only the provider's own answers from now on: the run's journal reports each one.
+    pub fn link_provider_answers(&self) {
+        self.linked.store(true, Ordering::SeqCst);
+    }
+
+    /// The provider itself answered a call (never a replay): the provider is reachable, so the
+    /// streak starts over. The one count of successes ([`Self::successes`]).
+    pub fn note_provider_answer(&self) {
         *self.streak_lock() = Streak::default();
         *self
             .last_success

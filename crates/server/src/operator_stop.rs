@@ -186,6 +186,11 @@ impl RunControl {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The run's folder, once it is attached.
+    pub fn store(&self) -> Option<Arc<crate::run_store::RunStore>> {
+        self.store_lock().clone()
+    }
+
     /// The run's saved id, once its folder exists.
     pub fn run_id(&self) -> Option<String> {
         self.store_lock().as_ref().map(|s| s.run_id())

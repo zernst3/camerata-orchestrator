@@ -46,7 +46,7 @@ pub struct UsageMeter {
     admission: tokio::sync::Notify,
     /// The outage stop: a run-wide counter of consecutive transport failures. Once it trips,
     /// admission refuses every new part. See [`crate::run_health`].
-    health: crate::run_health::RunHealth,
+    health: std::sync::Arc<crate::run_health::RunHealth>,
     /// The cost checkpoint's tally and stop (see [`crate::cost_checkpoint`]).
     checkpoint: std::sync::Mutex<crate::cost_checkpoint::CheckpointState>,
     /// Where the cockpit's job state hears of each checkpoint.
@@ -119,6 +119,13 @@ impl UsageMeter {
         // A run's outage stop ends every network wait and refuses every later send on the run's
         // control (#582): a call that is still waiting must not send after the run stopped.
         if let Some(control) = crate::operator_stop::current_run_control() {
+            // One source of truth for "the provider answered" (#582): the run's journal reports
+            // the provider's own replies; a replay recorded on this meter is not one.
+            if let Some(store) = control.store() {
+                meter.health.link_provider_answers();
+                let health = meter.health.clone();
+                store.on_provider_answer(Box::new(move || health.note_provider_answer()));
+            }
             meter
                 .health
                 .on_trip(Box::new(move || control.note_outage_stop()));
@@ -134,7 +141,7 @@ impl UsageMeter {
     /// TEST SUPPORT: this meter with `health` as its outage counter (one on an injected clock).
     #[cfg(test)]
     pub(crate) fn with_health(mut self, health: crate::run_health::RunHealth) -> Self {
-        self.health = health;
+        self.health = std::sync::Arc::new(health);
         self
     }
 

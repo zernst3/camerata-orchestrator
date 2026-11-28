@@ -679,6 +679,9 @@ impl ApiPieceAgent {
         }
         if let Some(meter) = &self.meter {
             meter.record_stage(Stage::Finder, &counted);
+            // The agent's turns do not go through the run's journal: this reply came from the
+            // provider itself, so it is the provider's answer the run's health record counts.
+            meter.health().note_provider_answer();
         }
         usage_of(&counted)
     }

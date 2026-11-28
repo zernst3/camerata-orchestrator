@@ -574,6 +574,9 @@ pub(super) fn meter_turns(shared: &Shared<'_>, run: &AgentRun) {
     }
     for usage in &run.usage {
         m.record_stage(Stage::Finder, &response_of(shared.options, usage));
+        // A turn the agent ran now (a stored piece is recorded as resumed, never here): the
+        // provider's own answer, outside the run's journal.
+        m.health().note_provider_answer();
     }
     if let AgentStop::Failed(why) = &run.stop {
         m.record_failed(Stage::Finder, &anyhow::anyhow!("{why}"));
