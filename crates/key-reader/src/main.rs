@@ -34,8 +34,11 @@ enum Miss {
 }
 
 /// `errSecItemNotFound`.
+// Used by the macOS reader only (and its tests); off macOS the reader is always a miss.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn classify_error(code: i32) -> Miss {
     if code == ERR_SEC_ITEM_NOT_FOUND {
         Miss::NoEntry
